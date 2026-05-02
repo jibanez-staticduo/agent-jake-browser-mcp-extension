@@ -3,14 +3,12 @@
  * Tab list for connecting to browser tabs.
  * Uses Pinia stores for state management.
  */
-import { useAuthStore, useStatusStore } from '../stores';
+import { useStatusStore } from '../stores';
 import type { TabInfo } from '../types';
 
-const auth = useAuthStore();
 const status = useStatusStore();
 
 function handleTabClick(tab: TabInfo) {
-  if (!auth.state.isAuthenticated) return;
   status.connectTab(tab.id, tab.url || '');
 }
 
@@ -22,7 +20,7 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
 </script>
 
 <template>
-  <div class="tab-selector" :class="{ 'auth-required': !auth.state.isAuthenticated }">
+  <div class="tab-selector">
     <div class="section-title">Connect to Tab</div>
 
     <div class="tab-list">
@@ -62,9 +60,6 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
       </template>
     </div>
 
-    <div v-if="!auth.state.isAuthenticated" class="auth-overlay">
-      Sign in to connect
-    </div>
   </div>
 </template>
 
@@ -161,30 +156,5 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
   border-radius: 20px;
   font-weight: 500;
   text-transform: uppercase;
-}
-
-.auth-required {
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-.auth-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: var(--bg-deep);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-tertiary);
-  font-size: 12px;
-  border-radius: var(--radius-md);
-  opacity: 0.95;
-}
-
-.tab-selector:not(.auth-required) .auth-overlay {
-  display: none;
 }
 </style>

@@ -12,14 +12,14 @@ export function createQueryHandlers(ctx: HandlerContext): HandlerMap {
       const { ref } = schemas.browser_get_text.parse(payload);
       const selector = await getSelector(ref);
       const text = await sendToContent<string>('getText', { selector });
-      return { text };
+      return text;
     },
 
     browser_get_attribute: async (payload) => {
       const { ref, attribute } = schemas.browser_get_attribute.parse(payload);
       const selector = await getSelector(ref);
       const value = await sendToContent<string | null>('getAttribute', { selector, attribute });
-      return { value };
+      return value;
     },
 
     browser_is_visible: async (payload) => {

@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -16,11 +20,28 @@
     "rootDir": "./src",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": [
+        "src/*"
+      ]
     },
     "jsx": "preserve",
     "jsxImportSource": "vue"
   },
-  "include": ["src/**/*", "src/**/*.vue"],
-  "exclude": ["node_modules", "dist", "tests"]
+  "include": [
+    "src/**/*",
+    "src/**/*.vue"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/background/api-client.ts",
+    "src/background/auth-service.ts",
+    "src/background/pusher-polyfill.ts",
+    "src/background/reverb-client.ts",
+    "src/popup/components/AuthForm.vue",
+    "src/popup/components/UserCard.vue",
+    "src/popup/preview",
+    "src/popup/stores/auth.ts",
+    "tests"
+  ]
 }

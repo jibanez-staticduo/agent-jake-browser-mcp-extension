@@ -27,7 +27,11 @@ export type ToolName =
   | 'browser_get_attribute'
   | 'browser_is_visible'
   | 'browser_wait_for_element'
-  | 'browser_highlight';
+  | 'browser_highlight'
+  | 'browser_evaluate'
+  | 'browser_get_html'
+  | 'browser_iframe_eval'
+  | 'browser_iframe_click';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {

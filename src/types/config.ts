@@ -3,25 +3,16 @@
  */
 
 export const CONFIG = {
-  // Laravel API server
-  // For local testing: 'http://localhost:8000'
-  // For remote/ngrok: 'https://jakes.ngrok.pizza'
-  API_URL: 'http://localhost:8000',
-
-  // Laravel Reverb WebSocket server
-  // For local testing: 'localhost'
-  // For remote: must match API domain or use separate ngrok tunnel
-  REVERB_HOST: 'localhost',
-  REVERB_PORT: 8085,
-  REVERB_APP_KEY: 'sortie-extension-key',
-
-  // WebSocket connection to browser-mcp server (local only)
-  WS_PORT: 8765,
-  WS_HOST: 'localhost',
+  // WebSocket connection to browser-mcp server
+  WS_PORT: Number(import.meta.env.VITE_WS_PORT ?? 443),
+  WS_HOST: import.meta.env.VITE_WS_HOST ?? 'agent-browser.staticduo.com',
+  WS_PATH: import.meta.env.VITE_WS_PATH ?? '',
+  WS_SECURE: (import.meta.env.VITE_WS_SECURE ?? 'true') === 'true',
 
   // Reconnection settings
   RECONNECT_INTERVAL_MS: 5000,  // Check every 5 seconds (fixed, no backoff)
   MAX_RECONNECT_ATTEMPTS: 0,    // 0 = unlimited retries
+  WS_HEARTBEAT_INTERVAL_MS: 25000,
 
   // Timeouts
   MESSAGE_TIMEOUT_MS: 30000,

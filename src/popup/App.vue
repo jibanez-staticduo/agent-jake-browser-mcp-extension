@@ -4,26 +4,21 @@
  * Uses Pinia stores for centralized state management.
  */
 import { onMounted, onUnmounted } from 'vue';
-import { useAuthStore, useStatusStore, useActivityStore } from './stores';
-import AuthForm from './components/AuthForm.vue';
-import UserCard from './components/UserCard.vue';
+import { useStatusStore, useActivityStore } from './stores';
 import ConnectionStatus from './components/ConnectionStatus.vue';
 import TabSelector from './components/TabSelector.vue';
 import ActivityLog from './components/ActivityLog.vue';
 import ActivityModal from './components/ActivityModal.vue';
 
-const auth = useAuthStore();
 const status = useStatusStore();
 const activity = useActivityStore();
 
 onMounted(() => {
-  auth.startPolling();
   status.startPolling();
   activity.startPolling();
 });
 
 onUnmounted(() => {
-  auth.stopPolling();
   status.stopPolling();
   activity.stopPolling();
 });
@@ -31,10 +26,12 @@ onUnmounted(() => {
 
 <template>
   <div class="container">
-    <!-- Auth Section -->
-    <div class="auth-section">
-      <AuthForm v-if="!auth.state.isAuthenticated" />
-      <UserCard v-else />
+    <div class="local-header">
+      <div>
+        <div class="eyebrow">Local MCP Mode</div>
+        <h1>Agent Jake Browser</h1>
+      </div>
+      <span class="endpoint">wss://agent-browser.staticduo.com</span>
     </div>
 
     <!-- Connection Status Panel -->
@@ -53,7 +50,7 @@ onUnmounted(() => {
 
     <!-- Footer -->
     <div class="footer">
-      WebSocket: localhost:8765 · Reverb: localhost:8085 ·
+      WebSocket: agent-browser.staticduo.com · Local MCP only ·
       <a href="https://github.com/SnakeO/agent-jake-browser-mcp-extension" target="_blank">Docs</a>
     </div>
   </div>
@@ -66,8 +63,40 @@ onUnmounted(() => {
   min-height: 100vh;
 }
 
-.auth-section {
+.local-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 16px;
+  padding: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+
+.eyebrow {
+  font-size: 10px;
+  color: var(--accent-primary);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+h1 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.endpoint {
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  line-height: 1.4;
 }
 
 .section {

@@ -174,6 +174,16 @@ class AuthService {
   }
 
   /**
+   * Google login is not implemented by the bundled backend API client.
+   */
+  async googleLogin(): Promise<LoginResponse> {
+    return {
+      success: false,
+      error: 'Google login is not configured for this extension build',
+    };
+  }
+
+  /**
    * Logout and clear session.
    */
   async logout(): Promise<void> {

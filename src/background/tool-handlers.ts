@@ -147,6 +147,10 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Evaluate JS via CDP (${String(p?.code || '').length} chars)`;
     case 'browser_get_html':
       return `Get page HTML (${(r?.html as string)?.length || 0} chars)`;
+    case 'browser_iframe_eval':
+      return `Evaluate JS in iframe ${p?.iframeSelector || 'unknown'} (${String(p?.code || '').length} chars)`;
+    case 'browser_iframe_click':
+      return `Click ${p?.targetSelector || 'unknown'} inside iframe ${p?.iframeSelector || 'unknown'}`;
     case 'browser_resize_viewport':
       return `Resize to ${p?.width}x${p?.height}`;
     case 'browser_upload_file':

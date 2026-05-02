@@ -27,7 +27,7 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_get_console_logs: async () => {
-      return { logs: [] };
+      return [];
     },
 
     browser_evaluate: async (payload) => {
@@ -57,6 +57,150 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
         log.error('[browser_evaluate] CDP evaluation failed:', error);
         throw error;
       }
+    },
+
+
+    browser_iframe_eval: async (payload) => {
+      const { iframeSelector, code } = schemas.browser_iframe_eval.parse(payload);
+      log.info('[browser_iframe_eval] Evaluating in iframe:', iframeSelector);
+
+      const expression = `(() => {
+        let iframe = document.querySelector(${JSON.stringify(iframeSelector)});
+        if (iframe && !('contentWindow' in iframe)) {
+          iframe = iframe.querySelector('iframe, frame') || iframe;
+        }
+        if (!iframe || !('contentWindow' in iframe)) {
+          throw new Error('Iframe not found or not frame-like: ${iframeSelector.replace(/'/g, "\\'")}');
+        }
+        const win = iframe.contentWindow;
+        if (!win) {
+          throw new Error('Iframe has no contentWindow: ${iframeSelector.replace(/'/g, "\\'")}');
+        }
+        return win.eval(${JSON.stringify(code)});
+      })()`;
+
+      const result = await ctx.tabManager.sendDebuggerCommand<{
+        result: { type: string; value?: unknown; description?: string };
+        exceptionDetails?: { text: string; exception?: { description: string } };
+      }>('Runtime.evaluate', {
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+
+      if (result.exceptionDetails) {
+        const errMsg = result.exceptionDetails.exception?.description ||
+                       result.exceptionDetails.text ||
+                       'Unknown iframe evaluation error';
+        throw new Error(`Iframe evaluation failed: ${errMsg}`);
+      }
+
+      return result.result?.value ?? null;
+    },
+
+    browser_iframe_click: async (payload) => {
+      const { iframeSelector, targetSelector, waitForNavigation, timeout } = schemas.browser_iframe_click.parse(payload);
+      log.info('[browser_iframe_click] Clicking in iframe:', iframeSelector, targetSelector);
+
+      const expression = `async () => {
+        let iframe = document.querySelector(${JSON.stringify(iframeSelector)});
+        if (iframe && !('contentWindow' in iframe)) {
+          iframe = iframe.querySelector('iframe, frame') || iframe;
+        }
+        if (!iframe || !('contentWindow' in iframe)) {
+          throw new Error('Iframe not found or not frame-like: ${iframeSelector.replace(/'/g, "\\'")}');
+        }
+        const win = iframe.contentWindow;
+        const doc = iframe.contentDocument || win?.document;
+        if (!win || !doc) {
+          throw new Error('Iframe document is not accessible: ${iframeSelector.replace(/'/g, "\\'")}');
+        }
+        const target = doc.querySelector(${JSON.stringify(targetSelector)});
+        if (!target) {
+          throw new Error('Target not found in iframe: ${targetSelector.replace(/'/g, "\\'")}');
+        }
+
+        const beforeUrl = win.location.href;
+        const beforeReadyState = doc.readyState;
+        const beforeText = (target.textContent || '').trim();
+
+        target.scrollIntoView({ block: 'center', inline: 'center' });
+        if (typeof target.focus === 'function') {
+          target.focus({ preventScroll: true });
+        }
+
+        const rect = target.getBoundingClientRect();
+        const clientX = Math.max(0, rect.left + rect.width / 2);
+        const clientY = Math.max(0, rect.top + rect.height / 2);
+        const eventInit = { bubbles: true, cancelable: true, view: win, clientX, clientY, button: 0 };
+        target.dispatchEvent(new win.MouseEvent('mouseover', eventInit));
+        target.dispatchEvent(new win.MouseEvent('mousemove', eventInit));
+        target.dispatchEvent(new win.MouseEvent('mousedown', eventInit));
+        target.dispatchEvent(new win.MouseEvent('mouseup', eventInit));
+        target.dispatchEvent(new win.MouseEvent('click', eventInit));
+
+        if (typeof target.click === 'function') {
+          target.click();
+        }
+
+        if (${waitForNavigation ? 'true' : 'false'}) {
+          const timeoutMs = ${timeout};
+          const startedAt = Date.now();
+          await new Promise((resolve) => {
+            const check = () => {
+              let currentDoc;
+              try {
+                currentDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                const changedUrl = iframe.contentWindow?.location.href !== beforeUrl;
+                const changedDoc = currentDoc && currentDoc !== doc;
+                const ready = !currentDoc || currentDoc.readyState === 'complete' || currentDoc.readyState === 'interactive';
+                if ((changedUrl || changedDoc) && ready) {
+                  resolve(undefined);
+                  return;
+                }
+              } catch (_err) {
+                resolve(undefined);
+                return;
+              }
+              if (Date.now() - startedAt >= timeoutMs) {
+                resolve(undefined);
+                return;
+              }
+              setTimeout(check, 100);
+            };
+            setTimeout(check, 100);
+          });
+        }
+
+        return {
+          clicked: true,
+          iframeSelector: ${JSON.stringify(iframeSelector)},
+          targetSelector: ${JSON.stringify(targetSelector)},
+          beforeUrl,
+          afterUrl: win.location.href,
+          beforeReadyState,
+          afterReadyState: (iframe.contentDocument || win.document)?.readyState,
+          targetText: beforeText,
+        };
+      }`;
+
+      const result = await ctx.tabManager.sendDebuggerCommand<{
+        result: { type: string; value?: unknown; description?: string };
+        exceptionDetails?: { text: string; exception?: { description: string } };
+      }>('Runtime.evaluate', {
+        expression: `(${expression})()`,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+
+      if (result.exceptionDetails) {
+        const errMsg = result.exceptionDetails.exception?.description ||
+                       result.exceptionDetails.text ||
+                       'Unknown iframe click error';
+        throw new Error(`Iframe click failed: ${errMsg}`);
+      }
+
+      return result.result?.value ?? { clicked: true };
     },
 
     browser_get_html: async () => {

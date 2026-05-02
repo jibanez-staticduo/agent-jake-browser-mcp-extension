@@ -11,12 +11,9 @@
 import './sw-polyfill';
 
 import { WebSocketClient } from './ws-client';
-import { CdpProxy } from './cdp-proxy';
 import { TabManager } from './tab-manager';
-import { createToolHandlers, executeToolFromReverb } from './tool-handlers';
+import { createToolHandlers } from './tool-handlers';
 import { activityLog } from './activity-log';
-import { authService, AuthState } from './auth-service';
-import { reverbClient, BrowserCommand } from './reverb-client';
 import { log } from '@/utils/logger';
 import { CONFIG } from '@/types/config';
 
@@ -38,25 +35,12 @@ async function initialize(): Promise<void> {
   tabManager = new TabManager();
   await tabManager.initialize();
 
-  // Wire CDP proxy so Stagehand CDP commands from Reverb can execute.
-  reverbClient.setCdpProxy(new CdpProxy(tabManager));
-  log.info('[CDP] Proxy initialized for Reverb command handling');
-
   // Create WebSocket client (for local MCP server)
   wsClient = new WebSocketClient(CONFIG.WS_PORT);
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
   wsClient.setMessageHandler(handleMessage);
-
-  // Set up Reverb command handler (for remote Laravel commands)
-  reverbClient.setCommandHandler(async (command: BrowserCommand) => {
-    return executeToolFromReverb(tabManager!, command.type, command.payload);
-  });
-
-  // Initialize auth service (restores session from storage, connects to Reverb if authenticated)
-  await authService.initialize();
-  log.info('Auth service initialized');
 
   // Start connection loop for local MCP
   startConnectionLoop();
@@ -93,6 +77,7 @@ async function updateKeepAliveAlarm(): Promise<void> {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === KEEPALIVE_ALARM) {
     log.debug('[KeepAlive] Alarm fired - checking connection');
+    wsClient?.sendHeartbeat();
     tryConnect();
   }
 });
@@ -223,6 +208,38 @@ async function handlePopupMessage(message: {
       return { success: true };
     }
 
+    case 'connectMcp': {
+      if (!tabManager?.getConnectedTabId()) {
+        return { success: false, error: 'Pick a tab before connecting MCP' };
+      }
+
+      wsClient?.resetReconnectAttempts();
+      await wsClient?.connect();
+      await updateKeepAliveAlarm();
+      return { success: true };
+    }
+
+    case 'disconnectMcp': {
+      wsClient?.disconnect();
+      return { success: true };
+    }
+
+    case 'toggleMcp': {
+      if (wsClient?.isConnected()) {
+        wsClient.disconnect();
+        return { success: true, connected: false };
+      }
+
+      if (!tabManager?.getConnectedTabId()) {
+        return { success: false, connected: false, error: 'Pick a tab before connecting MCP' };
+      }
+
+      wsClient?.resetReconnectAttempts();
+      await wsClient?.connect();
+      await updateKeepAliveAlarm();
+      return { success: true, connected: true };
+    }
+
     case 'disconnectTab': {
       await tabManager?.disconnectTab();
       wsClient?.disconnect();
@@ -247,25 +264,6 @@ async function handlePopupMessage(message: {
 
     case 'clearActivity': {
       await activityLog.clear();
-      return { success: true };
-    }
-
-    // Auth actions
-    case 'getAuthState': {
-      return authService.getState();
-    }
-
-    case 'login': {
-      const { email, password } = payload as { email: string; password: string };
-      return await authService.login(email, password);
-    }
-
-    case 'googleLogin': {
-      return await authService.googleLogin();
-    }
-
-    case 'logout': {
-      await authService.logout();
       return { success: true };
     }
 

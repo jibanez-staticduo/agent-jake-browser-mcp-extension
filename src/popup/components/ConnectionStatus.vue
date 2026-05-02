@@ -1,17 +1,16 @@
 <script setup lang="ts">
 /**
  * Dual connection status indicators - spaceship control panel aesthetic.
- * Shows server (WebSocket/Reverb) and tab connection states independently.
+ * Shows local MCP WebSocket and tab connection states independently.
  */
 import { computed } from 'vue';
-import { useAuthStore, useStatusStore } from '../stores';
+import { useStatusStore } from '../stores';
 
-const auth = useAuthStore();
 const status = useStatusStore();
 
-// Server connection state from auth store
-const serverConnected = computed(() => auth.state.isConnected);
-const serverState = computed(() => auth.state.connectionState || 'disconnected');
+// Local MCP WebSocket state from the background service worker.
+const serverConnected = computed(() => status.status.connected);
+const serverState = computed(() => status.status.connected ? 'connected' : 'disconnected');
 
 // Tab connection state from status store
 const tabConnected = computed(() => status.hasConnectedTab);
@@ -22,6 +21,8 @@ const tabTitle = computed(() => {
 });
 
 // Server status text
+const mcpTitle = computed(() => serverConnected.value ? 'Click to disconnect MCP' : 'Click to connect MCP');
+
 const serverStatusText = computed(() => {
   switch (serverState.value) {
     case 'connected': return 'ONLINE';
@@ -36,17 +37,23 @@ const serverStatusText = computed(() => {
 <template>
   <div class="status-panel">
     <!-- Server Connection Indicator -->
-    <div class="indicator" :class="{ active: serverConnected, error: serverState === 'failed' }">
+    <button
+      type="button"
+      class="indicator mcp-indicator clickable"
+      :class="{ active: serverConnected, error: serverState === 'failed' }"
+      :title="mcpTitle"
+      @click="status.toggleMcp()"
+    >
       <div class="indicator-ring">
         <div class="indicator-core"></div>
         <div class="indicator-pulse"></div>
       </div>
       <div class="indicator-info">
-        <span class="indicator-label">SERVER</span>
+        <span class="indicator-label">MCP</span>
         <span class="indicator-value" :class="serverState">{{ serverStatusText }}</span>
       </div>
       <div class="indicator-line"></div>
-    </div>
+    </button>
 
     <!-- Tab Connection Indicator -->
     <div
@@ -102,6 +109,10 @@ const serverStatusText = computed(() => {
 }
 
 .indicator {
+  appearance: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -114,6 +125,10 @@ const serverStatusText = computed(() => {
   position: relative;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
+}
+
+button.indicator {
+  cursor: pointer;
 }
 
 .indicator:hover {

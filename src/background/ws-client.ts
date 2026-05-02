@@ -24,6 +24,7 @@ export class WebSocketClient {
   private pendingRequests = new Map<string, PendingRequest>();
   private isConnecting = false;
   private shouldReconnect = true;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private port: number = CONFIG.WS_PORT) {}
 
@@ -63,7 +64,11 @@ export class WebSocketClient {
 
     return new Promise((resolve, reject) => {
       try {
-        const url = `ws://${CONFIG.WS_HOST}:${this.port}`;
+        const protocol = CONFIG.WS_SECURE ? 'wss' : 'ws';
+        const defaultPort = CONFIG.WS_SECURE ? 443 : 80;
+        const portSuffix = this.port === defaultPort ? '' : `:${this.port}`;
+        const path = CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/ , '')}` : '';
+        const url = `${protocol}://${CONFIG.WS_HOST}${portSuffix}${path}`;
         log.info(`Connecting to ${url}`);
 
         this.socket = new WebSocket(url);
@@ -73,12 +78,14 @@ export class WebSocketClient {
           this.isConnecting = false;
           this.reconnectAttempts = 0;
           logConnection('ws_connect', `Connected to browser-mcp on port ${this.port}`, true, { port: this.port });
+          this.startHeartbeat();
           resolve();
         };
 
         this.socket.onclose = (event) => {
           log.info(`WebSocket closed: ${event.code} ${event.reason}`);
           this.isConnecting = false;
+          this.stopHeartbeat();
           this.socket = null;
           logConnection('ws_close', `WebSocket closed: ${event.code} ${event.reason || 'No reason'}`, true, { code: event.code, reason: event.reason });
           this.handleDisconnect();
@@ -114,6 +121,8 @@ export class WebSocketClient {
       this.reconnectTimer = null;
     }
 
+    this.stopHeartbeat();
+
     if (this.socket) {
       this.socket.close(1000, 'Client disconnect');
       this.socket = null;
@@ -139,6 +148,13 @@ export class WebSocketClient {
   }
 
   /**
+   * Check if a connection attempt or scheduled reconnect is already pending.
+   */
+  isReconnecting(): boolean {
+    return this.isConnecting || this.reconnectTimer !== null;
+  }
+
+  /**
    * Send a response back to the server.
    */
   send(message: OutgoingMessage): void {
@@ -150,6 +166,30 @@ export class WebSocketClient {
     const data = JSON.stringify(message);
     log.debug('Sending:', data);
     this.socket.send(data);
+  }
+
+  /**
+   * Send lightweight traffic so proxies do not close the upgraded connection as idle.
+   */
+  sendHeartbeat(): void {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.socket.send(JSON.stringify({ type: 'heartbeat', timestamp: Date.now() }));
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => this.sendHeartbeat(), CONFIG.WS_HEARTBEAT_INTERVAL_MS);
+    this.sendHeartbeat();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   /**
@@ -223,6 +263,7 @@ export class WebSocketClient {
     logConnection('ws_reconnecting', `Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts})`, true, { attempt: this.reconnectAttempts, delayMs: delay });
 
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       this.connect().catch(error => {
         log.error('[WS] Reconnect failed:', error);
       });

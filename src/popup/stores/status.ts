@@ -73,6 +73,18 @@ export const useStatusStore = defineStore('status', () => {
     }
   }
 
+  async function toggleMcp(): Promise<void> {
+    try {
+      const result = await sendMessage<{ success: boolean; error?: string }>('toggleMcp');
+      if (!result.success && result.error) {
+        console.warn('[StatusStore] toggleMcp warning:', result.error);
+      }
+      await refresh();
+    } catch (e) {
+      console.error('[StatusStore] toggleMcp failed:', e);
+    }
+  }
+
   async function focusTab(): Promise<void> {
     const tab = connectedTab.value;
     if (tab?.id) {
@@ -113,6 +125,7 @@ export const useStatusStore = defineStore('status', () => {
     refresh,
     connectTab,
     disconnectTab,
+    toggleMcp,
     focusTab,
     startPolling,
     stopPolling,

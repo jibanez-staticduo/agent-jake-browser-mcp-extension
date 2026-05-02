@@ -13,8 +13,7 @@ export function createTabHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_list_tabs: async () => {
-      const tabs = await ctx.tabManager.listTabs();
-      return { tabs };
+      return ctx.tabManager.listTabs();
     },
 
     browser_switch_tab: async (payload) => {

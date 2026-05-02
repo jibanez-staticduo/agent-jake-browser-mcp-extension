@@ -80,6 +80,18 @@ export const schemas = {
     code: z.string().describe('JavaScript code to evaluate via CDP (CSP-safe)'),
   }),
 
+  browser_iframe_eval: z.object({
+    iframeSelector: z.string().describe('CSS selector for the target iframe'),
+    code: z.string().describe('JavaScript code to evaluate in the iframe contentWindow'),
+  }),
+
+  browser_iframe_click: z.object({
+    iframeSelector: z.string().describe('CSS selector for the target iframe'),
+    targetSelector: z.string().describe('CSS selector inside the iframe to click'),
+    waitForNavigation: z.boolean().optional().default(false),
+    timeout: z.number().optional().default(10000),
+  }),
+
   browser_resize_viewport: z.object({
     width: z.number().int().min(320).max(3840),
     height: z.number().int().min(200).max(2160),
