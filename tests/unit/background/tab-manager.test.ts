@@ -29,6 +29,14 @@ const mockChrome = {
     attach: vi.fn(),
     sendCommand: vi.fn(),
     detach: vi.fn(),
+    onEvent: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    onDetach: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
   },
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
