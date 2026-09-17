@@ -20,6 +20,7 @@ import {
 import type { ContentScriptRequest, ContentScriptResponse, Coordinates } from '@/types/messages';
 import { TIMEOUTS, getHighlightCSS } from '@/constants';
 import { CONFIG } from '@/types/config';
+import { generateCompactState, formatCompactState, findCompact } from './compact-state';
 
 // Visual highlight overlay
 let highlightOverlay: HTMLDivElement | null = null;
@@ -49,6 +50,12 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
   const { action, payload } = request;
 
   switch (action) {
+    case 'generateState':
+      return handleGenerateState(payload as { max?: number } | undefined);
+
+    case 'findElements':
+      return findCompact((payload as { text: string }).text);
+
     case 'generateSnapshot':
       return handleGenerateSnapshot(payload as { frame?: string } | undefined);
 
@@ -117,6 +124,13 @@ function handleEvaluate(payload: { code: string }): unknown {
   } catch (error) {
     throw new Error(`Evaluation error: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Compact DOM-first state (the default view). See compact-state.ts.
+ */
+function handleGenerateState(payload?: { max?: number }): string {
+  return formatCompactState(generateCompactState(payload?.max ?? 150));
 }
 
 /**

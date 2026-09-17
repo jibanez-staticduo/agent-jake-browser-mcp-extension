@@ -14,6 +14,7 @@ import {
   createNavigationHandlers,
   createInteractionHandlers,
   createQueryHandlers,
+  createStateHandlers,
   createTabHandlers,
   createUtilityHandlers,
 } from './tools/handlers';
@@ -55,6 +56,7 @@ export function createToolHandlers(tabManager: TabManager) {
     ...createNavigationHandlers(ctx),
     ...createInteractionHandlers(ctx),
     ...createQueryHandlers(ctx),
+    ...createStateHandlers(ctx),
     ...createTabHandlers(ctx),
     ...createUtilityHandlers(ctx),
   };
