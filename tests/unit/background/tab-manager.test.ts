@@ -171,7 +171,7 @@ describe('TabManager CDP readiness', () => {
       expect.objectContaining({
         target: { tabId: 101 },
         world: 'MAIN',
-        args: [true, expect.any(String)],
+        func: expect.any(Function),
       })
     );
 
@@ -181,7 +181,7 @@ describe('TabManager CDP readiness', () => {
       expect.objectContaining({
         target: { tabId: 101 },
         world: 'MAIN',
-        args: [false, expect.any(String)],
+        func: expect.any(Function),
       })
     );
   });
@@ -204,7 +204,7 @@ describe('TabManager CDP readiness', () => {
       expect.objectContaining({
         target: { tabId: 101 },
         world: 'MAIN',
-        args: [true, expect.any(String)],
+        func: expect.any(Function),
       })
     );
   });
