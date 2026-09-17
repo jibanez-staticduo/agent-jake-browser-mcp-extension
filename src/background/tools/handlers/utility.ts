@@ -30,6 +30,29 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       return [];
     },
 
+    /**
+     * The page as a PDF, exactly as Chrome would print it. The case that asked for it:
+     * a bank receipt whose own "save or print" button only opens blank tabs. With the
+     * debugger already attached nothing else is needed — and since the PDF comes back as
+     * base64 and the server writes it to disk, it never goes through the transcript.
+     */
+    browser_pdf: async (payload) => {
+      const { landscape, printBackground, scale, pageRanges } = schemas.browser_pdf.parse(payload);
+
+      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+        'Page.printToPDF',
+        {
+          landscape,
+          printBackground,
+          scale,
+          ...(pageRanges ? { pageRanges } : {}),
+          transferMode: 'ReturnAsBase64',
+        }
+      );
+
+      return { pdf: result.data };
+    },
+
     browser_evaluate: async (payload) => {
       const { code } = schemas.browser_evaluate.parse(payload);
       log.info('[browser_evaluate] Evaluating via CDP:', code.substring(0, 50));

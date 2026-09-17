@@ -155,6 +155,10 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Resize to ${p?.width}x${p?.height}`;
     case 'browser_upload_file':
       return `Upload file: ${p?.filePath}`;
+    case 'browser_select_option':
+      return `Select option in "${p?.ref || p?.selector}"`;
+    case 'browser_pdf':
+      return `Print page to PDF (${Math.round(String((r as Record<string, unknown>)?.pdf ?? '').length * 0.75)} bytes)`;
     default:
       return type.replace('browser_', '').replace(/_/g, ' ');
   }
