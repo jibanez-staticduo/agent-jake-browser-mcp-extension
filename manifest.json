@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Agent Jake Browser MCP",
+  "name": "Browser Harness (pocharlies)",
   "version": "2.3.3",
-  "description": "Browser automation extension for AI agents via Model Context Protocol",
+  "description": "Control del navegador para agentes locales \u2014 DOM-first, WS local con token",
   "permissions": [
     "alarms",
     "debugger",
