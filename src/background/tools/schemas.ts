@@ -26,10 +26,15 @@ export const schemas = {
     selector: z.string().optional(),
   }),
 
-  browser_drag: z.object({
-    startRef: z.string(),
-    endRef: z.string(),
-  }),
+  browser_drag: z
+    .object({
+      startRef: z.string().optional(),
+      startSelector: z.string().optional(),
+      endRef: z.string().optional(),
+      endSelector: z.string().optional(),
+    })
+    .refine((d) => d.startRef || d.startSelector, { message: 'startRef or startSelector is required' })
+    .refine((d) => d.endRef || d.endSelector, { message: 'endRef or endSelector is required' }),
 
   browser_select_option: z.object({
     ref: z.string(),

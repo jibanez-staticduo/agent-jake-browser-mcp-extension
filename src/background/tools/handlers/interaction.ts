@@ -115,6 +115,36 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       return { hovered: ref };
     },
 
+    browser_drag: async (payload) => {
+      const parsed = schemas.browser_drag.parse(payload);
+      const startSelector = parsed.startSelector ?? (await getSelector(parsed.startRef!));
+      const endSelector = parsed.endSelector ?? (await getSelector(parsed.endRef!));
+
+      await sendToContent('scrollIntoView', { selector: startSelector });
+      await sendToContent('scrollIntoView', { selector: endSelector });
+      const from = await sendToContent<Coordinates>('getElementCoordinates', { selector: startSelector });
+      const to = await sendToContent<Coordinates>('getElementCoordinates', { selector: endSelector });
+
+      // Trusted events over CDP, same as click. The intermediate moves are the
+      // point: HTML5 drag-and-drop fires dragstart/dragover/drop only when the
+      // pointer actually travels between press and release.
+      await ctx.dispatchMouseEventTyped('mouseMoved', from.x, from.y);
+      await ctx.dispatchMouseEventTyped('mousePressed', from.x, from.y, 'left', 1);
+      const STEPS = 12;
+      for (let i = 1; i <= STEPS; i++) {
+        await ctx.dispatchMouseEventTyped(
+          'mouseMoved',
+          from.x + ((to.x - from.x) * i) / STEPS,
+          from.y + ((to.y - from.y) * i) / STEPS,
+          'left',
+          1,
+        );
+      }
+      await ctx.dispatchMouseEventTyped('mouseReleased', to.x, to.y, 'left', 1);
+
+      return { dragged: `${parsed.startRef ?? parsed.startSelector} -> ${parsed.endRef ?? parsed.endSelector}` };
+    },
+
     browser_press_key: async (payload) => {
       const { key } = schemas.browser_press_key.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();
