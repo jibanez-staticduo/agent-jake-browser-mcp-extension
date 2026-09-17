@@ -83,8 +83,33 @@ describe('TabManager CDP readiness', () => {
     mockChrome.debugger.attach.mockRejectedValue(
       new Error('Another debugger is already attached to the tab')
     );
+    // The client holding it is not us: Chrome refuses our commands.
+    mockChrome.debugger.sendCommand.mockRejectedValue(
+      new Error('Debugger is not attached to the tab with id: 101')
+    );
 
     await expect(manager.connectTab(101, 'https://example.com')).rejects.toThrow('CDP_DEBUGGER_BUSY');
+  });
+
+  it('attaches even when getTargets says the tab is already attached (another CDP client)', async () => {
+    // Regression: with a Playwright client connected over CDP, `getTargets()[].attached` is
+    // true while we are not attached at all. Trusting that flag skipped our own attach and
+    // every command afterwards died with "Debugger is not attached".
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.getTargets.mockResolvedValue([{ tabId: 101, attached: true }]);
+    let attached = false;
+    mockChrome.debugger.attach.mockImplementation(async () => {
+      attached = true;
+    });
+    mockChrome.debugger.sendCommand.mockImplementation(async () => {
+      if (!attached) throw new Error('Debugger is not attached to the tab with id: 101');
+      return {};
+    });
+
+    await manager.connectTab(101, 'https://example.com');
+
+    expect(mockChrome.debugger.attach).toHaveBeenCalledWith({ tabId: 101 }, expect.any(String));
   });
 
   it('reattaches and retries once when command fails with detached debugger', async () => {
