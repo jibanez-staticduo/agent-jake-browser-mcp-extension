@@ -50,7 +50,7 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
   switch (action) {
     case 'generateSnapshot':
-      return handleGenerateSnapshot();
+      return handleGenerateSnapshot(payload as { frame?: string } | undefined);
 
     case 'getSelector':
       return handleGetSelector(payload as { ref: string });
@@ -62,7 +62,13 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
       return handleScrollIntoView(payload as { selector: string });
 
     case 'selectOption':
-      return handleSelectOption(payload as { selector: string; values: string[] });
+      return handleSelectOption(payload as {
+        selector: string;
+        values?: string[];
+        value?: string;
+        label?: string;
+        index?: number;
+      });
 
     case 'getText':
       return handleGetText(payload as { selector: string });
@@ -88,6 +94,12 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
     case 'evaluate':
       return handleEvaluate(payload as { code: string });
 
+    case 'dispatchClick':
+      return handleDispatchClick(payload as { selector: string });
+
+    case 'focusElement':
+      return handleFocusElement(payload as { selector: string });
+
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -108,11 +120,64 @@ function handleEvaluate(payload: { code: string }): unknown {
 }
 
 /**
- * Generate accessibility snapshot.
+ * PROGRAMMATIC click, for cross-origin iframes where the element's position cannot be
+ * translated into top-frame coordinates and CDP events would land somewhere else. It is
+ * not a trusted event (isTrusted=false): only used when the proper path does not exist.
  */
-function handleGenerateSnapshot(): string {
+async function handleDispatchClick(payload: { selector: string }): Promise<{ clicked: boolean; trusted: boolean }> {
+  const element = await findElement(payload.selector, { visible: true });
+  const rect = element.getBoundingClientRect();
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    button: 0,
+  };
+
+  if (element instanceof HTMLElement) {
+    element.focus({ preventScroll: true });
+  }
+  element.dispatchEvent(new MouseEvent('mouseover', init));
+  element.dispatchEvent(new MouseEvent('mousemove', init));
+  element.dispatchEvent(new MouseEvent('mousedown', init));
+  element.dispatchEvent(new MouseEvent('mouseup', init));
+
+  // element.click() fires the `click` event itself: dispatching one by hand as well
+  // would duplicate it, and a duplicated submit on a bank form is not a cosmetic detail.
+  if (element instanceof HTMLElement) {
+    element.click();
+  } else {
+    element.dispatchEvent(new MouseEvent('click', init));
+  }
+
+  return { clicked: true, trusted: false };
+}
+
+/**
+ * Focus an element without going through coordinates. The focus itself IS real, so the
+ * key events CDP sends next reach this element even inside a cross-origin iframe.
+ */
+async function handleFocusElement(payload: { selector: string }): Promise<{ focused: boolean }> {
+  const element = await findElement(payload.selector, { visible: true });
+  if (element instanceof HTMLElement) {
+    element.focus({ preventScroll: true });
+    return { focused: document.activeElement === element };
+  }
+  return { focused: false };
+}
+
+/**
+ * Generate accessibility snapshot.
+ * Inside an iframe the refs are tagged ([f3:s1e42]) so the action comes back to THIS
+ * frame: the snapshot is generated per document, and "s1e42" exists in every one of them.
+ */
+function handleGenerateSnapshot(payload?: { frame?: string }): string {
   const snapshot = generateSnapshot();
-  return formatSnapshotAsText(snapshot);
+  const text = formatSnapshotAsText(snapshot);
+  if (!payload?.frame) return text;
+  return text.replace(/\[(s\d+e\d+)(\||\])/g, `[${payload.frame}:$1$2`);
 }
 
 /**
@@ -164,10 +229,12 @@ async function handleScrollIntoView(payload: { selector: string }): Promise<void
 
 /**
  * Select option(s) in a dropdown.
+ * Accepts the four shapes the tool exposes: `values` (a list, for <select multiple>),
+ * `value` (the value attribute), `label` (visible text) and `index` (0-based position).
  */
 async function handleSelectOption(
-  payload: { selector: string; values: string[] }
-): Promise<void> {
+  payload: { selector: string; values?: string[]; value?: string; label?: string; index?: number }
+): Promise<{ selected: string[] }> {
   const element = await findElement(payload.selector);
 
   if (!(element instanceof HTMLSelectElement)) {
@@ -175,28 +242,52 @@ async function handleSelectOption(
   }
 
   const select = element;
-  const valuesToSelect = select.multiple ? payload.values : [payload.values[0]];
+  const options = Array.from(select.options);
+
+  const chosen: HTMLOptionElement[] = [];
+  if (payload.index !== undefined) {
+    const option = options[payload.index];
+    if (!option) throw new Error(`Option index out of range: ${payload.index}`);
+    chosen.push(option);
+  }
+  if (payload.label !== undefined) {
+    const option = options.find(opt => (opt.textContent ?? '').trim() === payload.label);
+    if (!option) throw new Error(`Option not found by label: ${payload.label}`);
+    chosen.push(option);
+  }
+  if (payload.value !== undefined) {
+    const option = options.find(opt => opt.value === payload.value);
+    if (!option) throw new Error(`Option not found by value: ${payload.value}`);
+    chosen.push(option);
+  }
+  for (const value of payload.values ?? []) {
+    const option = options.find(
+      opt => opt.value === value || opt.textContent?.trim() === value
+    );
+    if (!option) throw new Error(`Option not found: ${value}`);
+    chosen.push(option);
+  }
+
+  if (!chosen.length) {
+    throw new Error('One of value, label, index or values is required');
+  }
+
+  const toSelect = select.multiple ? chosen : chosen.slice(0, 1);
 
   // Clear previous selection if single-select
   if (!select.multiple) {
     select.value = '';
   }
 
-  for (const value of valuesToSelect) {
-    const option = Array.from(select.options).find(
-      opt => opt.value === value || opt.textContent?.trim() === value
-    );
-
-    if (!option) {
-      throw new Error(`Option not found: ${value}`);
-    }
-
+  for (const option of toSelect) {
     option.selected = true;
   }
 
   // Dispatch events
   select.dispatchEvent(new Event('input', { bubbles: true }));
   select.dispatchEvent(new Event('change', { bubbles: true }));
+
+  return { selected: toSelect.map(o => o.value) };
 }
 
 /**

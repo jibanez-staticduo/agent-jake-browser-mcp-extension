@@ -1,18 +1,28 @@
 /**
  * Interaction tool handlers: click, type, hover, press_key, snapshot.
+ *
+ * Everything that acts on a ref first resolves WHICH FRAME that ref lives in and sends
+ * its orders to that frame. The click stays a trusted CDP event as long as the element's
+ * position can be translated into top-frame coordinates (same-origin iframes); inside a
+ * cross-origin iframe that translation does not exist, and rather than firing at the
+ * wrong point of the page it falls back to a programmatic click inside the frame.
  */
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap, Coordinates } from './types';
 
 export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
-  const { sendToContent, getSelector, waitForStableOrNavigation } = ctx;
+  const { sendToContent, sendToAllFrames, resolveRef, waitForStableOrNavigation } = ctx;
 
   return {
     browser_snapshot: async () => {
-      const snapshot = await sendToContent<string>('generateSnapshot');
+      const frames = await sendToAllFrames<string>('generateSnapshot');
       const { url, title } = await sendToContent<{ url: string; title: string }>('getPageInfo');
 
-      return { url, title, snapshot };
+      const snapshot = frames
+        .map((f) => (f.frameId === 0 ? f.data : `# frame f${f.frameId} — ${f.url}\n${f.data}`))
+        .join('\n');
+
+      return { url, title, snapshot, frames: frames.length };
     },
 
     browser_click: async (payload) => {
@@ -26,19 +36,26 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       ctx.tabManager.startNewTabDetection();
 
       try {
-        const selector = await getSelector(ref);
-        await sendToContent('scrollIntoView', { selector });
+        const { frameId, selector } = await resolveRef(ref);
+        await sendToContent('scrollIntoView', { selector }, frameId);
 
         const coords = await sendToContent<Coordinates>('getElementCoordinates', {
           selector,
           clickable: true,
-        });
+        }, frameId);
 
-        await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-        await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
-        await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+        let trusted = true;
+        if (coords.exact === false) {
+          // Cross-origin iframe: there is no way to know where it lands on the page.
+          await sendToContent('dispatchClick', { selector }, frameId);
+          trusted = false;
+        } else {
+          await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
+          await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
+          await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+        }
 
-        const result = await waitForStableOrNavigation(initialUrl);
+        const result = await waitForStableOrNavigation(initialUrl, frameId);
 
         await new Promise(resolve => setTimeout(resolve, 100));
 
@@ -49,11 +66,13 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
             clicked: ref,
             navigated: true,
             newUrl: result.newUrl,
+            ...(trusted ? {} : { trusted: false }),
             ...(newTab && { newTabOpened: newTab }),
           };
         }
         return {
           clicked: ref,
+          ...(trusted ? {} : { trusted: false }),
           ...(newTab && { newTabOpened: newTab }),
         };
       } catch (error) {
@@ -70,15 +89,21 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';
 
-      const selector = await getSelector(ref);
-      await sendToContent('scrollIntoView', { selector });
+      const { frameId, selector } = await resolveRef(ref);
+      await sendToContent('scrollIntoView', { selector }, frameId);
 
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
+      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector }, frameId);
 
-      // Click to focus
-      await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-      await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
-      await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+      if (coords.exact === false) {
+        // With no reliable coordinates, focus is set from inside the frame. The focus
+        // itself IS real, so the keys CDP sends next still reach this input.
+        await sendToContent('focusElement', { selector }, frameId);
+      } else {
+        // Click to focus
+        await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
+        await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
+        await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+      }
 
       if (clear) {
         await ctx.dispatchKeyEventTyped('keyDown', 'Control');
@@ -95,24 +120,11 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
         await ctx.dispatchKeyEventTyped('keyUp', char);
       }
 
-      const result = await waitForStableOrNavigation(initialUrl);
+      const result = await waitForStableOrNavigation(initialUrl, frameId);
       if (result.navigated) {
         return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
       }
       return { typed: text, cleared: clear };
-    },
-
-    browser_hover: async (payload) => {
-      const parsed = schemas.browser_hover.parse(payload);
-      const ref = parsed.ref;
-
-      const selector = await getSelector(ref);
-      await sendToContent('scrollIntoView', { selector });
-
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector });
-      await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-
-      return { hovered: ref };
     },
 
     browser_press_key: async (payload) => {
