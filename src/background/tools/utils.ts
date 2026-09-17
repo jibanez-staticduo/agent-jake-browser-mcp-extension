@@ -66,12 +66,22 @@ export function parseRef(ref: string | number): { frameId: number; local: string
  */
 export function createToolContext(tabManager: TabManager): ToolContext {
   /**
-   * Connected tab, or a clear error if the popup has not connected one.
+   * Connected tab, or the active tab of the focused window when the popup has not
+   * connected one. Auto-attach keeps the MCP usable from a headless session: there
+   * is no UI to bind a tab by hand, so the first command binds the active tab.
    */
-  function requireTabId(): number {
-    const tabId = tabManager.getConnectedTabId();
+  async function requireTabId(): Promise<number> {
+    let tabId = tabManager.getConnectedTabId();
     if (!tabId) {
-      throw new Error('No tab connected. Use the popup to connect a tab first.');
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!active?.id) {
+        throw new Error('No active tab to attach to');
+      }
+      await tabManager.connectTab(active.id, active.url);
+      tabId = tabManager.getConnectedTabId();
+      if (!tabId) {
+        throw new Error(`Could not attach to the active tab (${active.url ?? 'no url'})`);
+      }
     }
     return tabId;
   }
@@ -102,15 +112,49 @@ export function createToolContext(tabManager: TabManager): ToolContext {
    * The frameId is mandatory in practice: with `all_frames: true` in the manifest,
    * chrome.tabs.sendMessage WITHOUT options reaches every frame and resolves with
    * whichever answers first — non-deterministic. Hence the default of 0 (top frame).
+   *
+   * If the content script is not running in that frame — the page predates the
+   * extension, or the frame appeared after — inject it on demand and probe until the
+   * listener answers. @crxjs wraps the script in a dynamic import(), so executeScript
+   * resolving does NOT mean the listener exists yet.
    */
   async function sendToContent<T>(
     action: string,
     payload: Record<string, unknown> = {},
     frameId: number = 0
   ): Promise<T> {
-    const tabId = requireTabId();
+    const tabId = await requireTabId();
+    const deliver = () =>
+      chrome.tabs.sendMessage(tabId, { action, payload }, { frameId });
 
-    const response = await chrome.tabs.sendMessage(tabId, { action, payload }, { frameId });
+    let response;
+    try {
+      response = await deliver();
+    } catch (err) {
+      const msg = (err as Error).message || '';
+      if (!/Receiving end does not exist|Could not establish connection/i.test(msg)) {
+        throw err;
+      }
+      const files = chrome.runtime.getManifest().content_scripts?.[0]?.js;
+      if (!files?.length) {
+        throw new Error('No content script declared in the manifest');
+      }
+      await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files });
+      let injected: unknown;
+      let lastErr: Error | null = null;
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        try {
+          injected = await deliver();
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e as Error;
+        }
+      }
+      if (lastErr) throw lastErr;
+      response = injected;
+    }
 
     if (!response.success) {
       throw new Error(response.error || 'Content script error');
@@ -131,7 +175,7 @@ export function createToolContext(tabManager: TabManager): ToolContext {
     action: string,
     payload: Record<string, unknown> = {}
   ): Promise<FrameResult<T>[]> {
-    const tabId = requireTabId();
+    const tabId = await requireTabId();
     const frames = await listFrames(tabId);
 
     const settled = await Promise.all(
