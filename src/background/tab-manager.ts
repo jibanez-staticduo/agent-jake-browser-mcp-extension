@@ -170,10 +170,16 @@ export class TabManager {
    * Check if debugger is actually attached to a tab.
    * Uses chrome.debugger.getTargets() for accurate state.
    */
+  /**
+   * Are *we* attached to that tab? `getTargets()[].attached` cannot answer: it is true for
+   * any attached client — DevTools, another extension, a Playwright `connectOverCDP` — and
+   * not only for us. The one thing that tells our client apart is Chrome accepting a
+   * command from it; `Runtime.enable` is idempotent and is what we send next anyway.
+   */
   private async isDebuggerAttached(tabId: number): Promise<boolean> {
     try {
-      const targets = await chrome.debugger.getTargets();
-      return targets.some(t => t.tabId === tabId && t.attached);
+      await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+      return true;
     } catch {
       return false;
     }
@@ -181,19 +187,13 @@ export class TabManager {
 
   /**
    * Attach debugger to tab for input simulation.
+   *
+   * We always try the attach, because Chrome allows several debugger clients on the same
+   * tab and grants us one even when DevTools or a CDP client already holds it. Only when
+   * Chrome answers "Another debugger" is there a question of whose it is, and a command —
+   * not the target list — is what answers it.
    */
   private async attachDebugger(tabId: number): Promise<void> {
-    // Always check actual state, not just our flag
-    const actuallyAttached = await this.isDebuggerAttached(tabId);
-    if (actuallyAttached) {
-      log.debug(`Debugger already attached to tab ${tabId}, skipping attach`);
-      this.debuggerAttached = true;
-      // Still enable domains in case they were disabled
-      await this.enableDebuggerDomains(tabId);
-      return;
-    }
-
-    // Reset flag before attempting attach
     this.debuggerAttached = false;
 
     try {
@@ -203,13 +203,19 @@ export class TabManager {
       this.lastCdpError = null;
       log.info(`Debugger attached to tab ${tabId}`);
     } catch (error) {
-      // May already be attached by another client
-      if ((error as Error).message?.includes('Another debugger')) {
-        const typedError = new Error(`CDP_DEBUGGER_BUSY: ${(error as Error).message}`);
-        this.debuggerAttached = false;
-        this.recordCdpError(typedError);
-        log.warn('Debugger already attached by another client');
-        throw typedError;
+      const message = (error as Error).message ?? '';
+      if (message.includes('Another debugger') || message.includes('Already attached')) {
+        // Either the client holding it is us (then commands work), or it is DevTools.
+        if (await this.isDebuggerAttached(tabId)) {
+          this.debuggerAttached = true;
+          this.lastCdpError = null;
+          log.debug(`Debugger was already ours on tab ${tabId}`);
+        } else {
+          const typedError = new Error(`CDP_DEBUGGER_BUSY: ${message}`);
+          this.recordCdpError(typedError);
+          log.warn('Debugger already attached by another client');
+          throw typedError;
+        }
       } else {
         log.error('Failed to attach debugger:', error);
         this.recordCdpError(error);
