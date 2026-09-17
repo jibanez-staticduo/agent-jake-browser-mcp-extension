@@ -62,7 +62,13 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
       return handleScrollIntoView(payload as { selector: string });
 
     case 'selectOption':
-      return handleSelectOption(payload as { selector: string; values: string[] });
+      return handleSelectOption(payload as {
+        selector: string;
+        values?: string[];
+        value?: string;
+        label?: string;
+        index?: number;
+      });
 
     case 'getText':
       return handleGetText(payload as { selector: string });
@@ -166,8 +172,8 @@ async function handleScrollIntoView(payload: { selector: string }): Promise<void
  * Select option(s) in a dropdown.
  */
 async function handleSelectOption(
-  payload: { selector: string; values: string[] }
-): Promise<void> {
+  payload: { selector: string; values?: string[]; value?: string; label?: string; index?: number }
+): Promise<{ selected: string[] }> {
   const element = await findElement(payload.selector);
 
   if (!(element instanceof HTMLSelectElement)) {
@@ -175,28 +181,52 @@ async function handleSelectOption(
   }
 
   const select = element;
-  const valuesToSelect = select.multiple ? payload.values : [payload.values[0]];
+  const options = Array.from(select.options);
+
+  const chosen: HTMLOptionElement[] = [];
+  if (payload.index !== undefined) {
+    const option = options[payload.index];
+    if (!option) throw new Error(`Option index out of range: ${payload.index}`);
+    chosen.push(option);
+  }
+  if (payload.label !== undefined) {
+    const option = options.find(opt => (opt.textContent ?? '').trim() === payload.label);
+    if (!option) throw new Error(`Option not found by label: ${payload.label}`);
+    chosen.push(option);
+  }
+  if (payload.value !== undefined) {
+    const option = options.find(opt => opt.value === payload.value);
+    if (!option) throw new Error(`Option not found by value: ${payload.value}`);
+    chosen.push(option);
+  }
+  for (const value of payload.values ?? []) {
+    const option = options.find(
+      opt => opt.value === value || opt.textContent?.trim() === value
+    );
+    if (!option) throw new Error(`Option not found: ${value}`);
+    chosen.push(option);
+  }
+
+  if (!chosen.length) {
+    throw new Error('One of value, label, index or values is required');
+  }
+
+  const toSelect = select.multiple ? chosen : chosen.slice(0, 1);
 
   // Clear previous selection if single-select
   if (!select.multiple) {
     select.value = '';
   }
 
-  for (const value of valuesToSelect) {
-    const option = Array.from(select.options).find(
-      opt => opt.value === value || opt.textContent?.trim() === value
-    );
-
-    if (!option) {
-      throw new Error(`Option not found: ${value}`);
-    }
-
+  for (const option of toSelect) {
     option.selected = true;
   }
 
   // Dispatch events
   select.dispatchEvent(new Event('input', { bubbles: true }));
   select.dispatchEvent(new Event('change', { bubbles: true }));
+
+  return { selected: toSelect.map(o => o.value) };
 }
 
 /**
