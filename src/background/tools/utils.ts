@@ -46,12 +46,55 @@ export function createToolContext(tabManager: TabManager): ToolContext {
     action: string,
     payload: Record<string, unknown> = {}
   ): Promise<T> {
-    const tabId = tabManager.getConnectedTabId();
+    // Auto-attach: the old flow required connecting a tab by hand from the
+    // popup, which makes the MCP unusable from a headless session. With no tab
+    // connected, attach the ACTIVE tab of the focused window instead.
+    let tabId = tabManager.getConnectedTabId();
     if (!tabId) {
-      throw new Error('No tab connected. Use the popup to connect a tab first.');
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!active?.id) {
+        throw new Error('No active tab to attach to');
+      }
+      await tabManager.connectTab(active.id, active.url);
+      tabId = tabManager.getConnectedTabId();
+      if (!tabId) {
+        throw new Error(`Could not attach to the active tab (${active.url ?? 'no url'})`);
+      }
     }
 
-    const response = await chrome.tabs.sendMessage(tabId, { action, payload });
+    // The content script only exists in pages loaded AFTER the extension was
+    // installed; messaging a pre-existing tab dies with "Receiving end does not
+    // exist". Inject on demand and retry.
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tabId, { action, payload });
+    } catch (err) {
+      const msg = (err as Error).message || '';
+      if (!/Receiving end does not exist|Could not establish connection/i.test(msg)) {
+        throw err;
+      }
+      const files = chrome.runtime.getManifest().content_scripts?.[0]?.js;
+      if (!files?.length) {
+        throw new Error('No content script declared in the manifest');
+      }
+      await chrome.scripting.executeScript({ target: { tabId }, files });
+      // @crxjs content scripts are a loader doing a dynamic import(): when
+      // executeScript resolves, the listener is NOT registered yet. Probe it.
+      let injected: unknown;
+      let lastErr: Error | null = null;
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        try {
+          injected = await chrome.tabs.sendMessage(tabId, { action, payload });
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e as Error;
+        }
+      }
+      if (lastErr) throw lastErr;
+      response = injected;
+    }
 
     if (!response.success) {
       throw new Error(response.error || 'Content script error');

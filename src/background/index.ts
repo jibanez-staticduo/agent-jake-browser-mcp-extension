@@ -55,19 +55,17 @@ async function initialize(): Promise<void> {
 async function updateKeepAliveAlarm(): Promise<void> {
   const tabId = tabManager?.getConnectedTabId();
 
-  if (tabId) {
-    // Tab connected - start keep-alive alarm
-    const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
-    if (!existing) {
-      await chrome.alarms.create(KEEPALIVE_ALARM, {
-        periodInMinutes: KEEPALIVE_INTERVAL_MINUTES,
-      });
-      log.info('[KeepAlive] Alarm started - service worker will stay awake');
-    }
-  } else {
-    // No tab connected - stop keep-alive alarm to allow service worker to sleep
-    await chrome.alarms.clear(KEEPALIVE_ALARM);
-    log.debug('[KeepAlive] Alarm cleared - no connected tab');
+  // The alarm runs ALWAYS. Without it the MV3 service worker sleeps after ~30s,
+  // takes the WebSocket down with it, and the agent sees "Extension not
+  // connected" with no way to wake it — there is no UI to poke when the MCP
+  // client is a headless session.
+  void tabId;
+  const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
+  if (!existing) {
+    await chrome.alarms.create(KEEPALIVE_ALARM, {
+      periodInMinutes: KEEPALIVE_INTERVAL_MINUTES,
+    });
+    log.info('[KeepAlive] Alarm started - service worker stays awake');
   }
 }
 
@@ -92,11 +90,10 @@ async function tryConnect(): Promise<void> {
   const wsConnected = wsClient?.isConnected();
   log.debug(`[Loop] tryConnect - tabId: ${tabId}, wsConnected: ${wsConnected}`);
 
-  // Only connect if we have a connected tab
-  if (!tabId) {
-    log.debug('[Loop] No connected tab, skipping WebSocket connection');
-    return;
-  }
+  // Keep the WebSocket up connected tab or not: tools that do not touch the DOM
+  // (list_tabs, navigate, new_tab) must work, and the tab gets attached on the
+  // first command that needs it (see ensureTabId in tools/utils.ts).
+  void tabId;
 
   // Skip if ws-client already has a reconnect scheduled
   if (wsClient.isReconnecting()) {
