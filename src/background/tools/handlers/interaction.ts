@@ -166,6 +166,24 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       return { dragged: `${parsed.startRef ?? parsed.startSelector} -> ${parsed.endRef ?? parsed.endSelector}` };
     },
 
+    /**
+     * The server has advertised browser_select_option all along, but the extension had
+     * no handler for it: the tool always answered "Unknown tool". Any form with a
+     * <select> — a bank transfer, to pick one — forced a drop down to raw JS.
+     */
+    browser_select_option: async (payload) => {
+      const { ref, selector, value, label, index } = schemas.browser_select_option.parse(payload);
+      const target = selector ? { frameId: 0, selector } : await resolveRef(ref!);
+      await sendToContent('scrollIntoView', { selector: target.selector }, target.frameId);
+      const { selected } = await sendToContent<{ selected: string[] }>('selectOption', {
+        selector: target.selector,
+        value,
+        label,
+        index,
+      }, target.frameId);
+      return { selected };
+    },
+
     browser_press_key: async (payload) => {
       const { key } = schemas.browser_press_key.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();

@@ -37,7 +37,8 @@ export const schemas = {
     .refine((d) => d.endRef || d.endSelector, { message: 'endRef or endSelector is required' }),
 
   browser_select_option: z.object({
-    ref: z.string(),
+    ref: z.string().optional(),
+    selector: z.string().optional(),
     value: z.string().optional(),
     label: z.string().optional(),
     index: z.number().optional(),
@@ -106,6 +107,13 @@ export const schemas = {
     ref: z.string().optional(),
     selector: z.string().optional(),
     filePath: z.string(),
+  }),
+
+  browser_pdf: z.object({
+    landscape: z.boolean().optional().default(false),
+    printBackground: z.boolean().optional().default(true),
+    scale: z.number().min(0.1).max(2).optional().default(1),
+    pageRanges: z.string().optional(),
   }),
 } as const;
 
