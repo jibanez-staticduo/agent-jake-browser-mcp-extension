@@ -31,7 +31,8 @@ export type ToolName =
   | 'browser_evaluate'
   | 'browser_get_html'
   | 'browser_iframe_eval'
-  | 'browser_iframe_click';
+  | 'browser_iframe_click'
+  | 'browser_pdf';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {
@@ -99,6 +100,11 @@ export interface TabInfo {
 export interface Coordinates {
   x: number;
   y: number;
+  /**
+   * false when the element lives in a cross-origin iframe and its position could not be
+   * translated into top-frame coordinates: CDP events would land somewhere else.
+   */
+  exact?: boolean;
 }
 
 // Element bounding box

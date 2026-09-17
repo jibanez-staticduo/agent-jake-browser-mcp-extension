@@ -337,12 +337,51 @@ export function isElementClickable(element: Element): boolean {
 /**
  * Get the center coordinates of an element.
  */
-export function getElementCenter(element: Element): { x: number; y: number } {
+export function getElementCenter(element: Element): { x: number; y: number; exact: boolean } {
   const rect = element.getBoundingClientRect();
+  const offset = frameViewportOffset();
   return {
-    x: Math.round(rect.left + rect.width / 2),
-    y: Math.round(rect.top + rect.height / 2),
+    x: Math.round(rect.left + rect.width / 2 + offset.x),
+    y: Math.round(rect.top + rect.height / 2 + offset.y),
+    exact: offset.exact,
   };
+}
+
+/**
+ * Offset of THIS frame's viewport inside the top frame.
+ *
+ * getBoundingClientRect() returns coordinates of the frame the content script runs in,
+ * but CDP's Input.dispatchMouseEvent wants them in the top frame: without this sum a
+ * click inside an iframe lands somewhere else entirely (on nothing, if we are lucky).
+ * The chain can only be walked while it stays SAME-ORIGIN — window.frameElement throws
+ * across origins. When it breaks, `exact: false` tells the caller to fall back to the
+ * programmatic click instead of firing coordinates blind.
+ */
+export function frameViewportOffset(): { x: number; y: number; exact: boolean } {
+  let x = 0;
+  let y = 0;
+  let win: Window = window;
+
+  while (win !== win.top) {
+    let owner: Element | null = null;
+    try {
+      owner = win.frameElement;
+    } catch {
+      return { x, y, exact: false };
+    }
+    if (!owner) return { x, y, exact: false };
+
+    const rect = owner.getBoundingClientRect();
+    const style = getComputedStyle(owner);
+    x += rect.left + parseFloat(style.borderLeftWidth || '0') + parseFloat(style.paddingLeft || '0');
+    y += rect.top + parseFloat(style.borderTopWidth || '0') + parseFloat(style.paddingTop || '0');
+
+    const parent: Window | null = win.parent;
+    if (!parent || parent === win) return { x, y, exact: false };
+    win = parent;
+  }
+
+  return { x, y, exact: true };
 }
 
 /**
@@ -354,6 +393,24 @@ export async function scrollIntoView(element: Element): Promise<void> {
     block: 'center',
     inline: 'center',
   });
+
+  // Inside an iframe this is not enough: the element ends up centered in ITS viewport
+  // while the iframe itself may stay off-screen in the parent. Walk up the chain while
+  // it is same-origin; across origins it cannot be done, so it is left as it is.
+  let win: Window = window;
+  while (win !== win.top) {
+    let owner: Element | null = null;
+    try {
+      owner = win.frameElement;
+    } catch {
+      break;
+    }
+    if (!owner) break;
+    owner.scrollIntoView({ block: 'center', inline: 'center' });
+    const parent: Window | null = win.parent;
+    if (!parent || parent === win) break;
+    win = parent;
+  }
 
   // Wait for scroll to complete
   await sleep(300);
