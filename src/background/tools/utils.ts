@@ -64,6 +64,12 @@ export function createToolContext(tabManager: TabManager): ToolContext {
    * Get selector for element ref.
    */
   async function getSelector(ref: string): Promise<string> {
+    // Two ref families on purpose:
+    //  - compact  "12"     -> from the DOM-first state (data-hx), resolved without a round trip
+    //  - ARIA     "s1e42"  -> from the accessibility snapshot (fallback)
+    if (/^\d+$/.test(String(ref).trim())) {
+      return `[data-hx="${String(ref).trim()}"]`;
+    }
     return sendToContent<string>('getSelector', { ref });
   }
 

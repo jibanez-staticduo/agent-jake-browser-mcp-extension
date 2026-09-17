@@ -8,6 +8,8 @@ export type ToolName =
   | 'browser_navigate'
   | 'browser_go_back'
   | 'browser_go_forward'
+  | 'browser_state'
+  | 'browser_find'
   | 'browser_snapshot'
   | 'browser_click'
   | 'browser_type'
