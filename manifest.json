@@ -6,7 +6,6 @@
   "permissions": [
     "alarms",
     "debugger",
-    "identity",
     "scripting",
     "storage",
     "tabs",

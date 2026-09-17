@@ -68,7 +68,8 @@ export class WebSocketClient {
         const defaultPort = CONFIG.WS_SECURE ? 443 : 80;
         const portSuffix = this.port === defaultPort ? '' : `:${this.port}`;
         const path = CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/ , '')}` : '';
-        const url = `${protocol}://${CONFIG.WS_HOST}${portSuffix}${path}`;
+        const auth = CONFIG.WS_TOKEN ? `?token=${encodeURIComponent(CONFIG.WS_TOKEN)}` : '';
+        const url = `${protocol}://${CONFIG.WS_HOST}${portSuffix}${path}${auth}`;
         log.info(`Connecting to ${url}`);
 
         this.socket = new WebSocket(url);

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { CONFIG } from '@/types/config';
+const wsEndpoint = `${CONFIG.WS_SECURE ? 'wss' : 'ws'}://${CONFIG.WS_HOST}:${CONFIG.WS_PORT}`;
 /**
  * Root Vue component for extension popup.
  * Uses Pinia stores for centralized state management.
@@ -31,7 +33,7 @@ onUnmounted(() => {
         <div class="eyebrow">Local MCP Mode</div>
         <h1>Agent Jake Browser</h1>
       </div>
-      <span class="endpoint">wss://agent-browser.staticduo.com</span>
+      <span class="endpoint">{{ wsEndpoint }}</span>
     </div>
 
     <!-- Connection Status Panel -->
@@ -50,7 +52,7 @@ onUnmounted(() => {
 
     <!-- Footer -->
     <div class="footer">
-      WebSocket: agent-browser.staticduo.com · Local MCP only ·
+      WebSocket: {{ wsEndpoint }} · Local MCP only ·
       <a href="https://github.com/SnakeO/agent-jake-browser-mcp-extension" target="_blank">Docs</a>
     </div>
   </div>

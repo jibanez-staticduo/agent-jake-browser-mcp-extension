@@ -11,6 +11,7 @@ interface ImportMetaEnv {
   readonly VITE_WS_HOST?: string;
   readonly VITE_WS_PATH?: string;
   readonly VITE_WS_PORT?: string;
+  readonly VITE_WS_TOKEN?: string;
   readonly VITE_WS_SECURE?: string;
 }
 
