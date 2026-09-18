@@ -5,6 +5,7 @@
 
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
+import { buildWsUrl, getEffectiveConfig, type RuntimeServerConfig } from '@/config/runtime';
 import { logConnection, logError } from './activity-log';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 
@@ -25,8 +26,12 @@ export class WebSocketClient {
   private isConnecting = false;
   private shouldReconnect = true;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private effectiveUrl = '';
 
-  constructor(private port: number = CONFIG.WS_PORT) {}
+  /** Effective URL last used (or attempted) for connecting. */
+  getEffectiveUrl(): string {
+    return this.effectiveUrl;
+  }
 
   /**
    * Set the handler for incoming tool requests.
@@ -45,6 +50,10 @@ export class WebSocketClient {
 
   /**
    * Connect to the browser-mcp WebSocket server.
+   *
+   * The endpoint comes from the runtime config (chrome.storage overrides
+   * win over build-time defaults) and the handshake query always carries
+   * `connectionId`, plus `token` when one is available.
    */
   async connect(): Promise<void> {
     log.info(`[WS] connect() called, current state: ${this.socket?.readyState ?? 'no socket'}, attempts: ${this.reconnectAttempts}`);
@@ -62,28 +71,38 @@ export class WebSocketClient {
     this.isConnecting = true;
     this.shouldReconnect = true;
 
+    let cfg: RuntimeServerConfig;
+    try {
+      cfg = await getEffectiveConfig();
+    } catch (error) {
+      this.isConnecting = false;
+      throw error;
+    }
+
     return new Promise((resolve, reject) => {
       try {
-        const protocol = CONFIG.WS_SECURE ? 'wss' : 'ws';
-        const defaultPort = CONFIG.WS_SECURE ? 443 : 80;
-        const portSuffix = this.port === defaultPort ? '' : `:${this.port}`;
-        const path = CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/ , '')}` : '';
-        const auth = CONFIG.WS_TOKEN ? `?token=${encodeURIComponent(CONFIG.WS_TOKEN)}` : '';
-        const url = `${protocol}://${CONFIG.WS_HOST}${portSuffix}${path}${auth}`;
+        const url = buildWsUrl(cfg);
+        this.effectiveUrl = url;
         log.info(`Connecting to ${url}`);
 
         this.socket = new WebSocket(url);
+        const socket = this.socket;
 
         this.socket.onopen = () => {
           log.info('WebSocket connected');
           this.isConnecting = false;
           this.reconnectAttempts = 0;
-          logConnection('ws_connect', `Connected to browser-mcp on port ${this.port}`, true, { port: this.port });
+          logConnection('ws_connect', `Connected to browser-mcp at ${url}`, true, { url });
           this.startHeartbeat();
           resolve();
         };
 
         this.socket.onclose = (event) => {
+          // Ignore late events from a socket replaced by reload()/disconnect().
+          if (this.socket !== socket) {
+            log.debug('[WS] Ignoring close from stale socket');
+            return;
+          }
           log.info(`WebSocket closed: ${event.code} ${event.reason}`);
           this.isConnecting = false;
           this.stopHeartbeat();
@@ -93,6 +112,9 @@ export class WebSocketClient {
         };
 
         this.socket.onerror = (error) => {
+          if (this.socket !== socket) {
+            return;
+          }
           log.error('WebSocket error:', error);
           this.isConnecting = false;
           logError('ws_error', 'WebSocket connection error', { error: String(error) });
@@ -139,6 +161,17 @@ export class WebSocketClient {
 
     log.info('Disconnected');
     logConnection('ws_disconnect', 'WebSocket disconnected by client', true, { pendingRequestsCancelled: pendingCount });
+  }
+
+  /**
+   * Reconnect immediately with the current runtime config.
+   * Call after ajb.serverUrl / ajb.token changed (popup save, pairing approved).
+   */
+  async reload(): Promise<void> {
+    log.info('[WS] reload() - reconnecting with current runtime config');
+    this.disconnect();
+    this.reconnectAttempts = 0;
+    await this.connect();
   }
 
   /**

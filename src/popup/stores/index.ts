@@ -20,4 +20,5 @@ export async function sendMessage<T>(action: string, payload?: unknown): Promise
 // Re-export stores for convenience
 export { useAuthStore } from './auth';
 export { useStatusStore } from './status';
+export { useServerStore } from './server';
 export { useActivityStore } from './activity';
