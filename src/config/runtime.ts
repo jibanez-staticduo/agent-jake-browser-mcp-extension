@@ -1,0 +1,204 @@
+/**
+ * Runtime server configuration.
+ *
+ * Build-time CONFIG (VITE_WS_*) remains the fallback, but the server URL and
+ * the auth token can be overridden at runtime from the popup and are
+ * persisted in chrome.storage.local under the F-Multi / F-Descarga contract
+ * keys:
+ *   ajb.serverUrl     full ws(s)://host[:port][/path] entered by the user (S2)
+ *   ajb.token         token obtained via pairing or typed by the user
+ *   ajb.connectionId  persistent UUID that identifies this browser install
+ *   ajb.pairCode      OTP of an in-flight pairing flow (survives SW restarts)
+ */
+
+import { CONFIG } from '@/types/config';
+
+export const STORAGE_KEYS = {
+  serverUrl: 'ajb.serverUrl',
+  token: 'ajb.token',
+  connectionId: 'ajb.connectionId',
+  pairCode: 'ajb.pairCode',
+} as const;
+
+export interface ParsedServerUrl {
+  secure: boolean;
+  hostname: string;
+  port: number;
+  /** Normalised path: '' or '/something' (never a bare '/'). */
+  path: string;
+}
+
+export interface RuntimeServerConfig extends ParsedServerUrl {
+  scheme: 'ws' | 'wss';
+  /** Effective auth token (storage value wins, build default is fallback). */
+  token: string;
+  /** Persistent per-install UUID (always present). */
+  connectionId: string;
+  /** True when host/port/path come from ajb.serverUrl instead of build defaults. */
+  fromStorage: boolean;
+}
+
+function storageGet(keys: string[]): Promise<Record<string, unknown>> {
+  return chrome.storage.local.get(keys) as Promise<Record<string, unknown>>;
+}
+
+function storageSet(items: Record<string, unknown>): Promise<void> {
+  return chrome.storage.local.set(items);
+}
+
+function storageRemove(keys: string[]): Promise<void> {
+  return chrome.storage.local.remove(keys);
+}
+
+/**
+ * Parse a user-typed server URL. Accepts ws(s):// and http(s):// schemes;
+ * a bare host (no scheme) is treated as secure (wss) so remote installs do
+ * not silently downgrade. Returns null when the value is unusable.
+ */
+export function parseWsUrl(raw: string): ParsedServerUrl | null {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return null;
+
+  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)
+    ? trimmed
+    : `wss://${trimmed}`;
+
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return null;
+  }
+
+  let secure: boolean;
+  switch (url.protocol) {
+    case 'ws:': secure = false; break;
+    case 'wss:': secure = true; break;
+    case 'http:': secure = false; break;
+    case 'https:': secure = true; break;
+    default: return null;
+  }
+
+  if (!url.hostname) return null;
+
+  const port = url.port
+    ? Number(url.port)
+    : secure ? 443 : 80;
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
+
+  const path = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+
+  return { secure, hostname: url.hostname, port, path };
+}
+
+/**
+ * Ensure the persistent per-install connection UUID exists and return it.
+ */
+export async function ensureConnectionId(): Promise<string> {
+  const stored = await storageGet([STORAGE_KEYS.connectionId]);
+  const existing = stored[STORAGE_KEYS.connectionId];
+  if (typeof existing === 'string' && existing.length > 0) {
+    return existing;
+  }
+
+  const id = crypto.randomUUID();
+  await storageSet({ [STORAGE_KEYS.connectionId]: id });
+  return id;
+}
+
+/**
+ * Effective server config: runtime override (ajb.serverUrl) when valid,
+ * otherwise build-time defaults. Token follows `ajb.token ?? CONFIG.WS_TOKEN`
+ * (an explicitly stored empty string clears the token for open-LAN setups).
+ */
+export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
+  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
+  const rawUrl = typeof stored[STORAGE_KEYS.serverUrl] === 'string'
+    ? (stored[STORAGE_KEYS.serverUrl] as string)
+    : '';
+  const parsed = parseWsUrl(rawUrl);
+
+  const base: ParsedServerUrl = parsed ?? {
+    secure: CONFIG.WS_SECURE,
+    hostname: CONFIG.WS_HOST,
+    port: CONFIG.WS_PORT,
+    path: CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/, '').replace(/\/+$/, '')}` : '',
+  };
+
+  const token = typeof stored[STORAGE_KEYS.token] === 'string'
+    ? (stored[STORAGE_KEYS.token] as string)
+    : CONFIG.WS_TOKEN;
+
+  const connectionId = await ensureConnectionId();
+
+  return {
+    ...base,
+    scheme: base.secure ? 'wss' : 'ws',
+    token,
+    connectionId,
+    fromStorage: parsed !== null,
+  };
+}
+
+/**
+ * Save (or clear, with '' / null) the runtime server URL override.
+ */
+export async function setServerUrl(url: string | null): Promise<void> {
+  const trimmed = (url ?? '').trim();
+  if (!trimmed) {
+    await storageRemove([STORAGE_KEYS.serverUrl]);
+    return;
+  }
+  await storageSet({ [STORAGE_KEYS.serverUrl]: trimmed });
+}
+
+/**
+ * Save an explicit token. '' is a real value: it clears the token (open LAN)
+ * rather than falling back to the build default. Pass null to remove the
+ * override entirely and fall back to CONFIG.WS_TOKEN.
+ */
+export async function setToken(token: string | null): Promise<void> {
+  if (token === null) {
+    await storageRemove([STORAGE_KEYS.token]);
+    return;
+  }
+  await storageSet({ [STORAGE_KEYS.token]: token });
+}
+
+/**
+ * WebSocket endpoint for a config: scheme://host[:port]/path with the
+ * handshake query `token` (when set) and `connectionId`, URL-encoded.
+ */
+export function buildWsUrl(cfg: RuntimeServerConfig): string {
+  const defaultPort = cfg.secure ? 443 : 80;
+  const portSuffix = cfg.port === defaultPort ? '' : `:${cfg.port}`;
+  const params = new URLSearchParams();
+  if (cfg.token) params.set('token', cfg.token);
+  params.set('connectionId', cfg.connectionId);
+  return `${cfg.scheme}://${cfg.hostname}${portSuffix}${cfg.path}?${params.toString()}`;
+}
+
+/** Endpoint without the handshake query, for display in the popup. */
+export function buildDisplayUrl(cfg: RuntimeServerConfig): string {
+  const defaultPort = cfg.secure ? 443 : 80;
+  const portSuffix = cfg.port === defaultPort ? '' : `:${cfg.port}`;
+  return `${cfg.scheme}://${cfg.hostname}${portSuffix}${cfg.path}`;
+}
+
+/**
+ * HTTP(S) origin paired with a WS config (wss→https, ws→http), used for the
+ * /pair/* endpoints and the download page.
+ */
+export function httpOrigin(cfg: RuntimeServerConfig): string {
+  const scheme = cfg.secure ? 'https' : 'http';
+  const defaultPort = cfg.secure ? 443 : 80;
+  const portSuffix = cfg.port === defaultPort ? '' : `:${cfg.port}`;
+  return `${scheme}://${cfg.hostname}${portSuffix}`;
+}
+
+/** Whether the server URL currently comes from the user-editable override. */
+export async function hasStoredServerUrl(): Promise<boolean> {
+  const stored = await storageGet([STORAGE_KEYS.serverUrl]);
+  return typeof stored[STORAGE_KEYS.serverUrl] === 'string'
+    && (stored[STORAGE_KEYS.serverUrl] as string).trim() !== '';
+}

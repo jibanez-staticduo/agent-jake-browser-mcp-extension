@@ -1,27 +1,36 @@
 <script setup lang="ts">
 import { CONFIG } from '@/types/config';
-const wsEndpoint = `${CONFIG.WS_SECURE ? 'wss' : 'ws'}://${CONFIG.WS_HOST}:${CONFIG.WS_PORT}`;
+import { computed } from 'vue';
 /**
  * Root Vue component for extension popup.
  * Uses Pinia stores for centralized state management.
  */
 import { onMounted, onUnmounted } from 'vue';
-import { useStatusStore, useActivityStore } from './stores';
+import { useServerStore, useStatusStore, useActivityStore } from './stores';
 import ConnectionStatus from './components/ConnectionStatus.vue';
+import ServerSettings from './components/ServerSettings.vue';
 import TabSelector from './components/TabSelector.vue';
 import ActivityLog from './components/ActivityLog.vue';
 import ActivityModal from './components/ActivityModal.vue';
 
+const buildWsEndpoint = `${CONFIG.WS_SECURE ? 'wss' : 'ws'}://${CONFIG.WS_HOST}:${CONFIG.WS_PORT}`;
+
 const status = useStatusStore();
+const server = useServerStore();
 const activity = useActivityStore();
+
+// Show the runtime-effective endpoint once known, build default until then.
+const wsEndpoint = computed(() => server.effectiveUrl || buildWsEndpoint);
 
 onMounted(() => {
   status.startPolling();
+  server.startPolling();
   activity.startPolling();
 });
 
 onUnmounted(() => {
   status.stopPolling();
+  server.stopPolling();
   activity.stopPolling();
 });
 </script>
@@ -38,6 +47,9 @@ onUnmounted(() => {
 
     <!-- Connection Status Panel -->
     <ConnectionStatus />
+
+    <!-- Runtime Server Settings (URL, token, pairing) -->
+    <ServerSettings />
 
     <!-- Tab Connection Section -->
     <div class="section">

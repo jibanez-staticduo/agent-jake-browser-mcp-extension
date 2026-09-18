@@ -59,3 +59,23 @@ export interface LoginResponse {
   user?: AuthUser;
   error?: string;
 }
+
+export type PairingState = 'idle' | 'pending' | 'approved' | 'expired' | 'error';
+
+export interface PairingInfo {
+  state: PairingState;
+  otp?: string;
+  approveUrl?: string;
+  error?: string;
+}
+
+export interface ServerConfigInfo {
+  effectiveUrl: string;
+  fromStorage: boolean;
+  storedServerUrl: string;
+  storedToken: string;
+  hasToken: boolean;
+  connectionId: string;
+  connected: boolean;
+  pairing: PairingInfo;
+}
