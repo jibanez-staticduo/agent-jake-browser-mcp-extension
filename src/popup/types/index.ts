@@ -72,6 +72,8 @@ export interface PairingInfo {
 export interface ServerConfigInfo {
   effectiveUrl: string;
   fromStorage: boolean;
+  /** Origin of the effective URL: manual override, packaged config.json or build. */
+  source?: 'manual' | 'config.json' | 'build';
   storedServerUrl: string;
   storedToken: string;
   hasToken: boolean;

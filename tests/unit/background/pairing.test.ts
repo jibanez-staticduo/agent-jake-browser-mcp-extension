@@ -24,6 +24,9 @@ const mockChrome = {
       }),
     },
   },
+  runtime: {
+    getURL: (path: string) => `chrome-extension://test-id/${path}`,
+  },
 };
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
@@ -145,9 +148,16 @@ describe('maybeAutoStartPairing', () => {
   it('does nothing without a stored server URL', async () => {
     const pairing = await loadPairing();
     delete store[STORAGE_KEYS.serverUrl];
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('config.json')
+        ? Promise.reject(new Error('no config.json'))
+        : jsonResponse({ ok: true }));
 
     await pairing.maybeAutoStartPairing();
-    expect(fetchMock).not.toHaveBeenCalled();
+    const startPosts = fetchMock.mock.calls.filter(
+      (call) => String(call[0]).includes('/pair/start'),
+    );
+    expect(startPosts).toHaveLength(0);
     pairing.cancelPairing();
   });
 
@@ -180,11 +190,57 @@ describe('maybeAutoStartPairing', () => {
 
     await pairing.maybeAutoStartPairing();
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    const startPosts = fetchMock.mock.calls.filter(
+      (call) => String(call[0]).includes('/pair/start'),
+    );
+    expect(startPosts).toHaveLength(0);
     const info = pairing.getPairingInfo();
     expect(info.state).toBe('pending');
     expect(info.otp).toBe('PENDING1');
     expect(info.approveUrl).toBe('https://pair.example.com/pair?otp=PENDING1');
+    pairing.cancelPairing();
+  });
+});
+
+describe('config.json as server source', () => {
+  it('derives the pairing origin from the packaged config.json', async () => {
+    const pairing = await loadPairing();
+    delete store[STORAGE_KEYS.serverUrl];
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('config.json')) {
+        return jsonResponse({ version: 1, wsUrl: 'wss://embedded.example.com/ws' });
+      }
+      if (String(url).includes('/pair/start')) return jsonResponse({ ok: true });
+      return jsonResponse({ state: 'pending' });
+    });
+
+    const result = await pairing.startPairing();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://embedded.example.com/pair/start',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(result.approveUrl).toBe(`https://embedded.example.com/pair?otp=${result.otp}`);
+    pairing.cancelPairing();
+  });
+
+  it('auto-starts pairing against the config.json origin', async () => {
+    const pairing = await loadPairing();
+    delete store[STORAGE_KEYS.serverUrl];
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('config.json')) {
+        return jsonResponse({ version: 1, wsUrl: 'wss://embedded.example.com' });
+      }
+      return jsonResponse({ ok: true });
+    });
+
+    await pairing.maybeAutoStartPairing();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://embedded.example.com/pair/start',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(pairing.getPairingInfo().state).toBe('pending');
     pairing.cancelPairing();
   });
 });

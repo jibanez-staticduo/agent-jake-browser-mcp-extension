@@ -19,6 +19,15 @@ const pairingStateText = computed(() => {
 });
 
 const connectionText = computed(() => (server.connected ? 'CONECTADO' : 'DESCONECTADO'));
+
+const sourceLabel = computed(() => {
+  switch (server.info?.source) {
+    case 'manual': return 'override manual';
+    case 'config.json': return 'config.json del paquete';
+    case 'build': return 'compilado en el build';
+    default: return '';
+  }
+});
 </script>
 
 <template>
@@ -40,8 +49,11 @@ const connectionText = computed(() => (server.connected ? 'CONECTADO' : 'DESCONE
         @input="server.markDraftTouched()"
       >
       <span class="field-hint">
-        Vacío = valor compilado en el build.
-        <template v-if="server.effectiveUrl"> En uso: {{ server.effectiveUrl }}</template>
+        Vacío = embebido (config.json) o valor del build.
+        <template v-if="server.effectiveUrl">
+          En uso: {{ server.effectiveUrl }}
+          <template v-if="sourceLabel"> · origen: {{ sourceLabel }}</template>
+        </template>
       </span>
     </div>
 

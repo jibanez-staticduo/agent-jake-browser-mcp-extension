@@ -15,6 +15,7 @@
 
 import {
   STORAGE_KEYS,
+  loadBundleConfig,
   getEffectiveConfig,
   hasStoredServerUrl,
   httpOrigin,
@@ -238,7 +239,10 @@ export async function maybeAutoStartPairing(): Promise<void> {
   }
 
   if (hasToken) return;
-  if (!(await hasStoredServerUrl())) return;
+  // Auto-pair only against a URL the user or the package opted into, never
+  // against the bare build default (a LAN server would get spammed and the
+  // open-LAN mode must keep working without pairing).
+  if (!(await hasStoredServerUrl()) && (await loadBundleConfig()) === null) return;
 
   try {
     await startPairing();

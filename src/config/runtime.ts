@@ -9,6 +9,13 @@
  *   ajb.token         token obtained via pairing or typed by the user
  *   ajb.connectionId  persistent UUID that identifies this browser install
  *   ajb.pairCode      OTP of an in-flight pairing flow (survives SW restarts)
+ *
+ * A packaged `config.json` at the extension root (injected by the server when
+ * it builds the download zip) sits between those two levels. Full precedence:
+ *   1. ajb.serverUrl in chrome.storage.local  (manual override / pairing)
+ *   2. config.json in the package            ({"version":1,"wsUrl":"wss://..."})
+ *   3. build-time VITE_WS_* defaults
+ * Any missing/invalid config.json falls back silently to level 3.
  */
 
 import { CONFIG } from '@/types/config';
@@ -34,9 +41,13 @@ export interface RuntimeServerConfig extends ParsedServerUrl {
   token: string;
   /** Persistent per-install UUID (always present). */
   connectionId: string;
-  /** True when host/port/path come from ajb.serverUrl instead of build defaults. */
+  /** Where host/port/path came from. */
+  source: ServerConfigSource;
+  /** True when host/port/path come from ajb.serverUrl (source === 'manual'). */
   fromStorage: boolean;
 }
+
+export type ServerConfigSource = 'manual' | 'config.json' | 'build';
 
 function storageGet(keys: string[]): Promise<Record<string, unknown>> {
   return chrome.storage.local.get(keys) as Promise<Record<string, unknown>>;
@@ -92,6 +103,46 @@ export function parseWsUrl(raw: string): ParsedServerUrl | null {
 }
 
 /**
+ * Parsed `config.json` shipped inside the extension package (the server
+ * injects it when serving /download). Loaded once per service-worker
+ * lifetime; any problem (missing file, bad JSON, wrong version, invalid
+ * wsUrl) resolves to null and the caller silently falls through.
+ */
+export const BUNDLE_CONFIG_FILE = 'config.json';
+
+let bundleConfigCache: Promise<ParsedServerUrl | null> | null = null;
+
+async function fetchBundleConfig(): Promise<ParsedServerUrl | null> {
+  try {
+    const response = await fetch(chrome.runtime.getURL(BUNDLE_CONFIG_FILE));
+    // Missing extension resources may surface as an error status or as an
+    // opaque synthesized page; json() then throws and we catch below.
+    if (response.status && response.status >= 400) return null;
+    const raw = await response.json() as { version?: unknown; wsUrl?: unknown };
+    if (!raw || typeof raw !== 'object') return null;
+    if (raw.version !== 1) return null;
+    if (typeof raw.wsUrl !== 'string') return null;
+    const trimmed = raw.wsUrl.trim();
+    // The embedded config must be an explicit ws/wss URL — no bare hosts.
+    if (!/^wss?:\/\//i.test(trimmed)) return null;
+    return parseWsUrl(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cached load of the packaged config.json (promise memoised for the SW
+ * lifetime, including negative results). Exported for diagnostics/tests.
+ */
+export function loadBundleConfig(): Promise<ParsedServerUrl | null> {
+  if (!bundleConfigCache) {
+    bundleConfigCache = fetchBundleConfig();
+  }
+  return bundleConfigCache;
+}
+
+/**
  * Ensure the persistent per-install connection UUID exists and return it.
  */
 export async function ensureConnectionId(): Promise<string> {
@@ -107,8 +158,9 @@ export async function ensureConnectionId(): Promise<string> {
 }
 
 /**
- * Effective server config: runtime override (ajb.serverUrl) when valid,
- * otherwise build-time defaults. Token follows `ajb.token ?? CONFIG.WS_TOKEN`
+ * Effective server config following the precedence
+ * storage (ajb.serverUrl) > packaged config.json > build defaults.
+ * Token follows `ajb.token ?? CONFIG.WS_TOKEN`
  * (an explicitly stored empty string clears the token for open-LAN setups).
  */
 export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
@@ -118,12 +170,26 @@ export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
     : '';
   const parsed = parseWsUrl(rawUrl);
 
-  const base: ParsedServerUrl = parsed ?? {
-    secure: CONFIG.WS_SECURE,
-    hostname: CONFIG.WS_HOST,
-    port: CONFIG.WS_PORT,
-    path: CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/, '').replace(/\/+$/, '')}` : '',
-  };
+  let base: ParsedServerUrl;
+  let source: ServerConfigSource;
+  if (parsed) {
+    base = parsed;
+    source = 'manual';
+  } else {
+    const bundle = await loadBundleConfig();
+    if (bundle) {
+      base = bundle;
+      source = 'config.json';
+    } else {
+      base = {
+        secure: CONFIG.WS_SECURE,
+        hostname: CONFIG.WS_HOST,
+        port: CONFIG.WS_PORT,
+        path: CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/, '').replace(/\/+$/, '')}` : '',
+      };
+      source = 'build';
+    }
+  }
 
   const token = typeof stored[STORAGE_KEYS.token] === 'string'
     ? (stored[STORAGE_KEYS.token] as string)
@@ -136,7 +202,8 @@ export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
     scheme: base.secure ? 'wss' : 'ws',
     token,
     connectionId,
-    fromStorage: parsed !== null,
+    source,
+    fromStorage: source === 'manual',
   };
 }
 
