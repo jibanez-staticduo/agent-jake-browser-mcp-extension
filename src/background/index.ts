@@ -226,6 +226,7 @@ async function handlePopupMessage(message: {
       return {
         effectiveUrl: buildDisplayUrl(cfg),
         fromStorage: cfg.fromStorage,
+        source: cfg.source,
         storedServerUrl: typeof stored[STORAGE_KEYS.serverUrl] === 'string'
           ? (stored[STORAGE_KEYS.serverUrl] as string)
           : '',

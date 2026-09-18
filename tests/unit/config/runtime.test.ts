@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const store: Record<string, unknown> = {};
 
@@ -24,6 +24,9 @@ const mockChrome = {
       }),
     },
   },
+  runtime: {
+    getURL: (path: string) => `chrome-extension://test-id/${path}`,
+  },
 };
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
@@ -38,22 +41,52 @@ vi.mock('@/types/config', () => ({
   },
 }));
 
-import {
-  buildWsUrl,
-  ensureConnectionId,
-  getEffectiveConfig,
-  httpOrigin,
-  parseWsUrl,
-  STORAGE_KEYS,
-} from '@/config/runtime';
+type RuntimeModule = typeof import('@/config/runtime');
+
+async function loadRuntime(): Promise<RuntimeModule> {
+  vi.resetModules();
+  return await import('@/config/runtime');
+}
+
+const fetchMock = vi.fn();
+
+function bundleResponse(body: unknown, status = 200) {
+  return Promise.resolve({
+    ok: status < 400,
+    status,
+    json: async () => body,
+  });
+}
+
+function throwingJson(status = 200) {
+  return Promise.resolve({
+    ok: status < 400,
+    status,
+    json: async () => {
+      throw new SyntaxError('Unexpected token < in JSON');
+    },
+  });
+}
+
+/** Default: no packaged config.json (fetch of a missing extension resource). */
+function missingBundle() {
+  fetchMock.mockImplementation(() => Promise.reject(new Error('not found')));
+}
 
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
   vi.clearAllMocks();
+  vi.stubGlobal('fetch', fetchMock);
+  missingBundle();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('parseWsUrl', () => {
-  it('parses a secure URL with default port and no path', () => {
+  it('parses a secure URL with default port and no path', async () => {
+    const { parseWsUrl } = await loadRuntime();
     expect(parseWsUrl('wss://agent-browser.staticduo.com')).toEqual({
       secure: true,
       hostname: 'agent-browser.staticduo.com',
@@ -62,7 +95,8 @@ describe('parseWsUrl', () => {
     });
   });
 
-  it('parses an insecure URL with explicit port and path', () => {
+  it('parses an insecure URL with explicit port and path', async () => {
+    const { parseWsUrl } = await loadRuntime();
     expect(parseWsUrl('ws://192.168.1.5:8765/jake')).toEqual({
       secure: false,
       hostname: '192.168.1.5',
@@ -71,7 +105,8 @@ describe('parseWsUrl', () => {
     });
   });
 
-  it('maps http/https to ws/wss and strips trailing slashes', () => {
+  it('maps http/https to ws/wss and strips trailing slashes', async () => {
+    const { parseWsUrl } = await loadRuntime();
     expect(parseWsUrl('https://example.com/mcp/')).toEqual({
       secure: true,
       hostname: 'example.com',
@@ -81,13 +116,15 @@ describe('parseWsUrl', () => {
     expect(parseWsUrl('http://localhost:8765')?.secure).toBe(false);
   });
 
-  it('treats a bare host as secure', () => {
+  it('treats a bare host as secure', async () => {
+    const { parseWsUrl } = await loadRuntime();
     const parsed = parseWsUrl('browser.example.com');
     expect(parsed?.secure).toBe(true);
     expect(parsed?.hostname).toBe('browser.example.com');
   });
 
-  it('rejects empty and malformed values', () => {
+  it('rejects empty and malformed values', async () => {
+    const { parseWsUrl } = await loadRuntime();
     expect(parseWsUrl('')).toBeNull();
     expect(parseWsUrl('   ')).toBeNull();
     expect(parseWsUrl('http://')).toBeNull();
@@ -95,8 +132,9 @@ describe('parseWsUrl', () => {
   });
 });
 
-describe('getEffectiveConfig', () => {
-  it('falls back to build defaults when nothing is stored', async () => {
+describe('precedence: storage > config.json > build', () => {
+  it('uses build defaults when storage is empty and there is no config.json', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
     const cfg = await getEffectiveConfig();
     expect(cfg.hostname).toBe('build.host');
     expect(cfg.port).toBe(9999);
@@ -104,31 +142,104 @@ describe('getEffectiveConfig', () => {
     expect(cfg.scheme).toBe('ws');
     expect(cfg.path).toBe('');
     expect(cfg.token).toBe('buildtok');
+    expect(cfg.source).toBe('build');
     expect(cfg.fromStorage).toBe(false);
     expect(cfg.connectionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
   });
 
-  it('uses the stored server URL when valid', async () => {
-    store[STORAGE_KEYS.serverUrl] = 'wss://agent-browser.staticduo.com/jake';
+  it('uses the packaged config.json when storage has no server URL', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('config.json')) {
+        return bundleResponse({ version: 1, wsUrl: 'wss://embedded.example.com/mcp' });
+      }
+      return Promise.reject(new Error('unexpected fetch'));
+    });
     const cfg = await getEffectiveConfig();
-    expect(cfg.hostname).toBe('agent-browser.staticduo.com');
+    expect(cfg.hostname).toBe('embedded.example.com');
     expect(cfg.port).toBe(443);
     expect(cfg.secure).toBe(true);
     expect(cfg.scheme).toBe('wss');
-    expect(cfg.path).toBe('/jake');
-    expect(cfg.fromStorage).toBe(true);
-  });
-
-  it('ignores an unparseable stored URL and keeps build defaults', async () => {
-    store[STORAGE_KEYS.serverUrl] = 'http://';
-    const cfg = await getEffectiveConfig();
-    expect(cfg.hostname).toBe('build.host');
+    expect(cfg.path).toBe('/mcp');
+    expect(cfg.source).toBe('config.json');
     expect(cfg.fromStorage).toBe(false);
   });
 
+  it('prefers the manual storage override over a valid config.json', async () => {
+    const { getEffectiveConfig, STORAGE_KEYS } = await loadRuntime();
+    store[STORAGE_KEYS.serverUrl] = 'ws://manual.local:1234';
+    fetchMock.mockImplementation(() =>
+      bundleResponse({ version: 1, wsUrl: 'wss://embedded.example.com' }));
+    const cfg = await getEffectiveConfig();
+    expect(cfg.hostname).toBe('manual.local');
+    expect(cfg.port).toBe(1234);
+    expect(cfg.source).toBe('manual');
+    expect(cfg.fromStorage).toBe(true);
+  });
+});
+
+describe('config.json fallbacks (all silent, never reject)', () => {
+  const invalidCases: Array<[string, unknown]> = [
+    ['non-1 version', { version: 2, wsUrl: 'wss://embedded.example.com' }],
+    ['missing version', { wsUrl: 'wss://embedded.example.com' }],
+    ['non-ws wsUrl', { version: 1, wsUrl: 'https://embedded.example.com' }],
+    ['garbage wsUrl', { version: 1, wsUrl: '::not a url::' }],
+    ['missing wsUrl', { version: 1 }],
+    ['null wsUrl', { version: 1, wsUrl: null }],
+  ];
+
+  it.each(invalidCases)('falls back to build for %s', async (_label, body) => {
+    const { getEffectiveConfig } = await loadRuntime();
+    fetchMock.mockImplementation(() => bundleResponse(body));
+    const cfg = await getEffectiveConfig();
+    expect(cfg.hostname).toBe('build.host');
+    expect(cfg.source).toBe('build');
+  });
+
+  it('falls back to build when config.json is malformed JSON', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
+    fetchMock.mockImplementation(() => throwingJson());
+    const cfg = await getEffectiveConfig();
+    expect(cfg.source).toBe('build');
+  });
+
+  it('falls back to build when config.json returns HTTP error status', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
+    fetchMock.mockImplementation(() => bundleResponse({}, 404));
+    const cfg = await getEffectiveConfig();
+    expect(cfg.source).toBe('build');
+  });
+});
+
+describe('config.json load caching', () => {
+  it('fetches config.json once per service-worker lifetime', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
+    fetchMock.mockImplementation(() =>
+      bundleResponse({ version: 1, wsUrl: 'wss://embedded.example.com' }));
+    await getEffectiveConfig();
+    await getEffectiveConfig();
+    const bundleFetches = fetchMock.mock.calls.filter(
+      (call) => String(call[0]).includes('config.json'),
+    );
+    expect(bundleFetches).toHaveLength(1);
+  });
+
+  it('caches negative results too', async () => {
+    const { getEffectiveConfig } = await loadRuntime();
+    await getEffectiveConfig();
+    await getEffectiveConfig();
+    const bundleFetches = fetchMock.mock.calls.filter(
+      (call) => String(call[0]).includes('config.json'),
+    );
+    expect(bundleFetches).toHaveLength(1);
+  });
+});
+
+describe('getEffectiveConfig token', () => {
   it('applies token precedence: stored value > stored empty > build default', async () => {
+    const { getEffectiveConfig, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.token] = 'pairtok';
     expect((await getEffectiveConfig()).token).toBe('pairtok');
 
@@ -142,6 +253,7 @@ describe('getEffectiveConfig', () => {
 
 describe('ensureConnectionId', () => {
   it('generates the UUID once and reuses it afterwards', async () => {
+    const { ensureConnectionId, STORAGE_KEYS } = await loadRuntime();
     const first = await ensureConnectionId();
     expect(first).toMatch(/^[0-9a-f-]{36}$/);
     expect(store[STORAGE_KEYS.connectionId]).toBe(first);
@@ -156,6 +268,7 @@ describe('ensureConnectionId', () => {
 
 describe('buildWsUrl / httpOrigin', () => {
   it('adds token and connectionId query params, URL-encoded', async () => {
+    const { getEffectiveConfig, buildWsUrl, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.serverUrl] = 'wss://agent-browser.staticduo.com';
     store[STORAGE_KEYS.token] = 'a&b=c';
     store[STORAGE_KEYS.connectionId] = 'cid-123';
@@ -167,6 +280,7 @@ describe('buildWsUrl / httpOrigin', () => {
   });
 
   it('omits the token param when there is no token but keeps connectionId', async () => {
+    const { getEffectiveConfig, buildWsUrl, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.token] = '';
     store[STORAGE_KEYS.connectionId] = 'cid-open';
     const cfg = await getEffectiveConfig();
@@ -176,6 +290,7 @@ describe('buildWsUrl / httpOrigin', () => {
   });
 
   it('keeps non-default ports and the path', async () => {
+    const { getEffectiveConfig, buildWsUrl, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.serverUrl] = 'ws://192.168.1.5:8765/jake';
     store[STORAGE_KEYS.token] = '';
     store[STORAGE_KEYS.connectionId] = 'cid-lan';
@@ -184,11 +299,26 @@ describe('buildWsUrl / httpOrigin', () => {
   });
 
   it('derives the http origin with the matching scheme and port rules', async () => {
+    const { getEffectiveConfig, httpOrigin, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.serverUrl] = 'wss://pair.example.com';
     store[STORAGE_KEYS.connectionId] = 'cid-1';
     expect(httpOrigin(await getEffectiveConfig())).toBe('https://pair.example.com');
 
     store[STORAGE_KEYS.serverUrl] = 'ws://lan.local:8765';
     expect(httpOrigin(await getEffectiveConfig())).toBe('http://lan.local:8765');
+  });
+
+  it('derives the http origin from config.json when that is the source', async () => {
+    const { getEffectiveConfig, httpOrigin, STORAGE_KEYS } = await loadRuntime();
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('config.json')) {
+        return bundleResponse({ version: 1, wsUrl: 'wss://embedded.example.com/ws' });
+      }
+      return Promise.reject(new Error('unexpected fetch'));
+    });
+    store[STORAGE_KEYS.connectionId] = 'cid-emb';
+    const cfg = await getEffectiveConfig();
+    expect(cfg.source).toBe('config.json');
+    expect(httpOrigin(cfg)).toBe('https://embedded.example.com');
   });
 });
