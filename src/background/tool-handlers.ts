@@ -7,6 +7,7 @@ import type { TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
+import { redactPayload } from './redact';
 import { getKeyDefinition } from '@/constants/keys';
 import { createToolContext } from './tools/utils';
 import type { HandlerContext } from './tools/handlers';
@@ -90,7 +91,7 @@ export function createToolHandlers(tabManager: TabManager) {
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = getToolDescription(type, payload, result);
-      logTool(type, description, true, durationMs, { payload, result });
+      logTool(type, description, true, durationMs, { payload: redactPayload(payload), result });
 
       log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
 
@@ -103,7 +104,7 @@ export function createToolHandlers(tabManager: TabManager) {
       const durationMs = Math.round(performance.now() - startTime);
       log.error(`[Tool] Failed: ${type} (id: ${id}) - ${(error as Error).message} in ${durationMs}ms`);
 
-      logTool(type, (error as Error).message, false, durationMs, { payload, error: (error as Error).message });
+      logTool(type, (error as Error).message, false, durationMs, { payload: redactPayload(payload), error: (error as Error).message });
 
       return {
         id,
@@ -130,6 +131,7 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
     case 'browser_click':
       return `Click on "${p?.ref || p?.selector}"`;
     case 'browser_type':
+      if (p?.secret) return `Type secret into "${p?.ref || p?.selector}"`;
       return `Type "${String(p?.text || '').slice(0, 20)}${(String(p?.text || '').length > 20) ? '...' : ''}"`;
     case 'browser_hover':
       return `Hover on "${p?.ref || p?.selector}"`;
