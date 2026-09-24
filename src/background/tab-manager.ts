@@ -38,8 +38,13 @@ async function sendCommandLiftingForeignFrames(tabId: number, method: string, pa
 }
 
 export async function purgeForeignExtensionFrames(tabId: number): Promise<number> {
+  // Not allFrames: that includes the foreign extension frame itself, and injecting there fails
+  // the whole call with the very error we are trying to lift. Web frames only.
+  const frames = (await chrome.webNavigation.getAllFrames({ tabId })) ?? [];
+  const frameIds = frames.filter((f) => /^(https?|file):/.test(f.url)).map((f) => f.frameId);
+  if (!frameIds.length) return 0;
   const results = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
+    target: { tabId, frameIds },
     args: [chrome.runtime.id],
     func: (ownId: string) => {
       let removed = 0;
