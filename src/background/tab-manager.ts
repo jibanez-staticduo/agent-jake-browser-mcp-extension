@@ -16,6 +16,51 @@ export interface CdpStatus {
   lastCdpError: string | null;
 }
 
+/**
+ * Chrome refuses every debugger command on a tab that holds a frame of ANOTHER extension
+ * ("Cannot access a chrome-extension:// URL of different extension"). Password managers
+ * inject exactly that: 1Password's inline autofill menu is a chrome-extension:// iframe that
+ * appears on any login page with a saved item, and from then on click/type/evaluate all fail.
+ * Removing those frames from the DOM lifts the block; the manager re-creates them on the
+ * next focus, so nothing of theirs breaks.
+ */
+export const FOREIGN_EXTENSION_FRAME_ERROR = 'different extension';
+
+/** chrome.debugger.sendCommand that lifts a foreign-extension-frame block once and retries. */
+async function sendCommandLiftingForeignFrames(tabId: number, method: string, params?: { [key: string]: unknown }): Promise<unknown> {
+  try {
+    return await chrome.debugger.sendCommand({ tabId }, method, params);
+  } catch (error) {
+    if (!((error as Error).message ?? '').includes(FOREIGN_EXTENSION_FRAME_ERROR)) throw error;
+    await purgeForeignExtensionFrames(tabId).catch(() => 0);
+    return chrome.debugger.sendCommand({ tabId }, method, params);
+  }
+}
+
+export async function purgeForeignExtensionFrames(tabId: number): Promise<number> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    args: [chrome.runtime.id],
+    func: (ownId: string) => {
+      let removed = 0;
+      const foreign = (src: string) => src.startsWith('chrome-extension://') && !src.startsWith(`chrome-extension://${ownId}/`);
+      const sweep = (root: Document | ShadowRoot) => {
+        root.querySelectorAll('iframe').forEach((f) => {
+          if (foreign(f.src || '')) { f.remove(); removed++; }
+        });
+        root.querySelectorAll('*').forEach((el) => {
+          const tag = el.tagName.toLowerCase();
+          if (tag.startsWith('com-1password-')) { el.remove(); removed++; return; }
+          if (el.shadowRoot) sweep(el.shadowRoot);
+        });
+      };
+      sweep(document);
+      return removed;
+    },
+  });
+  return results.reduce((n, r) => n + (typeof r.result === 'number' ? r.result : 0), 0);
+}
+
 export class TabManager {
   private connectedTabId: number | null = null;
   private debuggerAttached = false;
@@ -27,6 +72,16 @@ export class TabManager {
    * Initialize tab manager, restoring state from storage.
    */
   async initialize(): Promise<void> {
+    // Chrome swaps a tab for a new one (new id) on prerender activation and similar: without
+    // following it, every command after that answers "No tab with id" on a tab that is open.
+    chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+      if (this.connectedTabId !== removedTabId) return;
+      log.info(`Connected tab ${removedTabId} was replaced by ${addedTabId}; following it`);
+      this.connectedTabId = addedTabId;
+      this.debuggerAttached = false;
+      void chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: addedTabId });
+    });
+
     const stored = await chrome.storage.local.get(DEBUGGER.STORAGE_KEY);
     if (stored[DEBUGGER.STORAGE_KEY]) {
       const tabId = stored[DEBUGGER.STORAGE_KEY] as number;
@@ -180,7 +235,7 @@ export class TabManager {
    */
   private async isDebuggerAttached(tabId: number): Promise<boolean> {
     try {
-      await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+      await sendCommandLiftingForeignFrames(tabId, 'Runtime.enable');
       return true;
     } catch {
       return false;
@@ -200,7 +255,14 @@ export class TabManager {
 
     try {
       log.info(`Attaching debugger to tab ${tabId}...`);
-      await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
+      try {
+        await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
+      } catch (error) {
+        if (!((error as Error).message ?? '').includes(FOREIGN_EXTENSION_FRAME_ERROR)) throw error;
+        const removed = await purgeForeignExtensionFrames(tabId).catch(() => 0);
+        log.warn(`Foreign extension frame blocked the attach to tab ${tabId}; removed ${removed}, retrying`);
+        await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
+      }
       this.debuggerAttached = true;
       this.lastCdpError = null;
       log.info(`Debugger attached to tab ${tabId}`);
@@ -236,7 +298,7 @@ export class TabManager {
   private async enableDebuggerDomains(tabId: number): Promise<void> {
     for (const domain of ['Runtime', 'Page', 'DOM'] as const) {
       try {
-        await chrome.debugger.sendCommand({ tabId }, `${domain}.enable`);
+        await sendCommandLiftingForeignFrames(tabId, `${domain}.enable`);
         log.info(`${domain} domain enabled`);
       } catch (enableError) {
         this.recordCdpError(enableError);
@@ -384,6 +446,7 @@ export class TabManager {
     }
 
     let retriedAfterDetach = false;
+    let retriedAfterPurge = false;
 
     while (true) {
       // Check actual debugger state (not just our flag) and reattach if needed
@@ -420,6 +483,13 @@ export class TabManager {
         const message = (error as Error)?.message || String(error);
         this.recordCdpError(error);
         log.error(`[sendDebuggerCommand] ${method} failed:`, error);
+
+        if (message.includes(FOREIGN_EXTENSION_FRAME_ERROR) && !retriedAfterPurge) {
+          retriedAfterPurge = true;
+          const removed = await purgeForeignExtensionFrames(this.connectedTabId).catch(() => 0);
+          log.warn(`[sendDebuggerCommand] foreign extension frame blocked ${method}; removed ${removed}, retrying`);
+          continue;
+        }
 
         if (message.includes('Debugger is not attached')) {
           if (retriedAfterDetach) {
