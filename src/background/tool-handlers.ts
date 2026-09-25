@@ -62,6 +62,15 @@ export function createToolHandlers(tabManager: TabManager) {
     ...createTabHandlers(ctx),
     ...createUtilityHandlers(ctx),
     ...createDevtoolsHandlers(ctx),
+
+    // Reload this extension from disk (unpacked build just replaced by a deploy). Answer first,
+    // reload right after: the socket drops and the new service worker reconnects on its own.
+    // Deploys call it through the server's loopback-only POST /extension/reload, so no Chrome
+    // debugging port, screen or human is needed to roll out a new build.
+    browser_reload_extension: async () => {
+      setTimeout(() => chrome.runtime.reload(), 300);
+      return { reloading: true, version: chrome.runtime.getManifest().version };
+    },
   };
 
   /**
