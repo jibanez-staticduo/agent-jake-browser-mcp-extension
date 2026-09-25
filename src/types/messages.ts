@@ -35,6 +35,7 @@ export type ToolName =
   | 'browser_iframe_eval'
   | 'browser_iframe_click'
   | 'browser_pdf'
+  | 'browser_reload_extension'
   | 'browser_upload_file'
   | 'browser_network_requests'
   | 'browser_network_request'
