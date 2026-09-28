@@ -24,6 +24,7 @@ export type ToolName =
   | 'browser_new_tab'
   | 'browser_list_tabs'
   | 'browser_switch_tab'
+  | 'browser_send_to_back'
   | 'browser_close_tab'
   | 'browser_get_text'
   | 'browser_get_attribute'

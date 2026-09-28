@@ -551,9 +551,13 @@ export class TabManager {
 
   /**
    * Create a new tab and optionally connect to it.
+   *
+   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
+   * `active: false` would jump the window to the new tab and steal the user's
+   * view. Pass `active: true` only when the user is meant to see it.
    */
-  async createTab(url: string, connect = true): Promise<TabInfo> {
-    const tab = await chrome.tabs.create({ url });
+  async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
+    const tab = await chrome.tabs.create({ url, active });
 
     if (connect && tab.id) {
       // Wait for tab to finish loading
@@ -568,6 +572,73 @@ export class TabManager {
       active: tab.active,
       connected: connect && tab.id === this.connectedTabId,
     };
+  }
+
+  /**
+   * Activate a tab inside its own window (no window focus change).
+   * Returns the tab that was active there before, or null when the tab was
+   * already in front — callers use it as the token for restoreTabBehind.
+   */
+  async bringTabToFront(tabId: number): Promise<number | null> {
+    const tab = await chrome.tabs.get(tabId);
+    const [previous] = await chrome.tabs.query({
+      windowId: tab.windowId,
+      active: true,
+    });
+    if (previous?.id === tabId) {
+      return null;
+    }
+    await chrome.tabs.update(tabId, { active: true });
+    return previous?.id ?? null;
+  }
+
+  /**
+   * Undo a bringTabToFront: put the previously visible tab back, but only if
+   * our tab is still the one in front. If the user switched tabs meanwhile,
+   * their choice wins and we leave it alone.
+   */
+  async restoreTabBehind(tabId: number, previousTabId: number | null): Promise<void> {
+    if (previousTabId === null) {
+      return;
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      const [current] = await chrome.tabs.query({
+        windowId: tab.windowId,
+        active: true,
+      });
+      if (current?.id !== tabId) {
+        return;
+      }
+      await chrome.tabs.update(previousTabId, { active: true });
+    } catch {
+      // The tab to restore was closed mid-capture; nothing to undo.
+    }
+  }
+
+  /**
+   * Push a tab to the background by activating another tab of its window.
+   * No-op when the tab is already hidden or it is the only tab there.
+   */
+  async sendTabToBack(tabId?: number): Promise<number | null> {
+    const targetId = tabId ?? this.connectedTabId;
+    if (!targetId) {
+      throw new Error('No tab specified and no connected tab');
+    }
+
+    const tab = await chrome.tabs.get(targetId);
+    if (!tab.active) {
+      return null;
+    }
+
+    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
+    if (!other?.id) {
+      return null;
+    }
+
+    await chrome.tabs.update(other.id, { active: true });
+    return other.id;
   }
 
   /**

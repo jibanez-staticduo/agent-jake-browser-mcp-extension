@@ -15,15 +15,35 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       return { waited: time };
     },
 
+    /**
+     * A hidden tab does not paint reliably (throttled renderer, stale surface),
+     * so the capture briefly brings the connected tab to the front of its
+     * window and restores the previously visible tab right after. The user
+     * only ever sees a flash; nothing else activates tabs.
+     */
     browser_screenshot: async () => {
-      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
-        'Page.captureScreenshot',
-        { format: 'png' }
-      );
+      const tabId = ctx.tabManager.getConnectedTabId();
+      if (!tabId) {
+        throw new Error('No tab connected');
+      }
 
-      return {
-        image: `data:image/png;base64,${result.data}`,
-      };
+      const previousTabId = await ctx.tabManager.bringTabToFront(tabId);
+      try {
+        if (previousTabId !== null) {
+          // One beat for the renderer to paint its first frame after activation.
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+          'Page.captureScreenshot',
+          { format: 'png' }
+        );
+
+        return {
+          image: `data:image/png;base64,${result.data}`,
+        };
+      } finally {
+        await ctx.tabManager.restoreTabBehind(tabId, previousTabId);
+      }
     },
 
     /**
