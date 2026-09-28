@@ -1,5 +1,5 @@
 /**
- * Tab management tool handlers: new_tab, list_tabs, switch_tab, close_tab.
+ * Tab management tool handlers: new_tab, list_tabs, switch_tab, send_to_back, close_tab.
  */
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
@@ -7,8 +7,8 @@ import type { HandlerContext, HandlerMap } from './types';
 export function createTabHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_new_tab: async (payload) => {
-      const { url } = schemas.browser_new_tab.parse(payload);
-      const tabInfo = await ctx.tabManager.createTab(url, true);
+      const { url, switchTo } = schemas.browser_new_tab.parse(payload);
+      const tabInfo = await ctx.tabManager.createTab(url, true, switchTo);
       return { tab: tabInfo };
     },
 
@@ -20,6 +20,12 @@ export function createTabHandlers(ctx: HandlerContext): HandlerMap {
       const { tabId } = schemas.browser_switch_tab.parse(payload);
       await ctx.tabManager.switchTab(tabId);
       return { switched: tabId };
+    },
+
+    browser_send_to_back: async (payload) => {
+      const { tabId } = schemas.browser_send_to_back.parse(payload);
+      const activatedTabId = await ctx.tabManager.sendTabToBack(tabId);
+      return { sentToBack: tabId ?? ctx.tabManager.getConnectedTabId(), activatedTabId };
     },
 
     browser_close_tab: async () => {

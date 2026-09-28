@@ -104,7 +104,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 - **Vue 3 Popup UI** - Modern, responsive extension interface with dark theme
 - **Dual Connection Model** - Local MCP server + Remote Laravel Reverb WebSocket
 - **Authentication** - Secure login with Laravel Sanctum token-based auth
-- **Activity Logging** - Full audit trail of all actions with filtering
+- **Activity Logging** - Local action and status history without page payloads or credentials
 - **Session Management** - Auto-restore sessions, heartbeat keep-alive, graceful offline handling
 - **Tab Management** - Connect, switch, and manage browser tabs
 - **Console Log Access** - Read browser console messages
@@ -143,6 +143,15 @@ Together, these provide a complete browser automation solution enabling AI agent
 3. **Select a Tab** - Choose a browser tab to automate from the popup
 
 4. **Monitor Status** - The popup shows connection state and activity log
+
+### Network inspection
+
+`browser_network_requests` and `browser_network_request` show only the URL origin.
+`browser_network_request` shows validated MIME type, content length and cache
+directives; other header values are redacted. There is currently no option to
+reveal redacted header values or removed URL details. Without `part`, it returns metadata and
+headers only. Request and response bodies require an explicit `part` value and
+may contain credentials, so request them only when needed.
 
 ### Connection Indicators
 

@@ -15,15 +15,35 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       return { waited: time };
     },
 
+    /**
+     * A hidden tab does not paint reliably (throttled renderer, stale surface),
+     * so the capture briefly brings the connected tab to the front of its
+     * window and restores the previously visible tab right after. The user
+     * only ever sees a flash; nothing else activates tabs.
+     */
     browser_screenshot: async () => {
-      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
-        'Page.captureScreenshot',
-        { format: 'png' }
-      );
+      const tabId = ctx.tabManager.getConnectedTabId();
+      if (!tabId) {
+        throw new Error('No tab connected');
+      }
 
-      return {
-        image: `data:image/png;base64,${result.data}`,
-      };
+      const previousTabId = await ctx.tabManager.bringTabToFront(tabId);
+      try {
+        if (previousTabId !== null) {
+          // One beat for the renderer to paint its first frame after activation.
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+          'Page.captureScreenshot',
+          { format: 'png' }
+        );
+
+        return {
+          image: `data:image/png;base64,${result.data}`,
+        };
+      } finally {
+        await ctx.tabManager.restoreTabBehind(tabId, previousTabId);
+      }
     },
 
     /**
@@ -282,9 +302,14 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       }
 
       // Button (or an input inside an iframe): let the page open its chooser and answer it.
-      await ctx.tabManager.sendDebuggerCommand('Page.setInterceptFileChooserDialog', { enabled: true });
+      ctx.tabManager.beginFileChooser();
+      const chooser = new AbortController();
+      const tabId = ctx.tabManager.getConnectedTabId();
       try {
-        const opened = ctx.tabManager.waitForDebuggerEvent<{ backendNodeId: number }>('Page.fileChooserOpened', 10000);
+        if (tabId === null) throw new Error('No tab connected for file chooser');
+        await ctx.tabManager.setFileChooserInterception(tabId, true);
+        const opened = ctx.tabManager.waitForDebuggerEvent<{ backendNodeId: number }>('Page.fileChooserOpened', 10000, chooser.signal);
+        void opened.catch(() => {});
         await ctx.sendToContent('scrollIntoView', { selector: target.selector }, target.frameId);
         const coords = await ctx.sendToContent<{ x: number; y: number; exact?: boolean }>(
           'getElementCoordinates', { selector: target.selector, clickable: true }, target.frameId);
@@ -296,10 +321,12 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
           await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
         }
         const { backendNodeId } = await opened;
-        await ctx.tabManager.sendDebuggerCommand('DOM.setFileInputFiles', { backendNodeId, files });
+        await ctx.tabManager.setChooserFiles(tabId, backendNodeId, files);
         return { uploaded: true, files, via: 'fileChooser' };
       } finally {
-        await ctx.tabManager.sendDebuggerCommand('Page.setInterceptFileChooserDialog', { enabled: false }).catch(() => {});
+        chooser.abort();
+        if (tabId !== null) await ctx.tabManager.setFileChooserInterception(tabId, false).catch(() => {});
+        ctx.tabManager.endFileChooser();
       }
     },
   };

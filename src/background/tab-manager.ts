@@ -69,9 +69,13 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
 export class TabManager {
   private connectedTabId: number | null = null;
   private debuggerAttached = false;
+  private captureEvents = false;
+  private connectionGeneration = 0;
+  private disconnecting = false;
   private lastCdpError: string | null = null;
   private pendingNewTab: TabInfo | null = null;
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
+  private fileChooserInProgress = false;
 
   /**
    * Initialize tab manager, restoring state from storage.
@@ -181,6 +185,7 @@ export class TabManager {
       await this.attachDebugger(tabId);
 
       this.connectedTabId = tabId;
+      this.captureEvents = true;
       await chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: tabId });
 
       // Get tab info for logging
@@ -200,17 +205,25 @@ export class TabManager {
    * Disconnect from the current tab.
    */
   async disconnectTab(): Promise<void> {
+    this.captureEvents = false;
+    this.cancelEventWaiters();
+    pageEvents.reset();
     if (!this.connectedTabId) {
       return;
     }
 
+    this.disconnecting = true;
     const tabId = this.connectedTabId;
-    await this.setLiveConnectionCloseGuard(tabId, false);
-
-    await this.detachDebugger();
-
-    this.connectedTabId = null;
-    await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
+    try {
+      await this.setLiveConnectionCloseGuard(tabId, false);
+    } finally {
+      await this.detachDebugger();
+      this.connectedTabId = null;
+      this.cancelEventWaiters();
+      pageEvents.reset();
+      this.disconnecting = false;
+      await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
+    }
 
     log.info(`Disconnected from tab: ${tabId}`);
     await logTab('tab_disconnect', `Disconnected from tab ${tabId}`, true, { tabId });
@@ -256,6 +269,9 @@ export class TabManager {
    * not the target list — is what answers it.
    */
   private async attachDebugger(tabId: number): Promise<void> {
+    this.captureEvents = false;
+    this.cancelEventWaiters();
+    pageEvents.reset();
     this.debuggerAttached = false;
 
     try {
@@ -295,6 +311,7 @@ export class TabManager {
     // Always enable domains after attaching or detecting existing attachment
     // These calls are idempotent (safe to call multiple times)
     await this.enableDebuggerDomains(tabId);
+    if (this.connectedTabId === tabId) this.captureEvents = true;
   }
 
   /**
@@ -324,22 +341,74 @@ export class TabManager {
     await this.installDialogAutoAccept(tabId);
   }
 
-  /**
-   * Resolve with the params of the next `method` event from the connected tab.
-   * Used by the file chooser flow of browser_upload_file.
-   */
-  waitForDebuggerEvent<T = Record<string, unknown>>(method: string, timeout = 10000): Promise<T> {
+  /** Only one upload may consume the next file chooser event. */
+  beginFileChooser(): void {
+    if (this.disconnecting) throw new Error('Tab is disconnecting');
+    if (this.fileChooserInProgress) throw new Error('A file chooser upload is already in progress');
+    this.fileChooserInProgress = true;
+  }
+
+  endFileChooser(): void {
+    this.fileChooserInProgress = false;
+  }
+
+  private cancelEventWaiters(): void {
+    this.connectionGeneration++;
+    for (const waiter of [...this.eventWaiters]) {
+      waiter.reject(new Error('Debugger event wait canceled because the tab changed or detached'));
+    }
+  }
+
+  async setChooserFiles(tabId: number, backendNodeId: number, files: string[]): Promise<void> {
+    if (this.disconnecting || this.connectedTabId !== tabId) throw new Error('Tab changed during file upload');
+    // Pin the command to the original tab; reattachment would invalidate the chooser node.
+    await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', { backendNodeId, files });
+  }
+
+  async setFileChooserInterception(tabId: number, enabled: boolean): Promise<void> {
+    if (enabled && (this.disconnecting || this.connectedTabId !== tabId)) throw new Error('Tab changed during file upload');
+    await chrome.debugger.sendCommand({ tabId }, 'Page.setInterceptFileChooserDialog', { enabled });
+  }
+
+  /** Resolve with the next matching event from the connected tab. */
+  waitForDebuggerEvent<T = Record<string, unknown>>(method: string, timeout = 10000, signal?: AbortSignal): Promise<T> {
+    const tabId = this.connectedTabId;
+    if (tabId === null || this.disconnecting) return Promise.reject(new Error('No connected tab for debugger event wait'));
+    const generation = this.connectionGeneration;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const waiter = { method, tabId, generation, resolve: (params: unknown) => {
+        cleanup();
+        resolve(params as T);
+      }, reject: (error: Error) => {
+        cleanup();
+        reject(error);
+      } };
+      const cleanup = () => {
+        clearTimeout(timer);
         this.eventWaiters.delete(waiter);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(new Error(`Stopped waiting for ${method}`));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
         reject(new Error(`Timed out after ${timeout}ms waiting for ${method}`));
       }, timeout);
-      const waiter = { method, resolve: (p: unknown) => { clearTimeout(timer); resolve(p as T); } };
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.eventWaiters.add(waiter);
     });
   }
 
-  private eventWaiters = new Set<{ method: string; resolve: (params: unknown) => void }>();
+  private eventWaiters = new Set<{
+    method: string; tabId: number; generation: number;
+    resolve: (params: unknown) => void; reject: (error: Error) => void;
+  }>();
 
   private async installDialogAutoAccept(tabId: number): Promise<void> {
     const debuggerTarget = { tabId };
@@ -363,11 +432,10 @@ export class TabManager {
       return;
     }
 
-    pageEvents.handle(method, params as Record<string, unknown> | undefined);
+    if (this.captureEvents) pageEvents.handle(method, params as Record<string, unknown> | undefined);
 
     for (const waiter of this.eventWaiters) {
-      if (waiter.method === method) {
-        this.eventWaiters.delete(waiter);
+      if (waiter.method === method && waiter.tabId === source.tabId && waiter.generation === this.connectionGeneration) {
         waiter.resolve(params ?? {});
       }
     }
@@ -433,6 +501,9 @@ export class TabManager {
    * Mark debugger as detached (called from onDetach listener).
    */
   markDebuggerDetached(): void {
+    this.captureEvents = false;
+    this.cancelEventWaiters();
+    pageEvents.reset();
     this.debuggerAttached = false;
     this.lastCdpError = 'CDP_DEBUGGER_DETACHED: Debugger detached unexpectedly';
   }
@@ -555,9 +626,13 @@ export class TabManager {
 
   /**
    * Create a new tab and optionally connect to it.
+   *
+   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
+   * `active: false` would jump the window to the new tab and steal the user's
+   * view. Pass `active: true` only when the user is meant to see it.
    */
-  async createTab(url: string, connect = true): Promise<TabInfo> {
-    const tab = await chrome.tabs.create({ url });
+  async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
+    const tab = await chrome.tabs.create({ url, active });
 
     if (connect && tab.id) {
       // Wait for tab to finish loading
@@ -572,6 +647,73 @@ export class TabManager {
       active: tab.active,
       connected: connect && tab.id === this.connectedTabId,
     };
+  }
+
+  /**
+   * Activate a tab inside its own window (no window focus change).
+   * Returns the tab that was active there before, or null when the tab was
+   * already in front — callers use it as the token for restoreTabBehind.
+   */
+  async bringTabToFront(tabId: number): Promise<number | null> {
+    const tab = await chrome.tabs.get(tabId);
+    const [previous] = await chrome.tabs.query({
+      windowId: tab.windowId,
+      active: true,
+    });
+    if (previous?.id === tabId) {
+      return null;
+    }
+    await chrome.tabs.update(tabId, { active: true });
+    return previous?.id ?? null;
+  }
+
+  /**
+   * Undo a bringTabToFront: put the previously visible tab back, but only if
+   * our tab is still the one in front. If the user switched tabs meanwhile,
+   * their choice wins and we leave it alone.
+   */
+  async restoreTabBehind(tabId: number, previousTabId: number | null): Promise<void> {
+    if (previousTabId === null) {
+      return;
+    }
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      const [current] = await chrome.tabs.query({
+        windowId: tab.windowId,
+        active: true,
+      });
+      if (current?.id !== tabId) {
+        return;
+      }
+      await chrome.tabs.update(previousTabId, { active: true });
+    } catch {
+      // The tab to restore was closed mid-capture; nothing to undo.
+    }
+  }
+
+  /**
+   * Push a tab to the background by activating another tab of its window.
+   * No-op when the tab is already hidden or it is the only tab there.
+   */
+  async sendTabToBack(tabId?: number): Promise<number | null> {
+    const targetId = tabId ?? this.connectedTabId;
+    if (!targetId) {
+      throw new Error('No tab specified and no connected tab');
+    }
+
+    const tab = await chrome.tabs.get(targetId);
+    if (!tab.active) {
+      return null;
+    }
+
+    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
+    if (!other?.id) {
+      return null;
+    }
+
+    await chrome.tabs.update(other.id, { active: true });
+    return other.id;
   }
 
   /**
