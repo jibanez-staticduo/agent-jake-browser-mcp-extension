@@ -283,3 +283,114 @@ describe('TabManager CDP readiness', () => {
     );
   });
 });
+
+describe('TabManager background-tab control', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('createTab opens in the background by default', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: false });
+
+    await manager.createTab('https://example.com', false);
+
+    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
+      url: 'https://example.com',
+      active: false,
+    });
+  });
+
+  it('createTab activates the tab only when asked', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });
+
+    await manager.createTab('https://example.com', false, true);
+
+    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
+      url: 'https://example.com',
+      active: true,
+    });
+  });
+
+  it('bringTabToFront activates the tab and returns the previous one', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 3 }]);
+
+    const previous = await manager.bringTabToFront(5);
+
+    expect(previous).toBe(3);
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(5, { active: true });
+  });
+
+  it('bringTabToFront is a no-op when the tab is already visible', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
+
+    const previous = await manager.bringTabToFront(5);
+
+    expect(previous).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('restoreTabBehind puts the user tab back when ours is still in front', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
+
+    await manager.restoreTabBehind(5, 3);
+
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(3, { active: true });
+  });
+
+  it('restoreTabBehind leaves the user alone if they switched tabs meanwhile', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 9 }]);
+
+    await manager.restoreTabBehind(5, 3);
+
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('restoreTabBehind survives the previous tab being closed', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockRejectedValue(new Error('No tab with id: 3'));
+
+    await expect(manager.restoreTabBehind(5, 3)).resolves.toBeUndefined();
+  });
+
+  it('sendTabToBack activates a sibling tab of the same window', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
+
+    const activated = await manager.sendTabToBack(5);
+
+    expect(activated).toBe(6);
+    expect(mockChrome.tabs.update).toHaveBeenCalledWith(6, { active: true });
+  });
+
+  it('sendTabToBack is a no-op for an already hidden tab', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: false });
+
+    const activated = await manager.sendTabToBack(5);
+
+    expect(activated).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('sendTabToBack is a no-op when the tab is alone in its window', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
+
+    const activated = await manager.sendTabToBack(5);
+
+    expect(activated).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+});
