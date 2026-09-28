@@ -10,6 +10,43 @@ import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
 
 const TEXTY = /^(text\/|application\/(json|javascript|xml|x-www-form-urlencoded|graphql|ld\+json|problem\+json))|\+json|\+xml/;
+const DIAGNOSTIC_MIME_TYPES = new Set([
+  'application/json', 'application/javascript', 'application/xml', 'application/pdf',
+  'application/octet-stream', 'application/x-www-form-urlencoded', 'multipart/form-data',
+  'text/html', 'text/plain', 'text/css', 'text/javascript',
+  'image/png', 'image/jpeg', 'image/gif', 'image/svg+xml',
+]);
+function redactUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) return '[REDACTED URL]';
+    return url.origin;
+  } catch {
+    return '[REDACTED URL]';
+  }
+}
+
+function diagnosticHeaderValue(name: string, value: string): string {
+  const key = name.toLowerCase().replace(/[-_]/g, '');
+  if (key === 'contenttype') {
+    const mime = value.split(';', 1)[0].trim().toLowerCase();
+    return DIAGNOSTIC_MIME_TYPES.has(mime) ? mime : '[REDACTED]';
+  }
+  if (key === 'contentlength') return /^\d{1,20}$/.test(value) ? value : '[REDACTED]';
+  if (key === 'cachecontrol') {
+    const directives = value.toLowerCase().split(',').map((item) => item.trim());
+    if (directives.every((item) => /^(?:public|private|no-cache|no-store|must-revalidate|proxy-revalidate|immutable|(?:s-)?max-age=\d{1,10})$/.test(item))) {
+      return directives.join(', ');
+    }
+  }
+  return '[REDACTED]';
+}
+
+function redactHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).map(([name, value]) => [
+    name, diagnosticHeaderValue(name, value),
+  ]));
+}
 
 export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
   const { sendToContent, resolveRef } = ctx;
@@ -39,7 +76,7 @@ export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
       const requests = pageEvents.networkRequests({ includeStatic, all, filter }).map((e) => ({
         index: e.index,
         method: e.method,
-        url: e.url,
+        url: redactUrl(e.url),
         resourceType: e.resourceType,
         status: e.status ?? null,
         failure: e.failure ?? null,
@@ -52,21 +89,23 @@ export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
       const e = pageEvents.networkRequest(index);
       if (!e) throw new Error(`No request [${index}] in the buffer (see browser_network_requests)`);
 
-      const want = (p: string) => !part || part === p;
+      const wantHeaders = (p: string) => !part || part === p;
+      // Bodies can contain credentials. Reading one requires an explicit part.
+      const wantBody = (p: string) => part === p;
       const clip = (s: string) => (s.length > maxBodyChars ? `${s.slice(0, maxBodyChars)}\n… (${s.length - maxBodyChars} more chars)` : s);
       const out: Record<string, unknown> = {
         index: e.index,
         method: e.method,
-        url: e.url,
+        url: redactUrl(e.url),
         resourceType: e.resourceType,
         status: e.status ?? null,
         failure: e.failure ?? null,
       };
 
-      if (want('request-headers')) out.requestHeaders = e.requestHeaders;
-      if (want('request-body')) {
+      if (wantHeaders('request-headers')) out.requestHeaders = redactHeaders(e.requestHeaders);
+      if (wantBody('request-body')) {
         let body = e.postData;
-        if (body === undefined && e.hasPostData) {
+        if (body === undefined && e.hasPostData && !e.redirected) {
           body = await ctx.tabManager
             .sendDebuggerCommand<{ postData: string }>('Network.getRequestPostData', { requestId: e.requestId })
             .then((r) => r.postData)
@@ -74,9 +113,10 @@ export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
         }
         out.requestBody = body === undefined ? null : clip(body);
       }
-      if (want('response-headers')) out.responseHeaders = e.responseHeaders ?? null;
-      if (want('response-body')) {
-        if (e.status === undefined) out.responseBody = null;
+      if (wantHeaders('response-headers')) out.responseHeaders = e.responseHeaders ? redactHeaders(e.responseHeaders) : null;
+      if (wantBody('response-body')) {
+        if (e.redirected) out.responseBody = '(unavailable: redirect response)';
+        else if (e.status === undefined) out.responseBody = null;
         else {
           try {
             const r = await ctx.tabManager.sendDebuggerCommand<{ body: string; base64Encoded: boolean }>(

@@ -54,10 +54,15 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
+    switchTo: z.boolean().optional().default(false),
   }),
 
   browser_switch_tab: z.object({
     tabId: z.number(),
+  }),
+
+  browser_send_to_back: z.object({
+    tabId: z.number().optional(),
   }),
 
   browser_get_text: z.object({
