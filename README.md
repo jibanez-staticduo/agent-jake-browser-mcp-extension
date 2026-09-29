@@ -110,6 +110,22 @@ Together, these provide a complete browser automation solution enabling AI agent
 - **Console Log Access** - Read browser console messages
 - **Visual Debugging** - Highlight elements for debugging
 
+## Copilot side panel
+
+A chat in Chrome's side panel whose agent acts on your tabs, without any MCP client:
+open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the agent
+drives the page with the same `browser_*` handlers the MCP path uses.
+
+- **Sees the page by default**: every prompt carries a `<page_context>` block with the
+  target tab, the open tabs and the target's `browser_state` (interactive elements with refs).
+- **This tab or others**: the target follows the active tab (📌 pins it); the agent can
+  `browser_switch_tab` / `browser_new_tab` to work elsewhere.
+- **Any OpenAI-compatible endpoint** with tool calling (LiteLLM, vLLM, OpenRouter…):
+  endpoint, key, model, step cap and vision (screenshots to the model) are set in ⚙ and
+  stored in `chrome.storage.local` (trusted contexts only).
+- The loop runs in the service worker (`src/background/agent/`); the panel
+  (`src/sidepanel/`) only renders it. Stop aborts the in-flight request.
+
 ## Installation
 
 ### Load as Unpacked Extension

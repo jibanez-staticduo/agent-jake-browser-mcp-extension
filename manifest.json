@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "102",
+  "minimum_chrome_version": "116",
   "name": "Agent Jake Browser MCP",
-  "version": "2.3.3",
+  "version": "2.4.0",
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "permissions": [
     "alarms",
     "debugger",
     "scripting",
+    "sidePanel",
     "storage",
     "tabs",
     "webNavigation",
@@ -22,8 +23,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["src/content/index.ts"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/content/index.ts"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }
@@ -36,6 +41,18 @@
       "128": "icons/icon128.png"
     },
     "default_title": "Agent Jake Browser MCP"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "commands": {
+    "open-copilot": {
+      "suggested_key": {
+        "default": "Alt+J",
+        "mac": "Alt+J"
+      },
+      "description": "Open the copilot side panel"
+    }
   },
   "icons": {
     "16": "icons/icon16.png",
