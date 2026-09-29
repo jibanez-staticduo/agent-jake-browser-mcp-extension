@@ -1,23 +1,47 @@
 /**
- * Copilot agent loop: OpenAI-compatible chat completions with tool calling,
- * tools executed by the extension's own handlers. Pure apart from injected deps,
- * so it is unit-tested with a fake fetch and fake tools.
+ * Copilot agent loop: OpenAI-compatible chat completions (streamed) with tool calling,
+ * browser tools executed by the extension's own handlers, and three modes:
+ *   ask  — page-changing tools wait for the user's approval (per action or per site)
+ *   auto — everything runs
+ *   plan — read-only investigation, present_plan, and only after approval execution
+ * Pure apart from injected deps, so it is unit-tested with a fake fetch and fake tools.
  */
-import type { ChatTurn, CopilotSettings, WorkerToPanel } from '@/types/copilot';
-import { agentTools } from './tools-catalog';
+import type {
+  ChatTurn,
+  CopilotMode,
+  CopilotSettings,
+  PlanStep,
+  PlanStatus,
+  UserRequest,
+  UserResponse,
+  WorkerToPanel,
+} from '@/types/copilot';
+import { agentTools, READ_ONLY_TOOLS } from './tools-catalog';
 import { truncate } from './context';
 
 export const TOOL_RESULT_MAX_CHARS = 12000;
 
-export const SYSTEM_PROMPT = `You are a browser copilot living in the user's Chrome side panel.
+const BASE_PROMPT = `You are a browser copilot living in the user's Chrome side panel.
 You act on real tabs through the browser_* tools. Every user message carries a <page_context>
 block with the target tab, the open tabs and the target's current state (interactive elements
 with [n] refs): read it before calling tools, and do not call browser_state again unless the page
 may have changed. Refs go stale after navigation or DOM changes — re-read state then.
 To work on another tab, browser_switch_tab (or browser_new_tab) first; later tools act on it.
-Be fast: prefer one decisive action over exploration. Answer in the user's language, briefly, in
-plain text (the panel does not render Markdown), and say what you did. Never submit payments, delete data or send messages on the user's behalf
-unless the prompt explicitly asks for it.`;
+For tasks with 3 or more steps keep a checklist with update_plan. When the request is ambiguous
+or a choice belongs to the user, ask_user instead of guessing.
+Be fast: prefer one decisive action over exploration. Answer in the user's language, briefly,
+using Markdown when it helps, and say what you did. Never submit payments, delete data or send
+messages on the user's behalf unless the prompt explicitly asks for it.`;
+
+const MODE_PROMPT: Record<CopilotMode, string> = {
+  ask: 'Mode: ASK. Actions that change the page are shown to the user for approval before they run; if one is denied, do not retry it — adapt or ask.',
+  auto: 'Mode: AUTO. Your actions run without confirmation: be careful with anything irreversible.',
+  plan: 'Mode: PLAN. You may only use read-only tools. Investigate what you need, then call present_plan with a concrete step list. Do not attempt page-changing actions before the plan is approved.',
+};
+
+export function systemPrompt(mode: CopilotMode): string {
+  return `${BASE_PROMPT}\n\n${MODE_PROMPT[mode]}`;
+}
 
 type ContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
@@ -46,6 +70,12 @@ export interface AgentDeps {
   getContext: () => Promise<string>;
   emit: (event: WorkerToPanel) => void;
   signal: AbortSignal;
+  /** Resolves with the user's answer; rejects with AgentStopped if the run is stopped. */
+  requestUser: (request: UserRequest) => Promise<UserResponse>;
+  /** Origin of the page the next action lands on (connected tab). */
+  currentOrigin: () => Promise<string>;
+  isOriginAllowed: (origin: string) => Promise<boolean>;
+  allowOrigin: (origin: string) => Promise<void>;
 }
 
 export class AgentStopped extends Error {
@@ -77,15 +107,87 @@ function imageOf(result: unknown): string | null {
   return typeof image === 'string' && image.startsWith('data:image/') ? image : null;
 }
 
+function resultText(result: unknown): string {
+  return typeof result === 'string' ? result : JSON.stringify(result ?? null);
+}
+
 export function summarize(outcome: ToolOutcome): string {
   if (!outcome.ok) return outcome.error || 'failed';
   if (imageOf(outcome.result)) return 'screenshot captured';
-  const text = typeof outcome.result === 'string' ? outcome.result : JSON.stringify(outcome.result ?? null);
-  return truncate(text, 200);
+  return truncate(resultText(outcome.result), 200);
+}
+
+const PLAN_STATUSES: PlanStatus[] = ['pending', 'in_progress', 'done'];
+
+export function normalizePlan(raw: unknown): PlanStep[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => (typeof s === 'string' ? { text: s, status: 'pending' } : s) as { text?: unknown; status?: unknown })
+    .filter((s) => typeof s?.text === 'string' && s.text.trim())
+    .map((s) => ({
+      text: String(s.text).trim(),
+      status: PLAN_STATUSES.includes(s.status as PlanStatus) ? (s.status as PlanStatus) : 'pending',
+    }));
+}
+
+/**
+ * Read an OpenAI-style SSE stream into one assistant message, emitting text and
+ * reasoning deltas as they arrive. Tool call fragments are merged by index.
+ */
+export async function readStream(body: ReadableStream<Uint8Array>, emit: (e: WorkerToPanel) => void): Promise<ChatMessage> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  const calls: ToolCall[] = [];
+
+  const handle = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    let chunk: { choices?: { delta?: Record<string, unknown> }[] };
+    try {
+      chunk = JSON.parse(data);
+    } catch {
+      return;
+    }
+    const delta = chunk.choices?.[0]?.delta;
+    if (!delta) return;
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      emit({ type: 'delta', text: delta.content });
+    }
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
+    if (typeof reasoning === 'string' && reasoning) emit({ type: 'reasoning', text: reasoning });
+    const fragments = delta.tool_calls as
+      | { index?: number; id?: string; function?: { name?: string; arguments?: string } }[]
+      | undefined;
+    for (const f of fragments ?? []) {
+      const i = f.index ?? 0;
+      calls[i] ??= { id: '', type: 'function', function: { name: '', arguments: '' } };
+      if (f.id) calls[i].id = f.id;
+      if (f.function?.name) calls[i].function.name += f.function.name;
+      if (f.function?.arguments) calls[i].function.arguments += f.function.arguments;
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    lines.forEach((l) => handle(l.trim()));
+  }
+  handle(buffer.trim());
+
+  const toolCalls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || `call_${i}` }));
+  return { role: 'assistant', content: content || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
 }
 
 async function complete(
   settings: CopilotSettings,
+  mode: CopilotMode,
   messages: ChatMessage[],
   deps: AgentDeps,
 ): Promise<ChatMessage> {
@@ -99,8 +201,9 @@ async function complete(
     body: JSON.stringify({
       model: settings.model,
       messages,
-      tools: agentTools(settings.vision),
+      tools: agentTools(settings.vision, mode),
       tool_choice: 'auto',
+      stream: true,
     }),
   });
 
@@ -108,6 +211,10 @@ async function complete(
     const body = await response.text().catch(() => '');
     throw new Error(`LLM ${response.status}: ${truncate(body, 400)}`);
   }
+  if ((response.headers.get('content-type') || '').includes('text/event-stream') && response.body) {
+    return readStream(response.body, deps.emit);
+  }
+  // Backends that ignore `stream` answer with plain JSON.
   const data = await response.json() as { choices?: { message?: ChatMessage }[] };
   const message = data.choices?.[0]?.message;
   if (!message) throw new Error('LLM returned no choices');
@@ -124,19 +231,71 @@ export async function runAgent(
   settings: CopilotSettings,
   deps: AgentDeps,
 ): Promise<string> {
+  let mode: CopilotMode = settings.mode;
   const context = await deps.getContext();
   const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt(mode) },
     ...history.map((t) => ({ role: t.role, content: t.content })),
     { role: 'user', content: `${context}\n\n${prompt}` },
   ];
+
+  /** Meta tools are answered here and by the user; browser tools go to the handlers. */
+  async function dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+    if (name === 'update_plan') {
+      const steps = normalizePlan(args.steps);
+      deps.emit({ type: 'plan', steps });
+      return { ok: true, result: `Checklist updated (${steps.length} steps).` };
+    }
+
+    if (name === 'ask_user') {
+      const question = String(args.question ?? '').trim();
+      const options = Array.isArray(args.options) ? args.options.map(String).filter(Boolean) : [];
+      const res = await deps.requestUser({ kind: 'question', question, options });
+      const answer = res.kind === 'question' ? res.answer : '';
+      return { ok: true, result: `The user answered: ${answer}` };
+    }
+
+    if (name === 'present_plan') {
+      if (mode !== 'plan') return { ok: false, error: 'present_plan is only available in plan mode' };
+      const steps = normalizePlan(args.steps).map((s) => s.text);
+      const summary = String(args.summary ?? '').trim();
+      const res = await deps.requestUser({ kind: 'plan', summary, steps });
+      if (res.kind === 'plan' && res.decision === 'approve') {
+        mode = res.execMode;
+        deps.emit({ type: 'mode', mode });
+        deps.emit({ type: 'plan', steps: steps.map((text) => ({ text, status: 'pending' as const })) });
+        return {
+          ok: true,
+          result: `The user APPROVED the plan. Execute it now (mode: ${mode.toUpperCase()}); `
+            + 'keep the checklist current with update_plan.',
+        };
+      }
+      const feedback = res.kind === 'plan' && res.decision === 'reject' ? res.feedback : '';
+      return { ok: true, result: `The user REJECTED the plan. Feedback: ${feedback || '(none)'}. Revise it and present_plan again.` };
+    }
+
+    const readOnly = READ_ONLY_TOOLS.has(name);
+    if (mode === 'plan' && !readOnly) {
+      return { ok: false, error: 'Plan mode: only read-only tools until the user approves a plan (present_plan).' };
+    }
+    if (mode === 'ask' && !readOnly) {
+      const origin = await deps.currentOrigin();
+      if (!(await deps.isOriginAllowed(origin))) {
+        const res = await deps.requestUser({ kind: 'approve', tool: name, args, origin });
+        const decision = res.kind === 'approve' ? res.decision : 'deny';
+        if (decision === 'deny') return { ok: false, error: 'The user denied this action.' };
+        if (decision === 'allow_site') await deps.allowOrigin(origin);
+      }
+    }
+    return deps.execTool(name, args);
+  }
 
   try {
     for (let step = 1; step <= settings.maxSteps; step++) {
       checkAbort(deps.signal);
       deps.emit({ type: 'step', step });
 
-      const reply = await complete(settings, messages, deps);
+      const reply = await complete(settings, mode, messages, deps);
       const calls = reply.tool_calls ?? [];
       messages.push({ role: 'assistant', content: reply.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) });
 
@@ -155,7 +314,7 @@ export async function runAgent(
         try {
           args = parseArgs(call.function?.arguments);
           deps.emit({ type: 'tool_call', id: call.id, name, args });
-          outcome = await deps.execTool(name, args);
+          outcome = await dispatch(name, args);
         } catch (error) {
           if (error instanceof AgentStopped) throw error;
           deps.emit({ type: 'tool_call', id: call.id, name, args });
@@ -169,7 +328,7 @@ export async function runAgent(
           ? `Error: ${outcome.error}`
           : image
             ? 'Screenshot captured; the image is attached in the next message.'
-            : truncate(JSON.stringify(outcome.result ?? null), TOOL_RESULT_MAX_CHARS);
+            : truncate(resultText(outcome.result), TOOL_RESULT_MAX_CHARS);
         messages.push({ role: 'tool', tool_call_id: call.id, content });
       }
 

@@ -39,8 +39,8 @@ export const AGENT_TOOLS: FunctionTool[] = [
     'Full ARIA snapshot of the page (all frames). Expensive: use only when browser_state is not enough.'),
   tool('browser_get_text', 'Text content of an element.', { ref }, ['ref']),
   tool('browser_click', 'Click an element.', { ref }, ['ref']),
-  tool('browser_type', 'Type text into an input.',
-    { ref, text: { type: 'string' }, clear: { type: 'boolean', description: 'Clear the field first' } },
+  tool('browser_type', 'Type text into an input. Typing APPENDS to what is already there: pass clear:true to replace the current value.',
+    { ref, text: { type: 'string' }, clear: { type: 'boolean', description: 'Clear the field first (use it unless you mean to append)' } },
     ['ref', 'text']),
   tool('browser_press_key', 'Press a key on the focused element ("Enter", "Tab", "Escape", "ArrowDown", "a").',
     { key: { type: 'string' } }, ['key']),
@@ -86,6 +86,57 @@ export const SCREENSHOT_TOOL: FunctionTool = tool(
   'PNG screenshot of the connected tab. The image is attached to the next message.',
 );
 
-export function agentTools(vision: boolean): FunctionTool[] {
-  return vision ? [...AGENT_TOOLS, SCREENSHOT_TOOL] : AGENT_TOOLS;
+/** Tools that only look: they never need approval and are all plan mode may use. */
+export const READ_ONLY_TOOLS = new Set([
+  'browser_state',
+  'browser_find',
+  'browser_snapshot',
+  'browser_get_text',
+  'browser_list_tabs',
+  'browser_switch_tab',
+  'browser_wait',
+  'browser_wait_for_element',
+  'browser_get_console_logs',
+  'browser_screenshot',
+]);
+
+/** Tools answered by the loop and the user, not by the browser handlers. */
+export const ASK_USER_TOOL = tool('ask_user',
+  'Ask the user a question and wait for the answer. Use it when the request is ambiguous or a choice is theirs to make (which account, which product, confirm an irreversible step). Offer short options when you can.',
+  {
+    question: { type: 'string' },
+    options: { type: 'array', items: { type: 'string' }, description: 'Suggested answers; the user may also type their own' },
+  }, ['question']);
+
+export const UPDATE_PLAN_TOOL = tool('update_plan',
+  'Publish or update your task checklist, shown pinned in the panel. Use it for any task with 3+ steps: send the full list every time, exactly one step in_progress while working.',
+  {
+    steps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          status: { type: 'string', enum: ['pending', 'in_progress', 'done'] },
+        },
+        required: ['text', 'status'],
+      },
+    },
+  }, ['steps']);
+
+export const PRESENT_PLAN_TOOL = tool('present_plan',
+  'PLAN MODE ONLY: present your plan to the user for approval once you have investigated enough. Nothing that changes the page runs until they approve.',
+  {
+    summary: { type: 'string', description: 'One or two sentences: what you will do and why' },
+    steps: { type: 'array', items: { type: 'string' } },
+  }, ['summary', 'steps']);
+
+export const META_TOOLS = new Set(['ask_user', 'update_plan', 'present_plan']);
+
+export function agentTools(vision: boolean, mode: 'ask' | 'auto' | 'plan' = 'auto'): FunctionTool[] {
+  const browser = vision ? [...AGENT_TOOLS, SCREENSHOT_TOOL] : AGENT_TOOLS;
+  if (mode === 'plan') {
+    return [...browser.filter((t) => READ_ONLY_TOOLS.has(t.function.name)), ASK_USER_TOOL, PRESENT_PLAN_TOOL];
+  }
+  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
 }

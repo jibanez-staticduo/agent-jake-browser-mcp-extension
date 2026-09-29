@@ -1,12 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { runAgent, completionsUrl, parseArgs, AgentStopped, type AgentDeps } from '@/background/agent/loop';
+import { runAgent, completionsUrl, parseArgs, readStream, normalizePlan, AgentStopped, type AgentDeps } from '@/background/agent/loop';
 import { AGENT_TOOLS, SCREENSHOT_TOOL, agentTools } from '@/background/agent/tools-catalog';
 import { formatPageContext, truncate } from '@/background/agent/context';
-import { DEFAULT_COPILOT_SETTINGS, type WorkerToPanel } from '@/types/copilot';
+import { DEFAULT_COPILOT_SETTINGS, type UserRequest, type UserResponse, type WorkerToPanel } from '@/types/copilot';
 
-const settings = { ...DEFAULT_COPILOT_SETTINGS, apiKey: 'sk-test', maxSteps: 5 };
+const settings = { ...DEFAULT_COPILOT_SETTINGS, apiKey: 'sk-test', maxSteps: 5, mode: 'auto' as const };
 
 function reply(message: Record<string, unknown>) {
   return new Response(JSON.stringify({ choices: [{ message }] }), {
@@ -34,6 +34,10 @@ function makeDeps(replies: Response[], overrides: Partial<AgentDeps> = {}) {
     getContext: async () => '<page_context>Target tab: [7] Example</page_context>',
     emit: (e) => events.push(e),
     signal: new AbortController().signal,
+    requestUser: vi.fn(async (): Promise<UserResponse> => { throw new Error('unexpected request'); }),
+    currentOrigin: async () => 'https://shop.test',
+    isOriginAllowed: async () => false,
+    allowOrigin: vi.fn(async () => {}),
     ...overrides,
   };
   return { deps, events, bodies, fetchMock };

@@ -1,15 +1,19 @@
 /**
- * Copilot bridge: the side panel opens a Port, sends prompts, and gets the agent's
- * progress back. Tools run through the same handleMessage the MCP WebSocket uses.
+ * Copilot bridge: the side panel opens a Port, sends prompts, answers the agent's
+ * requests (approvals, questions, plans) and gets its progress back. Tools run through
+ * the same handleMessage the MCP WebSocket uses.
  */
 import type { TabManager } from '../tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName } from '@/types/messages';
 import {
+  COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
   type CopilotSettings,
   type PanelToWorker,
+  type UserRequest,
+  type UserResponse,
   type WorkerToPanel,
 } from '@/types/copilot';
 import { log } from '@/utils/logger';
@@ -23,6 +27,20 @@ export async function loadCopilotSettings(): Promise<CopilotSettings> {
   return { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined) };
 }
 
+async function allowedOrigins(): Promise<string[]> {
+  const stored = await chrome.storage.local.get(COPILOT_ALLOWED_ORIGINS_KEY);
+  const list = stored[COPILOT_ALLOWED_ORIGINS_KEY];
+  return Array.isArray(list) ? list.map(String) : [];
+}
+
+function originOf(url: string | undefined): string {
+  try {
+    return url ? new URL(url).origin : '';
+  } catch {
+    return '';
+  }
+}
+
 let seq = 0;
 
 type BridgeDeps = { tabManager: TabManager | null; handleMessage: HandleMessage | null };
@@ -31,6 +49,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== COPILOT_PORT) return;
     let controller: AbortController | null = null;
+    const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
 
     const emit = (event: WorkerToPanel) => {
       try {
@@ -39,6 +58,20 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         // Panel closed mid-run: the disconnect handler aborts.
       }
     };
+
+    const abortAll = () => {
+      controller?.abort();
+      for (const p of pending.values()) p.reject(new AgentStopped());
+      pending.clear();
+    };
+
+    const requestUser = (request: UserRequest): Promise<UserResponse> =>
+      new Promise((resolve, reject) => {
+        if (controller?.signal.aborted) return reject(new AgentStopped());
+        const requestId = `req-${++seq}`;
+        pending.set(requestId, { resolve, reject });
+        emit({ type: 'request', requestId, request });
+      });
 
     const execTool = async (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
       const { handleMessage } = await getDeps();
@@ -49,7 +82,13 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
 
     port.onMessage.addListener(async (msg: PanelToWorker) => {
       if (msg.type === 'stop') {
-        controller?.abort();
+        abortAll();
+        return;
+      }
+      if (msg.type === 'response') {
+        const p = pending.get(msg.requestId);
+        pending.delete(msg.requestId);
+        p?.resolve(msg.response);
         return;
       }
       if (msg.type !== 'prompt' || controller) return;
@@ -66,12 +105,26 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           });
         }
 
-        const settings = await loadCopilotSettings();
+        const stored = await loadCopilotSettings();
+        const settings: CopilotSettings = { ...stored, mode: msg.mode ?? stored.mode, model: msg.model || stored.model };
         await runAgent(msg.history, msg.prompt, settings, {
           fetch: (input, init) => fetch(input, init),
           execTool,
           emit,
+          requestUser,
           signal: controller.signal,
+          currentOrigin: async () => {
+            const tabId = tabManager.getConnectedTabId() ?? msg.targetTabId;
+            if (!tabId) return '';
+            return originOf((await chrome.tabs.get(tabId).catch(() => null))?.url);
+          },
+          isOriginAllowed: async (origin) => !!origin && (await allowedOrigins()).includes(origin),
+          allowOrigin: async (origin) => {
+            if (!origin) return;
+            const list = new Set(await allowedOrigins());
+            list.add(origin);
+            await chrome.storage.local.set({ [COPILOT_ALLOWED_ORIGINS_KEY]: [...list] });
+          },
           getContext: async () => {
             const tabs = await tabManager.listTabs();
             const targetTabId = tabManager.getConnectedTabId() ?? msg.targetTabId;
@@ -95,9 +148,10 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         }
       } finally {
         controller = null;
+        pending.clear();
       }
     });
 
-    port.onDisconnect.addListener(() => controller?.abort());
+    port.onDisconnect.addListener(abortAll);
   });
 }

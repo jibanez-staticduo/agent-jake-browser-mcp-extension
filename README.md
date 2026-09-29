@@ -112,19 +112,30 @@ Together, these provide a complete browser automation solution enabling AI agent
 
 ## Copilot side panel
 
-A chat in Chrome's side panel whose agent acts on your tabs, without any MCP client:
-open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the agent
-drives the page with the same `browser_*` handlers the MCP path uses.
+A Claude-style chat in Chrome's side panel whose agent acts on your tabs, without any MCP
+client: open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the
+agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 - **Sees the page by default**: every prompt carries a `<page_context>` block with the
   target tab, the open tabs and the target's `browser_state` (interactive elements with refs).
 - **This tab or others**: the target follows the active tab (📌 pins it); the agent can
   `browser_switch_tab` / `browser_new_tab` to work elsewhere.
-- **Any OpenAI-compatible endpoint** with tool calling (LiteLLM, vLLM, OpenRouter…):
-  endpoint, key, model, step cap and vision (screenshots to the model) are set in ⚙ and
-  stored in `chrome.storage.local` (trusted contexts only).
+- **Modes** (Shift+Tab cycles them):
+  - *Preguntar* — every page-changing action shows an approval card
+    (Permitir / Siempre en este sitio / Denegar); reads run freely.
+  - *Auto* — acts without asking.
+  - *Plan* — read-only investigation, then a plan card; approve it to run in Auto or
+    Preguntar, or send feedback and it re-plans.
+- **Interaction**: the agent can `ask_user` (options or free text) and keeps a live
+  checklist with `update_plan`, pinned above the composer.
+- **Model selector** fed by `GET {endpoint}/models` (embeddings/audio/image filtered out).
+- Streamed answers (text and reasoning) rendered as safe Markdown (everything escaped,
+  http(s) links only); tool steps collapse into "N pasos" blocks.
+- Conversations are saved (✚ new, 🕘 history). Endpoint, key, step cap, vision and the
+  per-site permissions live in ⚙ (`chrome.storage.local`, trusted contexts only).
+- `index.html?windowId=N` runs the panel detached, following window N's active tab.
 - The loop runs in the service worker (`src/background/agent/`); the panel
-  (`src/sidepanel/`) only renders it. Stop aborts the in-flight request.
+  (`src/sidepanel/`) only renders it and answers its requests. Stop / Esc aborts.
 
 ## Installation
 
