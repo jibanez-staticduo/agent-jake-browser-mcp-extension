@@ -195,6 +195,19 @@ test('popup renders status panel and reads server config from background', async
   }
 });
 
+test('copilot panel opens in a fresh install without contacting a model', async () => {
+  const panel = await context.newPage();
+  try {
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await expect(panel.getByText('Pide algo sobre esta página u otras pestañas.')).toBeVisible();
+    await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue('');
+    await expect(panel.getByRole('button', { name: 'Guardar' })).toBeDisabled();
+    await expect(panel.locator('textarea')).toBeDisabled();
+  } finally {
+    await panel.close();
+  }
+});
+
 test('content script injects on page load and answers the extension', async () => {
   const fixtureUrl = `${fixtureOrigin}/fixture`;
   const page = await context.newPage();

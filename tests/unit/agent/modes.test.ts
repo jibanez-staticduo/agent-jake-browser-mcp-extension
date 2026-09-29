@@ -3,9 +3,9 @@ import { runAgent, readStream, normalizePlan, AgentStopped, type AgentDeps } fro
 import { agentTools } from '@/background/agent/tools-catalog';
 import { renderMarkdown } from '@/sidepanel/markdown';
 import { chatModels, titleOf } from '@/sidepanel/chats';
-import { DEFAULT_COPILOT_SETTINGS, type CopilotMode, type UserRequest, type UserResponse, type WorkerToPanel } from '@/types/copilot';
+import { DEFAULT_COPILOT_SETTINGS, isCopilotConfigured, type CopilotMode, type UserRequest, type UserResponse, type WorkerToPanel } from '@/types/copilot';
 
-const base = { ...DEFAULT_COPILOT_SETTINGS, apiKey: 'k', maxSteps: 8 };
+const base = { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', maxSteps: 8 };
 
 function json(message: Record<string, unknown>) {
   return new Response(JSON.stringify({ choices: [{ message }] }), { headers: { 'Content-Type': 'application/json' } });
@@ -42,7 +42,7 @@ function setup(replies: Response[], answers: UserResponse[] = [], overrides: Par
       if (!a) throw new Error('no answer');
       return a;
     }),
-    currentOrigin: async () => 'https://shop.test',
+    currentTarget: async () => ({ tabId: 7, origin: 'https://shop.test' }),
     isOriginAllowed: async () => false,
     allowOrigin: vi.fn(async () => {}),
     ...overrides,
@@ -113,7 +113,7 @@ describe('plan mode', () => {
     const { deps, bodies } = setup([call('c1', 'browser_click', { ref: '1' }), final('ok')]);
     await run('plan', deps);
     expect(deps.execTool).not.toHaveBeenCalled();
-    expect(String(bodies[1].messages.at(-1)?.content)).toMatch(/Plan mode/);
+    expect(String(bodies[1].messages.at(-1)?.content)).toMatch(/unavailable in plan mode/);
   });
 
   it('executes after approval in the chosen mode', async () => {
@@ -248,5 +248,71 @@ describe('panel helpers', () => {
   it('titles a chat from its first prompt', () => {
     expect(titleOf([{ kind: 'user', text: '  rellena\nel formulario ' }])).toBe('rellena el formulario');
     expect(titleOf([])).toBe('Nueva conversación');
+  });
+});
+
+
+describe('security boundaries', () => {
+  it.each(['', 'not a URL', 'javascript:alert(1)', 'http://remote.test/v1', 'https://user:password@remote.test/v1'])('rejects an unconfigured endpoint %s before reading browser data', async (baseUrl) => {
+    const getContext = vi.fn(async () => 'private page');
+    const { deps } = setup([], [], { getContext });
+    await expect(runAgent([], 'go', { ...base, baseUrl }, deps)).rejects.toThrow(/Configure/);
+    expect(getContext).not.toHaveBeenCalled();
+    expect(deps.fetch).not.toHaveBeenCalled();
+  });
+
+  it('ships with no external endpoint', () => {
+    expect(DEFAULT_COPILOT_SETTINGS.baseUrl).toBe('');
+  });
+
+  it.each(['https://model.test/v1', 'http://localhost:4000/v1', 'http://127.0.0.1:4000/v1', 'http://[::1]:4000/v1'])(
+    'allows explicitly configured secure or loopback endpoint %s', (baseUrl) => {
+      expect(isCopilotConfigured({ ...base, baseUrl })).toBe(true);
+    },
+  );
+
+  it.each(['ask', 'auto', 'plan'] as CopilotMode[])('rejects unpublished tools in %s mode', async (mode) => {
+    const { deps, bodies } = setup([
+      call('c1', 'browser_cdp', { method: 'Network.getAllCookies' }), final('ok'),
+    ]);
+    await run(mode, deps);
+    expect(deps.execTool).not.toHaveBeenCalled();
+    expect(deps.requestUser).not.toHaveBeenCalled();
+    expect(String(bodies[1].messages.at(-1)?.content)).toMatch(/Tool unavailable/);
+  });
+
+  it.each(['ask', 'auto', 'plan'] as CopilotMode[])('refuses screenshots with vision disabled in %s mode', async (mode) => {
+    const { deps, bodies } = setup([call('c1', 'browser_screenshot', {}), final('ok')]);
+    await run(mode, deps);
+    expect(deps.execTool).not.toHaveBeenCalled();
+    expect(JSON.stringify(bodies)).not.toContain('image_url');
+  });
+
+  it.each([
+    { tabId: 8, origin: 'https://shop.test' },
+    { tabId: 7, origin: 'https://other.test' },
+    { tabId: null, origin: '' },
+  ])('invalidates approval when the destination becomes %j', async (changed) => {
+    let target: { tabId: number | null; origin: string } = { tabId: 7, origin: 'https://shop.test' };
+    const { deps } = setup([call('c1', 'browser_close_tab', {}), final('ok')], [], {
+      currentTarget: async () => target,
+      requestUser: vi.fn(async () => {
+        target = changed;
+        return { kind: 'approve', decision: 'allow_site' };
+      }),
+    });
+    await run('ask', deps);
+    expect(deps.execTool).not.toHaveBeenCalled();
+    expect(deps.allowOrigin).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the target after persisting a site approval', async () => {
+    let tabId = 7;
+    const { deps } = setup([call('c1', 'browser_close_tab', {}), final('ok')], [{ kind: 'approve', decision: 'allow_site' }], {
+      currentTarget: async () => ({ tabId, origin: 'https://shop.test' }),
+      allowOrigin: vi.fn(async () => { tabId = 8; }),
+    });
+    await run('ask', deps);
+    expect(deps.execTool).not.toHaveBeenCalled();
   });
 });

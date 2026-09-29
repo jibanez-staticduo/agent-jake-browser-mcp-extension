@@ -27,13 +27,25 @@ export interface CopilotSettings {
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
-  baseUrl: 'https://litellm.lan.e-dani.com/v1',
+  baseUrl: '',
   apiKey: '',
   model: 'tooling',
   mode: 'ask',
   maxSteps: 30,
   vision: false,
 };
+
+/** Shared by the panel and worker: no browser data is sent before setup. */
+export function isCopilotConfigured(settings: CopilotSettings): boolean {
+  if (typeof settings.baseUrl !== 'string' || typeof settings.model !== 'string' || !settings.model.trim()) return false;
+  try {
+    const url = new URL(settings.baseUrl.trim());
+    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+    return !url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
+  } catch {
+    return false;
+  }
+}
 
 /** One finished turn of the visible conversation (tool traffic stays in the worker). */
 export interface ChatTurn {

@@ -6,7 +6,7 @@ import { AGENT_TOOLS, SCREENSHOT_TOOL, agentTools } from '@/background/agent/too
 import { formatPageContext, truncate } from '@/background/agent/context';
 import { DEFAULT_COPILOT_SETTINGS, type UserRequest, type UserResponse, type WorkerToPanel } from '@/types/copilot';
 
-const settings = { ...DEFAULT_COPILOT_SETTINGS, apiKey: 'sk-test', maxSteps: 5, mode: 'auto' as const };
+const settings = { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'sk-test', maxSteps: 5, mode: 'auto' as const };
 
 function reply(message: Record<string, unknown>) {
   return new Response(JSON.stringify({ choices: [{ message }] }), {
@@ -35,7 +35,7 @@ function makeDeps(replies: Response[], overrides: Partial<AgentDeps> = {}) {
     emit: (e) => events.push(e),
     signal: new AbortController().signal,
     requestUser: vi.fn(async (): Promise<UserResponse> => { throw new Error('unexpected request'); }),
-    currentOrigin: async () => 'https://shop.test',
+    currentTarget: async () => ({ tabId: 7, origin: 'https://shop.test' }),
     isOriginAllowed: async () => false,
     allowOrigin: vi.fn(async () => {}),
     ...overrides,
@@ -54,7 +54,7 @@ describe('copilot agent loop', () => {
 
     expect(text).toBe('Hecho: pulsé el botón.');
     expect(deps.execTool).toHaveBeenCalledWith('browser_click', { ref: '12' });
-    expect(fetchMock.mock.calls[0][0]).toBe('https://litellm.lan.e-dani.com/v1/chat/completions');
+    expect(fetchMock.mock.calls[0][0]).toBe('https://model.test/v1/chat/completions');
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({ Authorization: 'Bearer sk-test' });
 
     // First request: system + history + prompt carrying the page context.

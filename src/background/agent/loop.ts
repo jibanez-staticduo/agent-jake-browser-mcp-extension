@@ -17,6 +17,7 @@ import type {
   WorkerToPanel,
 } from '@/types/copilot';
 import { agentTools, READ_ONLY_TOOLS } from './tools-catalog';
+import { isCopilotConfigured } from '@/types/copilot';
 import { truncate } from './context';
 
 export const TOOL_RESULT_MAX_CHARS = 12000;
@@ -73,7 +74,7 @@ export interface AgentDeps {
   /** Resolves with the user's answer; rejects with AgentStopped if the run is stopped. */
   requestUser: (request: UserRequest) => Promise<UserResponse>;
   /** Origin of the page the next action lands on (connected tab). */
-  currentOrigin: () => Promise<string>;
+  currentTarget: () => Promise<{ tabId: number | null; origin: string }>;
   isOriginAllowed: (origin: string) => Promise<boolean>;
   allowOrigin: (origin: string) => Promise<void>;
 }
@@ -231,6 +232,7 @@ export async function runAgent(
   settings: CopilotSettings,
   deps: AgentDeps,
 ): Promise<string> {
+  if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint and model before using Copilot.');
   let mode: CopilotMode = settings.mode;
   const context = await deps.getContext();
   const messages: ChatMessage[] = [
@@ -241,6 +243,9 @@ export async function runAgent(
 
   /** Meta tools are answered here and by the user; browser tools go to the handlers. */
   async function dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+    if (!agentTools(settings.vision, mode).some((tool) => tool.function.name === name)) {
+      return { ok: false, error: `Tool unavailable in ${mode} mode: ${name}` };
+    }
     if (name === 'update_plan') {
       const steps = normalizePlan(args.steps);
       deps.emit({ type: 'plan', steps });
@@ -279,12 +284,23 @@ export async function runAgent(
       return { ok: false, error: 'Plan mode: only read-only tools until the user approves a plan (present_plan).' };
     }
     if (mode === 'ask' && !readOnly) {
-      const origin = await deps.currentOrigin();
+      const target = await deps.currentTarget();
+      const { origin } = target;
+      let rememberOrigin = false;
       if (!(await deps.isOriginAllowed(origin))) {
         const res = await deps.requestUser({ kind: 'approve', tool: name, args, origin });
         const decision = res.kind === 'approve' ? res.decision : 'deny';
         if (decision === 'deny') return { ok: false, error: 'The user denied this action.' };
-        if (decision === 'allow_site') await deps.allowOrigin(origin);
+        rememberOrigin = decision === 'allow_site';
+      }
+      const current = await deps.currentTarget();
+      if (current.tabId !== target.tabId || current.origin !== origin) {
+        return { ok: false, error: 'Action cancelled: target tab or origin changed while awaiting approval. Request approval again.' };
+      }
+      if (rememberOrigin) await deps.allowOrigin(origin);
+      const beforeExecution = await deps.currentTarget();
+      if (beforeExecution.tabId !== target.tabId || beforeExecution.origin !== origin) {
+        return { ok: false, error: 'Action cancelled: target tab or origin changed before execution.' };
       }
     }
     return deps.execTool(name, args);

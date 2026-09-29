@@ -10,6 +10,7 @@ import {
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
+  isCopilotConfigured,
   type CopilotSettings,
   type PanelToWorker,
   type UserRequest,
@@ -21,6 +22,48 @@ import { AgentStopped, runAgent, type ToolOutcome } from './loop';
 import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage) => Promise<OutgoingMessage>;
+
+export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: HandleMessage) {
+  let copilotActive = false;
+  let mcpInFlight = 0;
+
+  return {
+    async handleMcp(message: IncomingMessage): Promise<OutgoingMessage> {
+      if (copilotActive) {
+        return {
+          id: message.id,
+          success: false,
+          error: { code: 'COPILOT_BUSY', message: 'Copilot is using this browser; retry when it finishes.' },
+        };
+      }
+      mcpInFlight++;
+      try {
+        return await handleMessage(message);
+      } finally {
+        mcpInFlight--;
+      }
+    },
+    acquire(): (() => Promise<void>) | null {
+      if (copilotActive || mcpInFlight > 0) return null;
+      copilotActive = true;
+      const previousTabId = tabManager.getConnectedTabId();
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        try {
+          const currentTabId = tabManager.getConnectedTabId();
+          if (currentTabId !== previousTabId) {
+            if (previousTabId !== null) await tabManager.connectTab(previousTabId);
+            else if (currentTabId !== null) await tabManager.disconnectTab();
+          }
+        } finally {
+          copilotActive = false;
+        }
+      };
+    },
+  };
+}
 
 export async function loadCopilotSettings(): Promise<CopilotSettings> {
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
@@ -43,7 +86,11 @@ function originOf(url: string | undefined): string {
 
 let seq = 0;
 
-type BridgeDeps = { tabManager: TabManager | null; handleMessage: HandleMessage | null };
+type BridgeDeps = {
+  tabManager: TabManager | null;
+  handleMessage: HandleMessage | null;
+  acquireLease?: () => (() => Promise<void>) | null;
+};
 
 export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void {
   chrome.runtime.onConnect.addListener((port) => {
@@ -93,10 +140,20 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       }
       if (msg.type !== 'prompt' || controller) return;
 
-      controller = new AbortController();
+      const runController = new AbortController();
+      controller = runController;
+      let releaseLease: (() => Promise<void>) | null = null;
+      let stopped = false;
+      let errorMessage: string | null = null;
       try {
-        const { tabManager } = await getDeps();
-        if (!tabManager) throw new Error('Extension not initialized yet');
+        const stored = await loadCopilotSettings();
+        const settings: CopilotSettings = { ...stored, mode: msg.mode ?? stored.mode, model: msg.model || stored.model };
+        if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint and model before using Copilot.');
+        const { tabManager, acquireLease } = await getDeps();
+        if (!tabManager || !acquireLease) throw new Error('Extension not initialized yet');
+        releaseLease = acquireLease();
+        if (!releaseLease) throw new Error('Browser is busy with another Copilot or MCP call; retry when it finishes.');
+        if (runController.signal.aborted) throw new AgentStopped();
         if (msg.targetTabId && tabManager.getConnectedTabId() !== msg.targetTabId) {
           // chrome:// and the Web Store refuse the debugger: the agent still gets the
           // tab list and the error in its context, and can switch or open another tab.
@@ -105,18 +162,16 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           });
         }
 
-        const stored = await loadCopilotSettings();
-        const settings: CopilotSettings = { ...stored, mode: msg.mode ?? stored.mode, model: msg.model || stored.model };
         await runAgent(msg.history, msg.prompt, settings, {
           fetch: (input, init) => fetch(input, init),
           execTool,
           emit,
           requestUser,
-          signal: controller.signal,
-          currentOrigin: async () => {
-            const tabId = tabManager.getConnectedTabId() ?? msg.targetTabId;
-            if (!tabId) return '';
-            return originOf((await chrome.tabs.get(tabId).catch(() => null))?.url);
+          signal: runController.signal,
+          currentTarget: async () => {
+            const tabId = tabManager.getConnectedTabId();
+            const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
+            return { tabId, origin: originOf(tab?.url) };
           },
           isOriginAllowed: async (origin) => !!origin && (await allowedOrigins()).includes(origin),
           allowOrigin: async (origin) => {
@@ -137,18 +192,24 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
             });
           },
         });
-        emit({ type: 'done', stopped: false });
       } catch (error) {
         if (error instanceof AgentStopped) {
-          emit({ type: 'done', stopped: true });
+          stopped = true;
         } else {
           log.warn('[Copilot] Run failed:', error);
-          emit({ type: 'error', message: (error as Error).message });
-          emit({ type: 'done', stopped: false });
+          errorMessage = (error as Error).message;
         }
       } finally {
+        try {
+          await releaseLease?.();
+        } catch (error) {
+          log.warn('[Copilot] Could not restore the previous tab:', error);
+          errorMessage = `Could not restore the previous tab: ${(error as Error).message}`;
+        }
         controller = null;
         pending.clear();
+        if (errorMessage) emit({ type: 'error', message: errorMessage });
+        emit({ type: 'done', stopped });
       }
     });
 

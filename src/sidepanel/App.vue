@@ -10,6 +10,7 @@ import {
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
+  isCopilotConfigured,
   type ChatTurn,
   type CopilotMode,
   type CopilotSettings,
@@ -63,7 +64,7 @@ let windowId: number | null = null;
 
 const items = computed(() => chat.value.items);
 const plan = computed(() => chat.value.plan);
-const needsSetup = computed(() => !settings.value.baseUrl || !settings.value.model);
+const needsSetup = computed(() => !isCopilotConfigured(settings.value));
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
 const modelOptions = computed(() =>
   models.value.includes(settings.value.model) ? models.value : [settings.value.model, ...models.value]);
@@ -285,6 +286,7 @@ async function removeChat(c: Chat) {
 }
 
 async function saveSettings(close = true) {
+  if (!isCopilotConfigured(settings.value)) return;
   await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: { ...settings.value } });
   if (close) {
     panel.value = 'none';
@@ -294,7 +296,7 @@ async function saveSettings(close = true) {
 
 async function loadModels() {
   modelsError.value = '';
-  if (!settings.value.baseUrl) return;
+  if (!isCopilotConfigured(settings.value)) return;
   try {
     const base = settings.value.baseUrl.trim().replace(/\/+$/, '');
     const res = await fetch(`${base}/models`, {
@@ -352,7 +354,7 @@ onMounted(async () => {
   windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
-  if (!settings.value.apiKey) panel.value = 'settings';
+  if (needsSetup.value) panel.value = 'settings';
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -420,7 +422,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <span>Sitios con permiso permanente (modo Preguntar):</span>
         <div v-for="o in allowed" :key="o" class="origin">{{ o }} <button type="button" class="icon" @click="forgetOrigin(o)">✕</button></div>
       </div>
-      <button type="submit" :disabled="!settings.baseUrl">Guardar</button>
+      <button type="submit" :disabled="needsSetup">Guardar</button>
     </form>
 
     <div v-else-if="panel === 'history'" class="drawer history">
