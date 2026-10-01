@@ -6,10 +6,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionPath = path.join(__dirname, 'dist');
+const extensionPath = path.resolve(process.env.EXTENSION_DIST ?? path.join(__dirname, 'dist'));
 
 export default defineConfig({
-  testDir: './tests',
+  testDir: './tests/integration',
   testMatch: '**/*.spec.ts',
   testIgnore: '**/unit/**',
   timeout: 30000,

@@ -27,7 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const EXTENSION_PATH = path.join(__dirname, '..', 'dist');
+const EXTENSION_PATH = path.resolve(process.env.EXTENSION_DIST ?? path.join(__dirname, '../..', 'dist'));
 const EXTENSION_NAME = 'Agent Jake Browser MCP';
 
 const FIXTURE_TITLE = 'Agent Jake E2E Fixture';
@@ -192,6 +192,19 @@ test('popup renders status panel and reads server config from background', async
     });
   } finally {
     await popup.close();
+  }
+});
+
+test('copilot panel opens in a fresh install without contacting a model', async () => {
+  const panel = await context.newPage();
+  try {
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await expect(panel.getByText('Pide algo sobre esta página u otras pestañas.')).toBeVisible();
+    await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue('');
+    await expect(panel.getByRole('button', { name: 'Guardar' })).toBeDisabled();
+    await expect(panel.locator('textarea')).toBeDisabled();
+  } finally {
+    await panel.close();
   }
 });
 

@@ -1,0 +1,12 @@
+{
+  "extends": "../core/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "../core/src/env.d.ts"
+  ],
+  "exclude": []
+}

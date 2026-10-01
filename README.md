@@ -53,7 +53,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 | **How** | WebSocket connection on `localhost:8765`. Server sends tool requests, extension returns results |
 | **Why** | WebSockets provide persistent, bidirectional communication. The extension runs in Chrome's isolated context and needs a bridge to receive external commands |
 | **Protocol** | WebSocket with JSON messages |
-| **File** | `src/background/ws-client.ts` |
+| **File** | `packages/core/src/background/ws-client.ts` |
 
 #### 3. Laravel Server ↔ Chrome Extension (Reverb WebSocket)
 
@@ -63,7 +63,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 | **How** | Extension authenticates with Sanctum token, subscribes to private channel `extension.{userId}` via Laravel Reverb (Pusher protocol) |
 | **Why** | Enables server-coordinated automation. Commands can be queued in the database and broadcast when the extension is online. Supports multiple extensions per user |
 | **Protocol** | Pusher protocol over WebSocket (port 8085) |
-| **File** | `src/background/reverb-client.ts` |
+| **File** | `packages/core/src/background/reverb-client.ts` |
 
 #### 4. Chrome Extension ↔ Browser Tab (Chrome Debugger API)
 
@@ -73,7 +73,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 | **How** | Extension attaches debugger to target tab, sends CDP commands for mouse/keyboard events, JavaScript evaluation, screenshots |
 | **Why** | CDP provides low-level browser control that works on any website without content script limitations. Can simulate real user input |
 | **Protocol** | Chrome Debugger API (CDP wrapper) |
-| **File** | `src/background/tab-manager.ts` |
+| **File** | `packages/core/src/background/tab-manager.ts` |
 
 #### 5. Chrome Extension ↔ Content Script (Chrome Messaging)
 
@@ -83,7 +83,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 | **How** | `chrome.tabs.sendMessage()` / `chrome.runtime.onMessage` |
 | **Why** | Content scripts run in the page context and can build the ARIA accessibility tree, maintain element references, and access DOM APIs not available via CDP |
 | **Protocol** | Chrome extension messaging API |
-| **Files** | `src/content/index.ts`, `src/content/aria-tree.ts` |
+| **Files** | `packages/core/src/content/index.ts`, `packages/core/src/content/aria-tree.ts` |
 
 ### Data Flow Example
 
@@ -109,6 +109,33 @@ Together, these provide a complete browser automation solution enabling AI agent
 - **Tab Management** - Connect, switch, and manage browser tabs
 - **Console Log Access** - Read browser console messages
 - **Visual Debugging** - Highlight elements for debugging
+
+## Copilot side panel
+
+A Claude-style chat in Chrome's side panel whose agent acts on your tabs, without any MCP
+client: open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the
+agent drives the page with the same `browser_*` handlers the MCP path uses.
+
+- **Sees the page by default**: every prompt carries a `<page_context>` block with the
+  target tab, the open tabs and the target's `browser_state` (interactive elements with refs).
+- **This tab or others**: the target follows the active tab (📌 pins it); the agent can
+  `browser_switch_tab` / `browser_new_tab` to work elsewhere.
+- **Modes** (Shift+Tab cycles them):
+  - *Preguntar* — every page-changing action shows an approval card
+    (Permitir / Siempre en este sitio / Denegar); reads run freely.
+  - *Auto* — acts without asking.
+  - *Plan* — read-only investigation, then a plan card; approve it to run in Auto or
+    Preguntar, or send feedback and it re-plans.
+- **Interaction**: the agent can `ask_user` (options or free text) and keeps a live
+  checklist with `update_plan`, pinned above the composer.
+- **Model selector** fed by `GET {endpoint}/models` (embeddings/audio/image filtered out).
+- Streamed answers (text and reasoning) rendered as safe Markdown (everything escaped,
+  http(s) links only); tool steps collapse into "N pasos" blocks.
+- Conversations are saved (✚ new, 🕘 history). Endpoint, key, step cap, vision and the
+  per-site permissions live in ⚙ (`chrome.storage.local`, trusted contexts only).
+- `index.html?windowId=N` runs the panel detached, following window N's active tab.
+- The loop runs in the service worker (`packages/core/src/background/agent/`); the panel
+  (`packages/core/src/sidepanel/`) only renders it and answers its requests. Stop / Esc aborts.
 
 ## Installation
 
@@ -193,7 +220,7 @@ npm run test:unit:watch
 ## Project Structure
 
 ```
-src/
+packages/core/src/
 ├── background/              # Service worker (Manifest V3)
 │   ├── index.ts             # Entry point, message routing
 │   ├── ws-client.ts         # Local MCP WebSocket client
@@ -246,7 +273,7 @@ src/
 
 ## Configuration
 
-Key configuration values in `src/types/config.ts`:
+Key configuration values in `packages/core/src/types/config.ts`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -285,3 +312,35 @@ The extension exposes 23 browser automation tools:
 ## License
 
 MIT - See [LICENSE](LICENSE)
+
+## Workspace development
+
+Run commands from the repository root with one shared `package-lock.json`:
+
+```sh
+npm ci
+npm run typecheck
+npm run test:unit
+npm run build
+npm run dev
+npm test
+```
+
+The generic MV3 extension, assets, previews, icon generator and unit tests live
+in `packages/core`. `packages/house-staticduo` and `packages/house-pocharlies`
+export small identity/composition objects consuming that same core. Importing
+the composition API does not boot MV3; Chrome starts the manifest entrypoints.
+House identity is metadata, not an authorization decision or server selector.
+No house-specific integration is assumed for Pocharlies.
+
+Vite uses the core as its project root and emits the installable extension into
+the repository-root `dist/`. Environment files remain at the repository root.
+The installed popup, side panel and icon routes remain unchanged; workspace
+paths never become extension URLs. Load `dist/` as an unpacked extension.
+
+The headed Playwright suite lives in `tests/integration` and requires a visible
+Chromium display (or Xvfb). Set `EXTENSION_DIST=/absolute/path/to/dist` to test a
+different built artifact; no neighboring server checkout is required.
+
+See [migration inventory](docs/migration-inventory.md) and
+[current wire contract](docs/contracts/browser-harness-v1.md).
