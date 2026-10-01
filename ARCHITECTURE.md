@@ -1,0 +1,44 @@
+# ARCHITECTURE — agent-browser-extension
+
+Extensión de Chrome (Manifest V3) que deja a un agente controlar un navegador real por WebSocket. Es el lado «navegador» del par `agent-browser-extension` + `agent-browser-server`. Fork de `jibanez-staticduo/agent-jake-browser-mcp-extension` (que viene de SnakeO).
+
+## Clientes y versiones
+
+- Un único cliente: el navegador Chrome donde se instala (Mac y x86; el servidor las distingue por nombre de conexión).
+- Versión 2.3.3 (`package.json` y `manifest.json` coinciden en `main`; el nombre del manifiesto es «Browser Harness (pocharlies)»).
+- Consumidor: `pocharlies-org/agent-browser-server` (protocolo WebSocket con token). No hay iOS, Mac nativo ni API pública.
+
+## Dependencias (en ambos sentidos)
+
+- Depende de: `agent-browser-server` (WebSocket; la extensión se empareja con un token que emite el servidor, `src/background/pairing.ts`) y de las API de Chrome `debugger`, `scripting`, `tabs`, `webNavigation`, `storage`, `alarms`.
+- Dependen de ella: el MCP `browser` de las sesiones (vía el servidor) y el despliegue `k8s-agentjake-browser-mcp-pocharlies` (el servidor sirve el zip de la extensión).
+- El protocolo mensaje a mensaje no es un contrato versionado: cambiar un mensaje exige tocar el servidor en el mismo cambio.
+
+## Stack
+
+TypeScript 5.9, Vue 3.5 + Pinia 3 (popup), Vite 7 con `@crxjs/vite-plugin` 2.0.0-beta.33, zod 4, sharp 0.34. Tests: Playwright 1.57 (e2e) y Vitest 2.1 (unitarios). Node 22.23.2 en CI.
+
+## Componentes compartidos
+
+- `src/background/tool-handlers.ts` y `src/background/tools/`: un handler por herramienta MCP. Una herramienta nueva se añade aquí y en `agent-browser-server/src/tools/`, nunca solo en uno.
+- `src/content/` (árbol ARIA, selectores, estado compacto): lo único que toca el DOM de la página.
+- `src/background/redact.ts` y `storage-privacy.ts`: redacción de datos sensibles antes de enviar al servidor; no se saltan.
+- `scripts/check-deltas.sh`: aserciones que protegen los cambios propios frente a un auto-update del upstream.
+
+## Cómo se construye
+
+Código en `src/` por contexto de ejecución (`background`, `content`, `popup`), constantes en `src/constants/`, configuración de runtime en `src/config/runtime.ts`. Cambio nuevo = rama + PR contra `main`. Una herramienta nueva entra con su test y el cambio simétrico en el servidor. No se añade lógica de negocio en el popup.
+
+## Tests
+
+`npm run typecheck`, `npm run test:unit` (Vitest) y `npm test` (Playwright, no se ejecuta en CI). Los e2e piden un Chrome con la extensión cargada.
+
+## CI/CD y despliegue
+
+`.github/workflows/ci.yml`: jobs `build-test` (tsc + vitest) y `deltas` (`scripts/check-deltas.sh`) en `arc-k8s`, con Node 22.23.2 bajado y verificado por sha256; además los workflows estándar `duplicados.yml` y `pr-review.yml`. No hay publicación en Chrome Web Store: la extensión se carga sin empaquetar o desde el zip que sirve el servidor; la ruta `POST /extension/reload` del servidor y la rama `feat/self-reload` permiten recargarla sin intervención.
+
+## Decisiones y trampas
+
+- Abre pestañas en segundo plano por defecto; solo la captura trae la pestaña al frente (#10).
+- El job `deltas` falla si un merge de upstream revierte los cambios propios: es un fallo, no un éxito.
+- Los clones de trabajo tienen tres remotos (`origin`, `upstream`, `fork`) y hay clones duplicados en el host (ver C5 de SC-1425).
