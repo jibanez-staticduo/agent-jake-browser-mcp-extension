@@ -4,10 +4,16 @@
 
 export const CONFIG = {
   // WebSocket connection to browser-mcp server
-  WS_PORT: Number(import.meta.env.VITE_WS_PORT ?? 443),
-  WS_HOST: import.meta.env.VITE_WS_HOST ?? 'agent-browser.staticduo.com',
+  // Default is LOCAL ONLY. The previous default pointed at a third-party host
+  // (agent-browser.staticduo.com:443) and, with <all_urls> + debugger granted,
+  // that hands full control of the browser to whoever runs that host. Do not
+  // reintroduce a remote default.
+  WS_PORT: Number(import.meta.env.VITE_WS_PORT ?? 8765),
+  WS_HOST: import.meta.env.VITE_WS_HOST ?? '127.0.0.1',
   WS_PATH: import.meta.env.VITE_WS_PATH ?? '',
-  WS_SECURE: (import.meta.env.VITE_WS_SECURE ?? 'true') === 'true',
+  WS_SECURE: (import.meta.env.VITE_WS_SECURE ?? 'false') === 'true',
+  // Shared secret with the server (compiled in via VITE_WS_TOKEN).
+  WS_TOKEN: import.meta.env.VITE_WS_TOKEN ?? '',
 
   // Reconnection settings
   RECONNECT_INTERVAL_MS: 5000,  // Check every 5 seconds (fixed, no backoff)

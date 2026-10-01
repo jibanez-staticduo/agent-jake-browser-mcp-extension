@@ -34,10 +34,6 @@
   "exclude": [
     "dist",
     "node_modules",
-    "src/background/api-client.ts",
-    "src/background/auth-service.ts",
-    "src/background/pusher-polyfill.ts",
-    "src/background/reverb-client.ts",
     "src/popup/components/AuthForm.vue",
     "src/popup/components/UserCard.vue",
     "src/popup/preview",

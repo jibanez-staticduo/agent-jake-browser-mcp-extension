@@ -14,8 +14,23 @@ import { WebSocketClient } from './ws-client';
 import { TabManager } from './tab-manager';
 import { createToolHandlers } from './tool-handlers';
 import { activityLog } from './activity-log';
+import { preparePrivateStorage } from './storage-privacy';
+import {
+  cancelPairing,
+  getPairingInfo,
+  maybeAutoStartPairing,
+  setOnTokenApproved,
+  startPairing,
+} from './pairing';
 import { log } from '@/utils/logger';
-import { CONFIG } from '@/types/config';
+import {
+  buildDisplayUrl,
+  getEffectiveConfig,
+  parseWsUrl,
+  setServerUrl,
+  setToken,
+  STORAGE_KEYS,
+} from '@/config/runtime';
 
 // Keep-alive alarm name - fires every 12 seconds to prevent service worker sleep
 const KEEPALIVE_ALARM = 'keepalive';
@@ -31,12 +46,21 @@ let tabManager: TabManager | null = null;
 async function initialize(): Promise<void> {
   log.info('Initializing Agent Jake Browser MCP Extension');
 
+  await preparePrivateStorage();
+
   // Create tab manager
   tabManager = new TabManager();
   await tabManager.initialize();
 
   // Create WebSocket client (for local MCP server)
-  wsClient = new WebSocketClient(CONFIG.WS_PORT);
+  wsClient = new WebSocketClient();
+
+  // When pairing stores a fresh token, reconnect so the handshake uses it.
+  setOnTokenApproved(() => {
+    wsClient?.reload().catch((error) => {
+      log.warn('[Pairing] Reload after approval failed:', error);
+    });
+  });
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
@@ -44,6 +68,11 @@ async function initialize(): Promise<void> {
 
   // Start connection loop for local MCP
   startConnectionLoop();
+
+  // Resume or auto-start a pairing flow when the runtime config calls for it.
+  maybeAutoStartPairing().catch((error) => {
+    log.warn('[Pairing] Auto-start check failed:', error);
+  });
 
   log.info('Extension initialized');
 }
@@ -55,19 +84,17 @@ async function initialize(): Promise<void> {
 async function updateKeepAliveAlarm(): Promise<void> {
   const tabId = tabManager?.getConnectedTabId();
 
-  if (tabId) {
-    // Tab connected - start keep-alive alarm
-    const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
-    if (!existing) {
-      await chrome.alarms.create(KEEPALIVE_ALARM, {
-        periodInMinutes: KEEPALIVE_INTERVAL_MINUTES,
-      });
-      log.info('[KeepAlive] Alarm started - service worker will stay awake');
-    }
-  } else {
-    // No tab connected - stop keep-alive alarm to allow service worker to sleep
-    await chrome.alarms.clear(KEEPALIVE_ALARM);
-    log.debug('[KeepAlive] Alarm cleared - no connected tab');
+  // The alarm runs ALWAYS. Without it the MV3 service worker sleeps after ~30s,
+  // takes the WebSocket down with it, and the agent sees "Extension not
+  // connected" with no way to wake it — there is no UI to poke when the MCP
+  // client is a headless session.
+  void tabId;
+  const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
+  if (!existing) {
+    await chrome.alarms.create(KEEPALIVE_ALARM, {
+      periodInMinutes: KEEPALIVE_INTERVAL_MINUTES,
+    });
+    log.info('[KeepAlive] Alarm started - service worker stays awake');
   }
 }
 
@@ -92,11 +119,10 @@ async function tryConnect(): Promise<void> {
   const wsConnected = wsClient?.isConnected();
   log.debug(`[Loop] tryConnect - tabId: ${tabId}, wsConnected: ${wsConnected}`);
 
-  // Only connect if we have a connected tab
-  if (!tabId) {
-    log.debug('[Loop] No connected tab, skipping WebSocket connection');
-    return;
-  }
+  // Keep the WebSocket up connected tab or not: tools that do not touch the DOM
+  // (list_tabs, navigate, new_tab) must work, and the tab gets attached on the
+  // first command that needs it (see ensureTabId in tools/utils.ts).
+  void tabId;
 
   // Skip if ws-client already has a reconnect scheduled
   if (wsClient.isReconnecting()) {
@@ -195,6 +221,59 @@ async function handlePopupMessage(message: {
       }
 
       return await tabManager.getCdpStatus();
+    }
+
+    case 'getServerConfig': {
+      const cfg = await getEffectiveConfig();
+      const stored = await chrome.storage.local.get([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
+      return {
+        effectiveUrl: buildDisplayUrl(cfg),
+        fromStorage: cfg.fromStorage,
+        source: cfg.source,
+        storedServerUrl: typeof stored[STORAGE_KEYS.serverUrl] === 'string'
+          ? (stored[STORAGE_KEYS.serverUrl] as string)
+          : '',
+        storedToken: typeof stored[STORAGE_KEYS.token] === 'string'
+          ? (stored[STORAGE_KEYS.token] as string)
+          : '',
+        hasToken: cfg.token !== '',
+        connectionId: cfg.connectionId,
+        connected: wsClient?.isConnected() || false,
+        pairing: getPairingInfo(),
+      };
+    }
+
+    case 'saveServerConfig': {
+      const { serverUrl, token } = (payload || {}) as { serverUrl?: string; token?: string };
+      if (typeof serverUrl === 'string') {
+        const trimmed = serverUrl.trim();
+        if (trimmed && parseWsUrl(trimmed) === null) {
+          return { success: false, error: `Invalid server URL: ${trimmed}` };
+        }
+        await setServerUrl(trimmed || null);
+      }
+      if (typeof token === 'string') {
+        await setToken(token.trim());
+      }
+      // Reconnect immediately so the new URL/token take effect.
+      cancelPairing();
+      wsClient?.disconnect();
+      await wsClient?.reload();
+      const cfg = await getEffectiveConfig();
+      return {
+        success: true,
+        connected: wsClient?.isConnected() || false,
+        effectiveUrl: buildDisplayUrl(cfg),
+      };
+    }
+
+    case 'startPairing': {
+      const result = await startPairing();
+      return { success: true, ...result };
+    }
+
+    case 'pairingStatus': {
+      return getPairingInfo();
     }
 
     case 'connectTab': {

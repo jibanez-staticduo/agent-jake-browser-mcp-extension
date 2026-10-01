@@ -1,25 +1,36 @@
 <script setup lang="ts">
+import { CONFIG } from '@/types/config';
+import { computed } from 'vue';
 /**
  * Root Vue component for extension popup.
  * Uses Pinia stores for centralized state management.
  */
 import { onMounted, onUnmounted } from 'vue';
-import { useStatusStore, useActivityStore } from './stores';
+import { useServerStore, useStatusStore, useActivityStore } from './stores';
 import ConnectionStatus from './components/ConnectionStatus.vue';
+import ServerSettings from './components/ServerSettings.vue';
 import TabSelector from './components/TabSelector.vue';
 import ActivityLog from './components/ActivityLog.vue';
 import ActivityModal from './components/ActivityModal.vue';
 
+const buildWsEndpoint = `${CONFIG.WS_SECURE ? 'wss' : 'ws'}://${CONFIG.WS_HOST}:${CONFIG.WS_PORT}`;
+
 const status = useStatusStore();
+const server = useServerStore();
 const activity = useActivityStore();
+
+// Show the runtime-effective endpoint once known, build default until then.
+const wsEndpoint = computed(() => server.effectiveUrl || buildWsEndpoint);
 
 onMounted(() => {
   status.startPolling();
+  server.startPolling();
   activity.startPolling();
 });
 
 onUnmounted(() => {
   status.stopPolling();
+  server.stopPolling();
   activity.stopPolling();
 });
 </script>
@@ -31,11 +42,14 @@ onUnmounted(() => {
         <div class="eyebrow">Local MCP Mode</div>
         <h1>Agent Jake Browser</h1>
       </div>
-      <span class="endpoint">wss://agent-browser.staticduo.com</span>
+      <span class="endpoint">{{ wsEndpoint }}</span>
     </div>
 
     <!-- Connection Status Panel -->
     <ConnectionStatus />
+
+    <!-- Runtime Server Settings (URL, token, pairing) -->
+    <ServerSettings />
 
     <!-- Tab Connection Section -->
     <div class="section">
@@ -50,7 +64,7 @@ onUnmounted(() => {
 
     <!-- Footer -->
     <div class="footer">
-      WebSocket: agent-browser.staticduo.com · Local MCP only ·
+      WebSocket: {{ wsEndpoint }} · Local MCP only ·
       <a href="https://github.com/SnakeO/agent-jake-browser-mcp-extension" target="_blank">Docs</a>
     </div>
   </div>

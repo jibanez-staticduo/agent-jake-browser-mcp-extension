@@ -8,6 +8,8 @@ export type ToolName =
   | 'browser_navigate'
   | 'browser_go_back'
   | 'browser_go_forward'
+  | 'browser_state'
+  | 'browser_find'
   | 'browser_snapshot'
   | 'browser_click'
   | 'browser_type'
@@ -22,6 +24,7 @@ export type ToolName =
   | 'browser_new_tab'
   | 'browser_list_tabs'
   | 'browser_switch_tab'
+  | 'browser_send_to_back'
   | 'browser_close_tab'
   | 'browser_get_text'
   | 'browser_get_attribute'
@@ -31,7 +34,14 @@ export type ToolName =
   | 'browser_evaluate'
   | 'browser_get_html'
   | 'browser_iframe_eval'
-  | 'browser_iframe_click';
+  | 'browser_iframe_click'
+  | 'browser_pdf'
+  | 'browser_upload_file'
+  | 'browser_network_requests'
+  | 'browser_network_request'
+  | 'browser_cdp'
+  | 'browser_drop'
+  | 'browser_fill_form';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {
@@ -99,6 +109,11 @@ export interface TabInfo {
 export interface Coordinates {
   x: number;
   y: number;
+  /**
+   * false when the element lives in a cross-origin iframe and its position could not be
+   * translated into top-frame coordinates: CDP events would land somewhere else.
+   */
+  exact?: boolean;
 }
 
 // Element bounding box

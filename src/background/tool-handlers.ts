@@ -14,8 +14,10 @@ import {
   createNavigationHandlers,
   createInteractionHandlers,
   createQueryHandlers,
+  createStateHandlers,
   createTabHandlers,
   createUtilityHandlers,
+  createDevtoolsHandlers,
 } from './tools/handlers';
 
 /**
@@ -55,8 +57,10 @@ export function createToolHandlers(tabManager: TabManager) {
     ...createNavigationHandlers(ctx),
     ...createInteractionHandlers(ctx),
     ...createQueryHandlers(ctx),
+    ...createStateHandlers(ctx),
     ...createTabHandlers(ctx),
     ...createUtilityHandlers(ctx),
+    ...createDevtoolsHandlers(ctx),
   };
 
   /**
@@ -71,7 +75,7 @@ export function createToolHandlers(tabManager: TabManager) {
     try {
       const handler = handlers[type];
       if (!handler) {
-        logError(type, `Unknown tool: ${type}`, { payload });
+        logError('unknown_tool', `Unknown tool: ${type}`);
         return {
           id,
           success: false,
@@ -154,58 +158,24 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
     case 'browser_resize_viewport':
       return `Resize to ${p?.width}x${p?.height}`;
     case 'browser_upload_file':
-      return `Upload file: ${p?.filePath}`;
+      return `Upload file: ${p?.filePath ?? (p?.filePaths as string[] | undefined)?.join(', ')}`;
+    case 'browser_network_requests':
+      return `Network requests (${((r?.requests as unknown[]) ?? []).length})`;
+    case 'browser_network_request':
+      return `Network request [${p?.index}]${p?.part ? ` ${p.part}` : ''}`;
+    case 'browser_get_console_logs':
+      return `Console logs (${((r?.logs as unknown[]) ?? []).length})`;
+    case 'browser_cdp':
+      return `CDP ${p?.method}`;
+    case 'browser_drop':
+      return `Drop on "${p?.ref || p?.selector}"`;
+    case 'browser_fill_form':
+      return `Fill form (${((p?.fields as unknown[]) ?? []).length} fields)`;
+    case 'browser_select_option':
+      return `Select option in "${p?.ref || p?.selector}"`;
+    case 'browser_pdf':
+      return `Print page to PDF (${Math.round(String((r as Record<string, unknown>)?.pdf ?? '').length * 0.75)} bytes)`;
     default:
       return type.replace('browser_', '').replace(/_/g, ' ');
-  }
-}
-
-/**
- * Execute a tool command from Reverb (remote Laravel server).
- */
-export async function executeToolFromReverb(
-  tabManager: TabManager,
-  type: string,
-  payload: Record<string, unknown>
-): Promise<{ success: boolean; result?: unknown; error?: string }> {
-  const startTime = performance.now();
-
-  log.debug(`[Reverb Tool] Received: ${type}`);
-
-  const handleMessage = createToolHandlers(tabManager);
-
-  try {
-    const fakeId = `reverb_${Date.now()}`;
-
-    const response = await handleMessage({
-      id: fakeId,
-      type: type as MessageToolName,
-      payload,
-    });
-
-    const durationMs = Math.round(performance.now() - startTime);
-
-    if (response.success) {
-      log.info(`[Reverb Tool] Completed: ${type} - success in ${durationMs}ms`);
-      return {
-        success: true,
-        result: response.result,
-      };
-    } else {
-      log.error(`[Reverb Tool] Failed: ${type} - ${response.error?.message} in ${durationMs}ms`);
-      return {
-        success: false,
-        error: response.error?.message || 'Unknown error',
-      };
-    }
-  } catch (error) {
-    const durationMs = Math.round(performance.now() - startTime);
-    const errorMsg = (error as Error).message;
-    log.error(`[Reverb Tool] Exception: ${type} - ${errorMsg} in ${durationMs}ms`);
-
-    return {
-      success: false,
-      error: errorMsg,
-    };
   }
 }

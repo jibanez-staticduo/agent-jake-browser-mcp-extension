@@ -15,19 +15,58 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       return { waited: time };
     },
 
+    /**
+     * A hidden tab does not paint reliably (throttled renderer, stale surface),
+     * so the capture briefly brings the connected tab to the front of its
+     * window and restores the previously visible tab right after. The user
+     * only ever sees a flash; nothing else activates tabs.
+     */
     browser_screenshot: async () => {
-      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
-        'Page.captureScreenshot',
-        { format: 'png' }
-      );
+      const tabId = ctx.tabManager.getConnectedTabId();
+      if (!tabId) {
+        throw new Error('No tab connected');
+      }
 
-      return {
-        image: `data:image/png;base64,${result.data}`,
-      };
+      const previousTabId = await ctx.tabManager.bringTabToFront(tabId);
+      try {
+        if (previousTabId !== null) {
+          // One beat for the renderer to paint its first frame after activation.
+          await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+          'Page.captureScreenshot',
+          { format: 'png' }
+        );
+
+        return {
+          image: `data:image/png;base64,${result.data}`,
+        };
+      } finally {
+        await ctx.tabManager.restoreTabBehind(tabId, previousTabId);
+      }
     },
 
-    browser_get_console_logs: async () => {
-      return [];
+    /**
+     * The page as a PDF, exactly as Chrome would print it. The case that asked for it:
+     * a bank receipt whose own "save or print" button only opens blank tabs. With the
+     * debugger already attached nothing else is needed — and since the PDF comes back as
+     * base64 and the server writes it to disk, it never goes through the transcript.
+     */
+    browser_pdf: async (payload) => {
+      const { landscape, printBackground, scale, pageRanges } = schemas.browser_pdf.parse(payload);
+
+      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+        'Page.printToPDF',
+        {
+          landscape,
+          printBackground,
+          scale,
+          ...(pageRanges ? { pageRanges } : {}),
+          transferMode: 'ReturnAsBase64',
+        }
+      );
+
+      return { pdf: result.data };
     },
 
     browser_evaluate: async (payload) => {
@@ -233,41 +272,62 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       return { width, height };
     },
 
+    /**
+     * Paths are read by Chrome itself, so they are paths on the machine running Chrome.
+     * The target can be the <input type=file> (hidden ones too: with no ref or selector the
+     * first one on the page is used) or any element that OPENS the file chooser — a styled
+     * "Upload" button. For the latter the chooser is intercepted over CDP, the element gets
+     * a trusted click and the files go to the input Chrome reports in fileChooserOpened.
+     */
     browser_upload_file: async (payload) => {
-      const { ref, selector, filePath } = schemas.browser_upload_file.parse(payload);
+      const { ref, selector, filePath, filePaths } = schemas.browser_upload_file.parse(payload);
+      const files = [...(filePaths ?? []), ...(filePath ? [filePath] : [])];
 
-      let targetSelector = selector;
-      if (!targetSelector && ref) {
-        targetSelector = await getSelector(ref);
-      }
-
-      if (!targetSelector) {
-        throw new Error('Either ref or selector must be provided');
-      }
-
-      const doc = await ctx.tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>(
-        'DOM.getDocument',
-        {}
-      );
-
-      const node = await ctx.tabManager.sendDebuggerCommand<{ nodeId: number }>(
-        'DOM.querySelector',
-        {
+      const target = ref ? await ctx.resolveRef(ref) : { frameId: 0, selector: selector || 'input[type=file]' };
+      if (target.frameId === 0) {
+        const doc = await ctx.tabManager.sendDebuggerCommand<{ root: { nodeId: number } }>('DOM.getDocument', {});
+        const node = await ctx.tabManager.sendDebuggerCommand<{ nodeId: number }>('DOM.querySelector', {
           nodeId: doc.root.nodeId,
-          selector: targetSelector,
+          selector: target.selector,
+        });
+        if (!node.nodeId) throw new Error(`Element not found: ${target.selector}`);
+        const { node: info } = await ctx.tabManager.sendDebuggerCommand<{ node: { nodeName: string; attributes?: string[] } }>(
+          'DOM.describeNode', { nodeId: node.nodeId });
+        const attrs = info.attributes ?? [];
+        const typeAt = attrs.findIndex((a, i) => i % 2 === 0 && a.toLowerCase() === 'type');
+        if (info.nodeName === 'INPUT' && typeAt >= 0 && attrs[typeAt + 1]?.toLowerCase() === 'file') {
+          await ctx.tabManager.sendDebuggerCommand('DOM.setFileInputFiles', { nodeId: node.nodeId, files });
+          return { uploaded: true, files };
         }
-      );
-
-      if (!node.nodeId) {
-        throw new Error(`Element not found: ${targetSelector}`);
       }
 
-      await ctx.tabManager.sendDebuggerCommand('DOM.setFileInputFiles', {
-        nodeId: node.nodeId,
-        files: [filePath],
-      });
-
-      return { uploaded: true, filePath };
+      // Button (or an input inside an iframe): let the page open its chooser and answer it.
+      ctx.tabManager.beginFileChooser();
+      const chooser = new AbortController();
+      const tabId = ctx.tabManager.getConnectedTabId();
+      try {
+        if (tabId === null) throw new Error('No tab connected for file chooser');
+        await ctx.tabManager.setFileChooserInterception(tabId, true);
+        const opened = ctx.tabManager.waitForDebuggerEvent<{ backendNodeId: number }>('Page.fileChooserOpened', 10000, chooser.signal);
+        void opened.catch(() => {});
+        await ctx.sendToContent('scrollIntoView', { selector: target.selector }, target.frameId);
+        const coords = await ctx.sendToContent<{ x: number; y: number; exact?: boolean }>(
+          'getElementCoordinates', { selector: target.selector, clickable: true }, target.frameId);
+        if (coords.exact === false) {
+          await ctx.sendToContent('dispatchClick', { selector: target.selector }, target.frameId);
+        } else {
+          await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
+          await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
+          await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+        }
+        const { backendNodeId } = await opened;
+        await ctx.tabManager.setChooserFiles(tabId, backendNodeId, files);
+        return { uploaded: true, files, via: 'fileChooser' };
+      } finally {
+        chooser.abort();
+        if (tabId !== null) await ctx.tabManager.setFileChooserInterception(tabId, false).catch(() => {});
+        ctx.tabManager.endFileChooser();
+      }
     },
   };
 }

@@ -26,13 +26,19 @@ export const schemas = {
     selector: z.string().optional(),
   }),
 
-  browser_drag: z.object({
-    startRef: z.string(),
-    endRef: z.string(),
-  }),
+  browser_drag: z
+    .object({
+      startRef: z.string().optional(),
+      startSelector: z.string().optional(),
+      endRef: z.string().optional(),
+      endSelector: z.string().optional(),
+    })
+    .refine((d) => d.startRef || d.startSelector, { message: 'startRef or startSelector is required' })
+    .refine((d) => d.endRef || d.endSelector, { message: 'endRef or endSelector is required' }),
 
   browser_select_option: z.object({
-    ref: z.string(),
+    ref: z.string().optional(),
+    selector: z.string().optional(),
     value: z.string().optional(),
     label: z.string().optional(),
     index: z.number().optional(),
@@ -48,10 +54,15 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
+    switchTo: z.boolean().optional().default(false),
   }),
 
   browser_switch_tab: z.object({
     tabId: z.number(),
+  }),
+
+  browser_send_to_back: z.object({
+    tabId: z.number().optional(),
   }),
 
   browser_get_text: z.object({
@@ -100,7 +111,55 @@ export const schemas = {
   browser_upload_file: z.object({
     ref: z.string().optional(),
     selector: z.string().optional(),
-    filePath: z.string(),
+    filePath: z.string().optional(),
+    filePaths: z.array(z.string()).optional(),
+  }).refine((d) => d.filePath || d.filePaths?.length, { message: 'filePath or filePaths is required' }),
+
+  browser_get_console_logs: z.object({
+    types: z.array(z.string()).optional(),
+    level: z.enum(['error', 'warning', 'info', 'debug']).optional(),
+    all: z.boolean().optional().default(false),
+    clear: z.boolean().optional().default(false),
+  }),
+
+  browser_network_requests: z.object({
+    includeStatic: z.boolean().optional().default(false),
+    all: z.boolean().optional().default(false),
+    filter: z.string().optional(),
+  }),
+
+  browser_network_request: z.object({
+    index: z.number().int(),
+    part: z.enum(['request-headers', 'request-body', 'response-headers', 'response-body']).optional(),
+    maxBodyChars: z.number().int().min(100).optional().default(20000),
+  }),
+
+  browser_cdp: z.object({
+    method: z.string().regex(/^[A-Z][A-Za-z]+\.[a-zA-Z]+$/, 'CDP method like "Page.reload"'),
+    params: z.record(z.string(), z.unknown()).optional(),
+  }),
+
+  browser_drop: z.object({
+    ref: z.string().optional(),
+    selector: z.string().optional(),
+    files: z.array(z.object({ name: z.string(), mimeType: z.string(), base64: z.string() })).optional().default([]),
+    data: z.record(z.string(), z.string()).optional().default({}),
+  }),
+
+  browser_fill_form: z.object({
+    fields: z.array(z.object({
+      ref: z.string().optional(),
+      selector: z.string().optional(),
+      value: z.union([z.string(), z.number(), z.boolean()]),
+      type: z.enum(['textbox', 'checkbox', 'radio', 'combobox', 'slider']).optional(),
+    })).min(1),
+  }),
+
+  browser_pdf: z.object({
+    landscape: z.boolean().optional().default(false),
+    printBackground: z.boolean().optional().default(true),
+    scale: z.number().min(0.1).max(2).optional().default(1),
+    pageRanges: z.string().optional(),
   }),
 } as const;
 
