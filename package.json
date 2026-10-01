@@ -4,15 +4,17 @@
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:preview": "npm run build && vite build --watch & vite --config vite.preview.config.ts",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
+    "dev": "npm run dev --workspace @agent-browser/extension-core",
+    "dev:preview": "npm run dev:preview --workspace @agent-browser/extension-core",
+    "build": "npm run build --workspace @agent-browser/extension-core",
+    "preview": "npm run preview --workspace @agent-browser/extension-core",
+    "test:unit": "npm run test:unit --workspace @agent-browser/extension-core && npm run test:composition",
+    "test:unit:watch": "npm run test:unit:watch --workspace @agent-browser/extension-core",
+    "typecheck": "npm run typecheck --workspaces",
+    "generate:icons": "npm run generate:icons --workspace @agent-browser/extension-core",
     "test": "playwright test",
     "test:headed": "playwright test --headed",
-    "test:unit": "vitest run",
-    "test:unit:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "test:composition": "vitest run --config vitest.config.ts"
   },
   "keywords": [
     "chrome-extension",
@@ -23,21 +25,12 @@
   "author": "Agent Jake",
   "license": "MIT",
   "devDependencies": {
-    "@crxjs/vite-plugin": "^2.0.0-beta.33",
     "@playwright/test": "^1.57.0",
-    "@types/chrome": "^0.1.33",
-    "@types/node": "^25.0.9",
-    "playwright": "^1.57.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1",
-    "vitest": "^2.1.0",
-    "vue-tsc": "^3.2.3"
+    "vitest": "^2.1.0"
   },
-  "dependencies": {
-    "@vitejs/plugin-vue": "^6.0.3",
-    "pinia": "^3.0.4",
-    "sharp": "^0.34.5",
-    "vue": "^3.5.27",
-    "zod": "^4.3.5"
-  }
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ]
 }

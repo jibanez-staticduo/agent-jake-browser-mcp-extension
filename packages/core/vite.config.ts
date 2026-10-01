@@ -10,6 +10,8 @@ import { resolve } from 'path';
 import manifest from './manifest.json';
 
 export default defineConfig({
+  root: __dirname,
+  envDir: resolve(__dirname, '../..'),
   plugins: [
     vue(),
     crx({ manifest }),
@@ -21,7 +23,8 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: 'dist',
+    outDir: resolve(__dirname, '../../dist'),
+    emptyOutDir: true,
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'src/popup/index.html'),
