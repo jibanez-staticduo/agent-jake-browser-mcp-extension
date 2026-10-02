@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copia versionada en este fork del subset de aserciones de
 # ~/mcp-servers/agent-browser/scripts/check-deltas.sh que le toca a la extension
-# (deltas 2, 2b y 3-9). Ruling CTO DGX-309: el script compartido NO se mueve ni
+# (deltas 2, 2b y 3-10). Ruling CTO DGX-309: el script compartido NO se mueve ni
 # se cambia (lo usa el timer systemd de producción); esta copia está adaptada
 # a un checkout de un solo repo, con rutas relativas a la raíz del repo.
 # Un auto-update que revierta cualquiera de estos es un FALLO, no un exito.
@@ -27,4 +27,6 @@ chk "8 all_frames activo"                           grep -q '"all_frames": true'
 # (ajb.token ?? CONFIG.WS_TOKEN, lo manda buildWsUrl). La funcionalidad sigue:
 # se comprueba ahi, no en el fichero viejo.
 chk "9 token soportado en el cliente WS"            grep -q WS_TOKEN src/config/runtime.ts
+# El servidor cierra por id las pestañas inactivas del agente: ignorar el id cerraba la conectada.
+chk "10 browser_close_tab cierra el tabId pedido"   bash -c 'grep -q "schemas.browser_close_tab.parse" src/background/tools/handlers/tabs.ts && grep -q "closeById: true" src/background/tools/handlers/tabs.ts'
 exit $fail
