@@ -23,6 +23,7 @@ import {
   startPairing,
 } from './pairing';
 import { log } from '@/utils/logger';
+import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
 import {
   buildDisplayUrl,
   getEffectiveConfig,
@@ -39,6 +40,25 @@ const KEEPALIVE_INTERVAL_MINUTES = 0.2; // 12 seconds
 // Singleton instances
 let wsClient: WebSocketClient | null = null;
 let tabManager: TabManager | null = null;
+let handleToolMessage: ReturnType<typeof createToolHandlers> | null = null;
+let copilotGate: ReturnType<typeof createCopilotTrafficGate> | null = null;
+let initialized: Promise<void> | null = null;
+
+// Copilot side panel: its Port and the Alt+J shortcut must be registered at the top
+// level, so a wake-up by either event finds the listener in place.
+registerCopilotBridge(async () => {
+  await initialized?.catch(() => undefined);
+  return { tabManager, handleMessage: handleToolMessage, acquireLease: () => copilotGate?.acquire() ?? null };
+});
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  // No await before open(): the shortcut's user gesture must still be live.
+  if (command === 'open-copilot' && tab?.windowId !== undefined) {
+    chrome.sidePanel.open({ windowId: tab.windowId }).catch((error) => {
+      log.warn('[Copilot] Could not open side panel:', error);
+    });
+  }
+});
 
 /**
  * Initialize the extension.
@@ -64,7 +84,9 @@ async function initialize(): Promise<void> {
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
-  wsClient.setMessageHandler(handleMessage);
+  handleToolMessage = handleMessage;
+  copilotGate = createCopilotTrafficGate(tabManager, handleMessage);
+  wsClient.setMessageHandler((message) => copilotGate!.handleMcp(message));
 
   // Start connection loop for local MCP
   startConnectionLoop();
@@ -407,7 +429,8 @@ const extensionVersion = chrome.runtime.getManifest().version;
 console.log('========================================');
 console.log(`Agent Jake Browser MCP Extension v${extensionVersion}`);
 console.log('========================================');
-initialize().catch(error => {
+initialized = initialize();
+initialized.catch(error => {
   log.error('Failed to initialize:', error);
 });
 
