@@ -385,6 +385,35 @@ describe('TabManager background-tab control', () => {
     });
   });
 
+  it('createTab attaches on a blank page before loading the URL it will drive', async () => {
+    // A password manager's page script (1Password) runs at document start; the WebAuthn guard
+    // only wins in documents created after we attach, so the URL must load after connectTab.
+    const manager = new TabManager();
+    const order: string[] = [];
+    let onUpdated: ((tabId: number, info: { status?: string }) => void) | undefined;
+    mockChrome.tabs.onUpdated.addListener.mockImplementation((fn) => { onUpdated = fn; });
+    mockChrome.tabs.create.mockImplementation(async (props) => {
+      order.push(`create ${props.url}`);
+      return { id: 7, url: props.url, title: '', active: false, status: 'complete' };
+    });
+    mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://example.com/', title: 'Example', active: false, status: 'complete' });
+    mockChrome.tabs.update.mockImplementation(async (_id, props) => {
+      order.push(`navigate ${props.url}`);
+      queueMicrotask(() => onUpdated?.(7, { status: 'complete' }));
+      return {};
+    });
+    mockChrome.debugger.attach.mockImplementation(async () => { order.push('attach'); });
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method) => {
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') order.push('pin script');
+      return method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' };
+    });
+
+    const info = await manager.createTab('https://example.com/');
+
+    expect(order).toEqual(['create about:blank', 'attach', 'pin script', 'navigate https://example.com/']);
+    expect(info).toMatchObject({ id: 7, url: 'https://example.com/', title: 'Example', connected: true });
+  });
+
   it('createTab activates the tab only when asked', async () => {
     const manager = new TabManager();
     mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });
