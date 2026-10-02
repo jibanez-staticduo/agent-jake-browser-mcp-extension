@@ -41,25 +41,25 @@ const mockChrome = {
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
   },
+  webNavigation: {
+    getAllFrames: vi.fn().mockResolvedValue([]),
+    onCommitted: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+  },
 };
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
-vi.mock('@/utils/logger', () => ({
-  log: {
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+vi.mock('@/utils/logger', () => import('../helpers/logger'));
 
 vi.mock('@/background/activity-log', () => ({
   logTab: vi.fn().mockResolvedValue(undefined),
   logError: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { TabManager, WEBAUTHN_PIN_SCRIPT } from '@/background/tab-manager';
+import { TabManager, WEBAUTHN_PIN_SCRIPT, pinWebAuthn } from '@/background/tab-manager';
 import { runInNewContext } from 'node:vm';
 import { pageEvents } from '@/background/page-events';
 
@@ -255,6 +255,67 @@ describe('TabManager CDP readiness', () => {
 
     expect(credentials.get()).toBe('native-get');
     expect(credentials.create()).toBe('native-create');
+  });
+
+  it('the pin script hands a stand-in container to a page whose get/create were made non-configurable', () => {
+    // A tab the agent adopts already loaded: 1Password got there first and locked its own
+    // accessors, so the page gets navigator.credentials from us instead.
+    const calls: unknown[] = [];
+    class CredentialsContainer {
+      get(...args: unknown[]) { calls.push(this); return `native-get:${args.length}`; }
+      create() { calls.push(this); return 'native-create'; }
+      store() { return 'native-store'; }
+      preventSilentAccess() { return 'native-psa'; }
+    }
+    const real = new CredentialsContainer();
+    for (const name of ['get', 'create']) {
+      Object.defineProperty(real, name, { configurable: false, enumerable: true, get: () => () => 'hijacked', set: () => {} });
+    }
+    class Navigator { get credentials() { return real; } }
+    const navigator = new Navigator() as Navigator & { credentials: CredentialsContainer };
+    const window = { CredentialsContainer, navigator } as Record<string, unknown>;
+    window.window = window;
+
+    runInNewContext(WEBAUTHN_PIN_SCRIPT, window);
+    runInNewContext(WEBAUTHN_PIN_SCRIPT, window); // again in the same document: no-op
+
+    expect(navigator.credentials).not.toBe(real);
+    expect(navigator.credentials).toBeInstanceOf(CredentialsContainer);
+    expect(navigator.credentials.get({ publicKey: {} })).toBe('native-get:1');
+    expect(navigator.credentials.create()).toBe('native-create');
+    expect(navigator.credentials.store()).toBe('native-store');
+    expect(calls).toEqual([real, real]); // Chrome's methods run on the real container
+  });
+
+  it('pins every web frame of the tab, and each subframe that commits later', async () => {
+    // CDP scripts do not reach cross-site iframes (other processes); chrome.scripting does.
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+    mockChrome.webNavigation.getAllFrames.mockResolvedValue([
+      { frameId: 0, url: 'https://example.com/' },
+      { frameId: 4, url: 'https://accounts.example.net/frame' },
+      { frameId: 9, url: 'chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/inline.html' },
+    ]);
+
+    await manager.connectTab(101, 'https://example.com');
+
+    const pinCalls = () => mockChrome.scripting.executeScript.mock.calls
+      .map(([arg]) => arg as { target: { tabId: number; frameIds?: number[] }; func: unknown; world?: string })
+      .filter((arg) => arg.func === pinWebAuthn);
+    expect(pinCalls()).toEqual([
+      expect.objectContaining({ target: { tabId: 101, frameIds: [0, 4] }, world: 'MAIN', injectImmediately: true }),
+    ]);
+
+    const onCommitted = mockChrome.webNavigation.onCommitted.addListener.mock.calls.at(-1)?.[0] as
+      (d: { tabId: number; frameId: number; url: string }) => void;
+    onCommitted({ tabId: 101, frameId: 12, url: 'https://idp.example.org/passkey' });
+    onCommitted({ tabId: 101, frameId: 0, url: 'https://example.com/next' }); // main frame: CDP covers it
+    onCommitted({ tabId: 202, frameId: 3, url: 'https://other.example/' }); // not our tab
+    await vi.waitFor(() => expect(pinCalls()).toHaveLength(2));
+    expect(pinCalls()[1].target).toEqual({ tabId: 101, frameIds: [12] });
   });
 
   it('still connects when the WebAuthn domain is unavailable', async () => {
