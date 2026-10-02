@@ -271,6 +271,10 @@ export class TabManager {
 
     this.disconnecting = true;
     const tabId = this.connectedTabId;
+    if (this.frameCommitListener) {
+      chrome.webNavigation.onCommitted.removeListener(this.frameCommitListener);
+      this.frameCommitListener = null;
+    }
     try {
       await this.setLiveConnectionCloseGuard(tabId, false);
     } finally {
@@ -787,7 +791,13 @@ export class TabManager {
         await this.whenTabComplete(tab.id, false);
         await this.connectTab(tab.id);
         const loaded = this.whenTabComplete(tab.id, true);
-        await chrome.tabs.update(tab.id, { url });
+        try {
+          await chrome.tabs.update(tab.id, { url });
+        } catch (error) {
+          // Do not leave a connected about:blank behind.
+          await chrome.tabs.remove(tab.id).catch(() => undefined);
+          throw error;
+        }
         await loaded;
       } else {
         // Wait for tab to finish loading
@@ -993,18 +1003,7 @@ export class TabManager {
    * Wait for a tab to finish loading.
    */
   public waitForTabLoad(tabId: number): Promise<void> {
-    return new Promise((resolve) => {
-      const listener = (
-        updatedTabId: number,
-        changeInfo: { status?: string }
-      ) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') {
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    return this.whenTabComplete(tabId, true);
   }
 
   /**

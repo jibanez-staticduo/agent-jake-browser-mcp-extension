@@ -29,4 +29,6 @@ chk "8 all_frames activo"                           grep -q '"all_frames": true'
 chk "9 token soportado en el cliente WS"            grep -q WS_TOKEN src/config/runtime.ts
 # El servidor cierra por id las pestañas inactivas del agente: ignorar el id cerraba la conectada.
 chk "10 browser_close_tab cierra el tabId pedido"   bash -c 'grep -q "schemas.browser_close_tab.parse" src/background/tools/handlers/tabs.ts && grep -q "closeById: true" src/background/tools/handlers/tabs.ts'
+chk "11 guard de WebAuthn (sin diálogo nativo, 1Password fijado)" bash -c 'grep -q "WebAuthn.addVirtualAuthenticator" src/background/tab-manager.ts && grep -q "export function pinWebAuthn" src/background/tab-manager.ts && grep -q "pinWebAuthnInFrames" src/background/tab-manager.ts'
+chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" src/background/tools/utils.ts
 exit $fail

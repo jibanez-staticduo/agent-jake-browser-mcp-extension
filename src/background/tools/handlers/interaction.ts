@@ -11,7 +11,7 @@ import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap, Coordinates } from './types';
 
 export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
-  const { sendToContent, sendToAllFrames, resolveRef, waitForStableOrNavigation } = ctx;
+  const { sendToContent, sendToAllFrames, resolveTarget, waitForStableOrNavigation } = ctx;
 
   return {
     browser_snapshot: async () => {
@@ -26,7 +26,8 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_click: async (payload) => {
-      const { ref } = schemas.browser_click.parse(payload);
+      const element = schemas.browser_click.parse(payload);
+      const ref = element.ref ?? element.selector;
       const tabId = ctx.tabManager.getConnectedTabId();
       if (!tabId) throw new Error('No tab connected');
 
@@ -36,7 +37,7 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       ctx.tabManager.startNewTabDetection();
 
       try {
-        const { frameId, selector } = await resolveRef(ref);
+        const { frameId, selector } = await resolveTarget(element);
         await sendToContent('scrollIntoView', { selector }, frameId);
 
         const coords = await sendToContent<Coordinates>('getElementCoordinates', {
@@ -82,14 +83,14 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_type: async (payload) => {
-      const { ref, text, clear } = schemas.browser_type.parse(payload);
+      const { text, clear, ...element } = schemas.browser_type.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();
       if (!tabId) throw new Error('No tab connected');
 
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';
 
-      const { frameId, selector } = await resolveRef(ref);
+      const { frameId, selector } = await resolveTarget(element);
       await sendToContent('scrollIntoView', { selector }, frameId);
 
       const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector }, frameId);
@@ -118,6 +119,11 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
         });
         await ctx.dispatchKeyEventTyped('keyDown', 'Backspace');
         await ctx.dispatchKeyEventTyped('keyUp', 'Backspace');
+        // The keys do not always land (focus moved, a re-rendered form after a rejected
+        // submit): "clear" then typed onto the old value, and a 2FA field got 10 digits.
+        // Whatever is left goes from inside the page, with the events a framework listens to.
+        const { length } = await sendToContent<{ length: number }>('fieldLength', { selector }, frameId);
+        if (length > 0) await sendToContent('clearField', { selector }, frameId);
       }
 
       for (const char of text) {
@@ -130,22 +136,29 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       if (result.navigated) {
         return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
       }
+      // Lengths only: the text may be a secret (browser_fill_secret goes through here).
+      const typedLength = [...text].length;
+      const fieldLength = await sendToContent<{ length: number }>('fieldLength', { selector }, frameId)
+        .then((r) => r.length, () => undefined);
+      if (clear && fieldLength !== undefined && fieldLength !== typedLength) {
+        return { typed: text, cleared: clear, fieldLength, warning: `the field holds ${fieldLength} characters after typing ${typedLength}` };
+      }
       return { typed: text, cleared: clear };
     },
 
     browser_hover: async (payload) => {
-      const { ref } = schemas.browser_hover.parse(payload);
-      const { frameId, selector } = await resolveRef(ref);
+      const element = schemas.browser_hover.parse(payload);
+      const { frameId, selector } = await resolveTarget(element);
       await sendToContent('scrollIntoView', { selector }, frameId);
       const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector }, frameId);
       await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-      return { hovered: ref };
+      return { hovered: element.ref ?? element.selector };
     },
 
     browser_drag: async (payload) => {
       const parsed = schemas.browser_drag.parse(payload);
-      const start = parsed.startRef ? await resolveRef(parsed.startRef) : { frameId: 0, selector: parsed.startSelector! };
-      const end = parsed.endRef ? await resolveRef(parsed.endRef) : { frameId: 0, selector: parsed.endSelector! };
+      const start = await resolveTarget({ ref: parsed.startRef, selector: parsed.startSelector });
+      const end = await resolveTarget({ ref: parsed.endRef, selector: parsed.endSelector });
 
       await sendToContent('scrollIntoView', { selector: start.selector }, start.frameId);
       await sendToContent('scrollIntoView', { selector: end.selector }, end.frameId);
@@ -179,7 +192,7 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
      */
     browser_select_option: async (payload) => {
       const { ref, selector, value, label, index } = schemas.browser_select_option.parse(payload);
-      const target = selector ? { frameId: 0, selector } : await resolveRef(ref!);
+      const target = await resolveTarget({ ref, selector });
       await sendToContent('scrollIntoView', { selector: target.selector }, target.frameId);
       const { selected } = await sendToContent<{ selected: string[] }>('selectOption', {
         selector: target.selector,
@@ -191,12 +204,18 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_press_key: async (payload) => {
-      const { key } = schemas.browser_press_key.parse(payload);
+      const { key, ...element } = schemas.browser_press_key.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();
       if (!tabId) throw new Error('No tab connected');
 
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';
+
+      if (element.ref || element.selector) {
+        // The MCP tool takes the element to focus first; it used to be dropped here.
+        const { frameId, selector } = await resolveTarget(element);
+        await sendToContent('focusElement', { selector }, frameId);
+      }
 
       await ctx.dispatchKeyEventTyped('keyDown', key);
       await ctx.dispatchKeyEventTyped('keyUp', key);
