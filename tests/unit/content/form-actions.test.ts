@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { findElement } from '@/content/selector';
-import { handleFillField } from '@/content/form-actions';
+import { handleClearField, handleFieldLength, handleFillField } from '@/content/form-actions';
 
 vi.mock('@/content/selector', () => ({ findElement: vi.fn() }));
 
@@ -39,5 +39,30 @@ describe('radio fill', () => {
 
     await expect(handleFillField({ selector: '#other', value: false })).resolves.toEqual({ kind: 'radio' });
     expect(radio.click).not.toHaveBeenCalled();
+  });
+});
+
+describe('clearField / fieldLength', () => {
+  class FakeTextInput {
+    _value = '1234';
+    events: string[] = [];
+    get value() { return this._value; }
+    set value(v: string) { this._value = `framework:${v}`; } // a framework setter that would swallow a plain assignment
+    dispatchEvent(e: Event) { this.events.push(e.type); return true; }
+  }
+
+  it('empties through the native setter and fires input + change, reporting only lengths', async () => {
+    const native = { set(this: FakeTextInput, v: string) { this._value = v; }, configurable: true };
+    class Input extends FakeTextInput {}
+    Object.defineProperty(Input.prototype, 'value', { get(this: FakeTextInput) { return this._value; }, ...native });
+    vi.stubGlobal('HTMLInputElement', Input);
+    vi.stubGlobal('HTMLTextAreaElement', class {});
+    const field = new Input();
+    Object.defineProperty(field, 'value', { get() { return this._value; }, set(v: string) { this._value = `framework:${v}`; }, configurable: true });
+    vi.mocked(findElement).mockResolvedValue(field as unknown as Element);
+
+    await expect(handleFieldLength({ selector: '#otp' })).resolves.toEqual({ length: 4 });
+    await expect(handleClearField({ selector: '#otp' })).resolves.toEqual({ length: 0 });
+    expect(field.events).toEqual(['input', 'change']);
   });
 });

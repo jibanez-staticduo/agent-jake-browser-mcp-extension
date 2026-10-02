@@ -475,6 +475,34 @@ describe('TabManager background-tab control', () => {
     expect(info).toMatchObject({ id: 7, url: 'https://example.com/', title: 'Example', connected: true });
   });
 
+  it('createTab closes the blank tab when it cannot load the URL', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.create.mockResolvedValue({ id: 8, url: 'about:blank', status: 'complete' });
+    mockChrome.tabs.get.mockResolvedValue({ id: 8, url: 'about:blank', status: 'complete' });
+    mockChrome.tabs.update.mockRejectedValueOnce(new Error('Cannot navigate'));
+    mockChrome.tabs.remove.mockResolvedValue(undefined);
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+
+    await expect(manager.createTab('https://example.com/')).rejects.toThrow('Cannot navigate');
+    expect(mockChrome.tabs.remove).toHaveBeenCalledWith(8);
+  });
+
+  it('disconnectTab stops pinning frames of the tab it leaves', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+
+    await manager.connectTab(101, 'https://example.com');
+    const listener = mockChrome.webNavigation.onCommitted.addListener.mock.calls.at(-1)?.[0];
+    await manager.disconnectTab();
+
+    expect(mockChrome.webNavigation.onCommitted.removeListener).toHaveBeenCalledWith(listener);
+  });
+
   it('createTab activates the tab only when asked', async () => {
     const manager = new TabManager();
     mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });

@@ -5,26 +5,31 @@
 
 import { z } from 'zod';
 
+/**
+ * An element is named by a ref from browser_state/snapshot or by a CSS selector: the MCP
+ * server advertises both for every tool that acts on one element, so both must work here.
+ */
+const target = {
+  ref: z.string().optional().describe('Element reference from snapshot (e.g., s1e42)'),
+  selector: z.string().optional().describe('CSS selector (top frame)'),
+};
+const hasTarget = (d: { ref?: string; selector?: string }) => Boolean(d.ref || d.selector);
+const targetRequired = { message: 'Either ref or selector must be provided' };
+
 export const schemas = {
   browser_navigate: z.object({
     url: z.string().url(),
   }),
 
-  browser_click: z.object({
-    ref: z.string().describe('Element reference from snapshot (e.g., s1e42)'),
-    selector: z.string().optional().describe('CSS selector fallback'),
-  }),
+  browser_click: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   browser_type: z.object({
-    ref: z.string(),
+    ...target,
     text: z.string(),
     clear: z.boolean().optional().default(false),
-  }),
+  }).refine(hasTarget, targetRequired),
 
-  browser_hover: z.object({
-    ref: z.string(),
-    selector: z.string().optional(),
-  }),
+  browser_hover: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   browser_drag: z
     .object({
@@ -46,6 +51,7 @@ export const schemas = {
 
   browser_press_key: z.object({
     key: z.string().describe('Key name like "Enter", "Tab", "ArrowDown", or "a"'),
+    ...target, // optional here: the element to focus before the key
   }),
 
   browser_wait: z.object({
@@ -69,27 +75,18 @@ export const schemas = {
     tabId: z.number().optional(),
   }),
 
-  browser_get_text: z.object({
-    ref: z.string(),
-  }),
+  browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),
 
-  browser_get_attribute: z.object({
-    ref: z.string(),
-    attribute: z.string(),
-  }),
+  browser_get_attribute: z.object({ ...target, attribute: z.string() }).refine(hasTarget, targetRequired),
 
   browser_wait_for_element: z.object({
-    ref: z.string(),
+    ...target,
     timeout: z.number().optional().default(10000),
-  }),
+  }).refine(hasTarget, targetRequired),
 
-  browser_highlight: z.object({
-    ref: z.string(),
-  }),
+  browser_highlight: z.object({ ...target }).refine(hasTarget, targetRequired),
 
-  browser_is_visible: z.object({
-    ref: z.string(),
-  }),
+  browser_is_visible: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   browser_evaluate: z.object({
     code: z.string().describe('JavaScript code to evaluate via CDP (CSP-safe)'),

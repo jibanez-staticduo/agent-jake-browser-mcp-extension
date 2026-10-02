@@ -30,6 +30,7 @@ export interface ToolContext {
   sendToAllFrames: <T>(action: string, payload?: Record<string, unknown>) => Promise<FrameResult<T>[]>;
   getSelector: (ref: string) => Promise<string>;
   resolveRef: (ref: string | number) => Promise<{ frameId: number; selector: string }>;
+  resolveTarget: (target: { ref?: string; selector?: string }) => Promise<{ frameId: number; selector: string }>;
   waitForStable: (frameId?: number) => Promise<void>;
   waitForStableOrNavigation: (initialUrl: string, frameId?: number) => Promise<{ navigated: boolean; newUrl?: string }>;
   dispatchMouseEvent: (type: string, x: number, y: number, button?: string, clickCount?: number) => Promise<void>;
@@ -213,6 +214,13 @@ export function createToolContext(tabManager: TabManager): ToolContext {
     return { frameId, selector: await sendToContent<string>('getSelector', { ref: local }, frameId) };
   }
 
+  /** The element a tool names: by ref (any frame) or, without one, by CSS selector in the top frame. */
+  async function resolveTarget(target: { ref?: string; selector?: string }): Promise<{ frameId: number; selector: string }> {
+    if (target.ref) return resolveRef(target.ref);
+    if (target.selector) return { frameId: 0, selector: target.selector };
+    throw new Error('Either ref or selector must be provided');
+  }
+
   /**
    * CSS selector for a ref. It drops the frame, so it is only good for the top frame:
    * anything that will actually act on the element must go through resolveRef.
@@ -304,6 +312,7 @@ export function createToolContext(tabManager: TabManager): ToolContext {
     sendToAllFrames,
     getSelector,
     resolveRef,
+    resolveTarget,
     waitForStable,
     waitForStableOrNavigation,
     dispatchMouseEvent,

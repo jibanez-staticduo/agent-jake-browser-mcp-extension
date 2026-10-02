@@ -113,3 +113,32 @@ export async function handleFillField(payload: {
   }
   return { kind };
 }
+
+/** Length of an editable field's value — never the value: it may be a secret. */
+export async function handleFieldLength(payload: { selector: string }): Promise<{ length: number }> {
+  const el = await findElement(payload.selector);
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return { length: [...el.value].length };
+  if (el instanceof HTMLElement && el.isContentEditable) return { length: [...(el.textContent ?? '')].length };
+  return { length: 0 };
+}
+
+/**
+ * Empty an editable field from inside the page: the native value setter (so a framework's
+ * own setter does not swallow it) plus the input/change events it listens to.
+ */
+export async function handleClearField(payload: { selector: string }): Promise<{ length: number }> {
+  const el = await findElement(payload.selector);
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, '');
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { length: el.value.length };
+  }
+  if (el instanceof HTMLElement && el.isContentEditable) {
+    el.textContent = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return { length: 0 };
+  }
+  return { length: 0 };
+}
