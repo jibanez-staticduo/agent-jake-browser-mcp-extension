@@ -716,21 +716,55 @@ export class TabManager {
    * view. Pass `active: true` only when the user is meant to see it.
    */
   async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
-    const tab = await chrome.tabs.create({ url, active });
+    // The WebAuthn guard's page script only beats a password manager's content script in
+    // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
+    // drive opens blank, we attach, and only then does it load the URL.
+    const guardFirst = connect && /^https?:/i.test(url);
+    const tab = await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
 
     if (connect && tab.id) {
-      // Wait for tab to finish loading
-      await this.waitForTabLoad(tab.id);
-      await this.connectTab(tab.id);
+      if (guardFirst) {
+        await this.whenTabComplete(tab.id, false);
+        await this.connectTab(tab.id);
+        const loaded = this.whenTabComplete(tab.id, true);
+        await chrome.tabs.update(tab.id, { url });
+        await loaded;
+      } else {
+        // Wait for tab to finish loading
+        await this.waitForTabLoad(tab.id);
+        await this.connectTab(tab.id);
+      }
     }
 
+    const current = guardFirst && tab.id ? await chrome.tabs.get(tab.id).catch(() => tab) : tab;
     return {
       id: tab.id!,
-      url: tab.url || url,
-      title: tab.title || '',
-      active: tab.active,
+      url: current.url || url,
+      title: current.title || '',
+      active: current.active,
       connected: connect && tab.id === this.connectedTabId,
     };
+  }
+
+  /**
+   * Resolve when the tab's load is complete. With nextLoad, only a load that completes after
+   * this call counts (the tab is already complete and is about to navigate); otherwise an
+   * already-complete tab resolves at once. The listener goes in first, so no event is lost.
+   */
+  private whenTabComplete(tabId: number, nextLoad: boolean): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      };
+      const listener = (updatedTabId: number, changeInfo: { status?: string }) => {
+        if (updatedTabId === tabId && changeInfo.status === 'complete') done();
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+      if (!nextLoad) {
+        chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, () => undefined);
+      }
+    });
   }
 
   /**
