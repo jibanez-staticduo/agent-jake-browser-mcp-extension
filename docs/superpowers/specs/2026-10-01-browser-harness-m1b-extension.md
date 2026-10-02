@@ -1,12 +1,13 @@
-# Browser Harness M1B extension proposal
+# Browser Harness M1B extension contract resolution
 
-Date: 2026-10-01. Design only; no runtime, dependency, publishing or rollout change.
+Date: 2026-10-01; Codex A-F resolution updated 2026-10-02. Design only;
+no runtime, dependency, publishing or rollout change.
 Base: canonical extension `master` merge
 `cc3b59204f1864c4cff2c9be1f7cc8bcf83d6dc0` (M1A PR #2, verified on GitHub).
 
 The authoritative shared protocol proposal is the paired canonical server document:
-[M1B shared design](https://github.com/jibanez-staticduo/agent-jake-browser-mcp-server/blob/cf4a2297dab5e47c10b29b19ff112f0ded70163e/docs/superpowers/specs/2026-10-01-browser-harness-m1b-design.md).
-The immutable proposal SHA is `cf4a2297dab5e47c10b29b19ff112f0ded70163e`. Before implementation,
+[M1B shared design](https://github.com/jibanez-staticduo/agent-jake-browser-mcp-server/blob/aab98c1adb5e000da535042362389e0c83035579/docs/superpowers/specs/2026-10-01-browser-harness-m1b-design.md).
+The immutable proposal SHA is `aab98c1adb5e000da535042362389e0c83035579`. Before implementation,
 record the accepted merged design SHA and update this pin if the shared proposal
 changes. Do not duplicate wire definitions in this repository or use a mutable
 branch as provenance.
@@ -41,6 +42,12 @@ equivalence; it does not independently redefine the messages. The initial catalo
 policy requires exact shared `sha256:<hex>` equality. Package semver, wire version,
 MCP protocol date and artifact hash are distinct. No registry/release is published
 by these PRs.
+
+The packed protocol package.json carries generated browserHarnessProtocol metadata
+(supportedProtocolVersions and catalogVersion). Verify offline against the packed
+descriptors, exported digest and pinned provenance; a stale/tampered manifest or
+descriptor fails even without a server connection. Also verify the pinned TGZ hash.
+This is integrity, not a cryptographic publisher signature or a new signing service.
 
 Protocol includes strict runtime schemas/inferred types and descriptors for browser
 tools, risk and capabilities. Reexport is fine; hand-maintained duplicate schemas
@@ -87,6 +94,29 @@ loss/reload/disconnect. Persisted data never implies READY after a worker restar
 UI reports negotiation/version/errors and sanitized URL; raw query tokens never
 enter logs, status, prompts or chat.
 
+The negotiated bound is 32 MiB = 33,554,432 bytes per whole reassembled, uncompressed
+UTF-8 JSON WS message in either direction, including envelope and base64 data.
+Check received size before parse and serialized size before send. Fragmentation or
+compression cannot increase the bound; the server also bounds reassembly/decompression.
+The browser may allocate inbound messages before JS inspection: do not claim the
+extension's application check prevents that allocation. Inbound oversize closes
+1009; local oversize requests fail payload_too_large without dispatch. A completed
+action whose result is too large sends a bounded error, with no truncation/replay
+or promise of undo. No per-message bypass or automatic retry. Measure actual WS
+screenshot/file/tool fixtures before runtime delivery; domain ZIP downloaded over
+HTTP cannot establish WS compatibility. A future limit change is a paired contract
+change with tests, not an inferred operator/client exception.
+
+Codex rejects 8 MB/8 MiB as the limit: the existing 10 MiB browser_drop file budget
+alone base64-encodes to 13,981,016 bytes, before envelope or its additional 1 MiB
+MIME data (which may expand under JSON escaping). A 32 MiB message bound avoids
+that known regression while reducing the current server's default 100 MiB inbound
+bound. Synthetic complete negotiated envelopes with 10 MiB files plus maximal
+NUL MIME data measure 20,272,748 bytes (one file) / 20,273,260 bytes (eight files),
+with representative metadata. This is encoding evidence, not a browser runtime test.
+It does not prove all unbounded screenshot/PDF/metadata inputs fit; test the
+complete encoded requests/results, with explicit errors for oversize messages.
+
 Migrate existing `ajb.connectionId` as installationId alias without regeneration.
 Separate the server-issued browserId and per-socket connectionId; neither is the
 old persistent UUID. Persist profileEpoch in session storage for the current browser
@@ -118,12 +148,16 @@ handlers; no shared TabManager/active-tab fallback. Numeric tabId is local trans
 detail. Navigate preserves a handle; close/profile restart invalidates it. A handle
 from another session/profile returns tab_handle_invalid before CDP.
 
-Ordinary reconnect preserves handles only with proven identity/epoch/live incarnation.
+Default: invalidate handles without positive proof of the same authorized session,
+browser, profile epoch and live tab incarnation. Ordinary reconnect continuity is
+enabled only after a real test proves that identity and missed close/reuse safety.
+Worker-restart continuity is not promised by default.
 Worker recovery requires session storage and live-tab validation; `tabs.get(tabId)`
 alone cannot prove an unobserved close/reuse did not happen. The incarnation/recovery
-algorithm needs a specific design agreement before M1B.3 implementation. Conservatively
-invalidate unproven handles, and explicitly resolve any continuity requirement that
-this cannot meet. This document does not claim an implemented CDP scope proxy.
+algorithm needs a specific design agreement before M1B.3 implementation. Conservative
+invalidation is the frozen fallback contract; finding a numeric tabId or stored
+metadata alone does not satisfy a stronger continuity requirement. This document
+does not claim an implemented CDP scope proxy.
 
 ## Compatibility and optional capabilities
 
@@ -131,7 +165,13 @@ Recommend dedicated configurable negotiated endpoint `/ws/harness`; existing leg
 service unchanged until an authorized transition. Proposed future local port 18766
 is not protocol detection. Infrastructure owns the actual WSS URL and TLS mapping.
 New compositions default negotiated-only; legacy is isolated and temporarily enabled
-by operator with retirement ownership. Never rewrite manual domains/URLs to loopback.
+by operator with retirement ownership. Retire it once both houses' authorized
+migration is complete (Main/ARI/Fedora and Pocharlies NAS) and 14 full days have
+passed after notice in topic 374, at the later of those two events. Each house still
+using legacy owns client inventory/removal; report delays and remaining clients,
+without a permanent opt-out. The notice does not authorize rollout/downgrade. Keep
+legacy executable fixtures after endpoint removal. Never rewrite manual domains/URLs
+to loopback.
 
 | Pair/condition | Expected behavior |
 | --- | --- |
@@ -153,12 +193,27 @@ action; backend failure has a different execution error. Client capabilities nev
 grant permissions. Keep unsafe default blocked; no insecure macOS fallback, no
 secret in prompts/logs/chats, and no house-specific provider in core.
 
+For the same retained authenticated session/browser binding, the server remembers
+previously effective negotiated capabilities. A tool requiring one lost after a
+verified reconnect returns capability_revoked; one never negotiated returns
+capability_unavailable. Both fail before action. Restored capability in a valid later
+ack permits normal authorization checks. New session/explicit selection of another
+browser resets history, not inherited access. Disconnected remains browser_disconnected
+until READY; capability_revoked never replaces an auth denial. Client claims cannot
+modify this server-owned history.
+
 ## Proposal acceptance and remaining agreement
 
-Accept this design pair only after the authoritative server contract and this
-consumer plan match at exact heads. Ask Oppo to confirm/amend endpoint/legacy
-retirement, TGZ namespace/version, hello additions/result echoes, trusted MCP
-boundary/enrollment, selector/reconnect, limits and tab recovery proof. No runtime
+Codex resolves Oppo A-F: A accept retirement rule; B accept offline packed hash with
+the correction integrity rather than signature; C accept capability_revoked with
+same-binding history/reset; D accept mandatory shared-token+UUID impersonation tests;
+E amend 8 MB to 32 MiB/complete message because of the existing 10 MiB drop budget,
+with real WS fixtures rather than HTTP ZIP evidence; F accept conservative invalidation
+and proven/tested continuity only. The authoritative server spec records reasons.
+Publish/relay the exact paired heads as the contract freeze for implementation
+planning. This is no merge/rollout decision. Concrete enrollment, resource caps and
+optional positive recovery algorithms still require implementation designs/tests.
+No runtime
 tests are claimed for a document-only PR. Implementation checks are in the paired
 [extension plan](../plans/2026-10-01-browser-harness-m1b-extension.md).
 
