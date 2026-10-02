@@ -74,3 +74,25 @@ jobs:
 
       - name: Aserciones de deltas del fork (subset 2, 2b, 3-9)
         run: bash scripts/check-deltas.sh
+
+  # Tras cada merge a main, la extensión nueva se instala y se recarga en los Chrome del x86 y del
+  # Mac (agent-browser-sync de x86-host-runtime-pocharlies). Un navegador cerrado o dormido lo pone
+  # al día el vigilante del x86 cuando se abre.
+  desplegar:
+    name: Desplegar en los navegadores (x86 y Mac)
+    needs: [build-test, deltas]
+    # Solo push a main. NUNCA pull_request: un runner self-hosted ejecutando código de un PR es
+    # entregar el host x86 a quien abra el PR.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 2026-10-02 dani · NO puede ir a arc-k8s: escribe en ~/agent-browser-x86 del host x86, entra
+    # por ssh al Mac y recarga la extensión a través del pod. Los pods de arc-k8s no alcanzan ese
+    # disco ni el Mac. Vuelve a arc-k8s si la extensión deja de cargarse descomprimida del disco
+    # del host (p. ej. publicada en la Chrome Web Store).
+    runs-on: [self-hosted, x86, agent-browser]
+    timeout-minutes: 30
+    concurrency:
+      group: desplegar-navegadores
+      cancel-in-progress: false
+    steps:
+      - name: agent-browser-sync --force all
+        run: bash "$HOME/.local/libexec/x86-host-runtime/agent-browser-sync.sh" --force all

@@ -37,7 +37,7 @@ Código en `src/` por contexto de ejecución (`background`, `content`, `popup`, 
 
 ## CI/CD y despliegue
 
-`.github/workflows/ci.yml`: jobs `build-test` (tsc + vitest) y `deltas` (`scripts/check-deltas.sh`) en `arc-k8s`, con Node 22.23.2 bajado y verificado por sha256; además los workflows estándar `duplicados.yml` y `pr-review.yml`. No hay publicación en Chrome Web Store: la extensión se carga sin empaquetar o desde el zip que sirve el servidor; la ruta `POST /extension/reload` del servidor y la rama `feat/self-reload` permiten recargarla sin intervención.
+`.github/workflows/ci.yml`: jobs `build-test` (tsc + vitest) y `deltas` (`scripts/check-deltas.sh`) en `arc-k8s`, con Node 22.23.2 bajado y verificado por sha256; además los workflows estándar `duplicados.yml` y `pr-review.yml`. No hay publicación en Chrome Web Store: la extensión se carga sin empaquetar o desde el zip que sirve el servidor. Tras cada merge a `main`, el job `desplegar` (runner self-hosted del x86, solo push a main) ejecuta `agent-browser-sync --force all` de `x86-host-runtime-pocharlies`: compila, copia y recarga la extensión en los Chrome del x86 y del Mac a través de `POST /extension/reload` del servidor. Un navegador cerrado o dormido lo pone al día `agent-browser-sync-watch` cuando se conecta.
 
 ## Decisiones y trampas
 
