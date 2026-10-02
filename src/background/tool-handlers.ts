@@ -49,6 +49,32 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
 }
 
 /**
+ * The MCP server names the tab of the calling session in every command (`targetTabId`): the
+ * extension follows one tab at a time, and without this a second session on the same browser
+ * acted on whatever tab the first one had connected. Connect to it first — without activating
+ * it — and hand the handler the payload without the routing field.
+ */
+export async function routeToTargetTab(
+  tabManager: Pick<TabManager, 'getConnectedTabId' | 'connectTab' | 'hasTab'>,
+  payload: unknown,
+): Promise<unknown> {
+  if (!payload || typeof payload !== 'object') return payload;
+  const { targetTabId, ...rest } = payload as Record<string, unknown>;
+  if (typeof targetTabId !== 'number') return payload;
+  if (tabManager.getConnectedTabId() !== targetTabId) {
+    // Check first: connectTab lets go of the current tab before it looks at the new one, and a
+    // gone tab would leave the browser with nothing connected — another session's tab dropped.
+    if (!await tabManager.hasTab(targetTabId)) {
+      const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
+      gone.name = 'TAB_GONE';
+      throw gone;
+    }
+    await tabManager.connectTab(targetTabId);
+  }
+  return rest;
+}
+
+/**
  * Create tool handlers bound to a tab manager.
  */
 export function createToolHandlers(tabManager: TabManager) {
@@ -96,7 +122,7 @@ export function createToolHandlers(tabManager: TabManager) {
         };
       }
 
-      const result = await handler(payload);
+      const result = await handler(await routeToTargetTab(tabManager, payload));
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = getToolDescription(type, payload, result);
