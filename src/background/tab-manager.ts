@@ -9,6 +9,34 @@ import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 import { pageEvents } from './page-events';
 
+/**
+ * Runs in every document of a controlled tab (see installWebAuthnGuard). Pins
+ * navigator.credentials.get/create to CredentialsContainer.prototype — Chrome's own
+ * implementation, which a page-world override leaves untouched — so the call reaches the
+ * virtual authenticator. The PublicKeyCredential capability checks are pinned too while they
+ * are still native. Idempotent per document.
+ */
+export const WEBAUTHN_PIN_SCRIPT = `(() => {
+  const mark = Symbol.for('agent-jake.webauthn-pinned');
+  const creds = window.navigator && navigator.credentials;
+  const proto = window.CredentialsContainer && CredentialsContainer.prototype;
+  if (!creds || !proto || creds[mark]) return;
+  for (const name of ['get', 'create']) {
+    const native = proto[name];
+    try {
+      Object.defineProperty(creds, name, { configurable: false, enumerable: true, get: () => native, set: () => {} });
+    } catch (_) {}
+  }
+  const pkc = window.PublicKeyCredential;
+  if (pkc) for (const name of ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable', 'getClientCapabilities']) {
+    const fn = pkc[name];
+    if (typeof fn === 'function' && /\\[native code\\]/.test(Function.prototype.toString.call(fn))) {
+      try { Object.defineProperty(pkc, name, { configurable: false, writable: false, value: fn }); } catch (_) {}
+    }
+  }
+  Object.defineProperty(creds, mark, { value: true });
+})();`;
+
 export interface CdpStatus {
   connectedTabId: number | null;
   debuggerAttached: boolean;
@@ -76,6 +104,7 @@ export class TabManager {
   private pendingNewTab: TabInfo | null = null;
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
   private fileChooserInProgress = false;
+  private webauthnPinScript: { tabId: number; identifier: string } | null = null;
 
   /**
    * Initialize tab manager, restoring state from storage.
@@ -352,7 +381,13 @@ export class TabManager {
    * navigator.credentials call fails at once with NotAllowedError and the site falls back.
    * The authenticator verifies no user and its responses carry no user presence, so it cannot
    * register a passkey either. It lives on the tab, across navigations, until we detach.
-   * Not fatal: without it only the native dialog comes back.
+   *
+   * A password-manager extension (1Password) replaces navigator.credentials.get/create in the
+   * page and keeps for itself the requests that name no account (discoverable passkey sign-in,
+   * registration): they wait on its own unlock UI forever and never reach the authenticator
+   * above. WEBAUTHN_PIN_SCRIPT hands those entry points back to Chrome's own implementation in
+   * every document of the tab, before the extension's content script runs, and in the document
+   * already loaded. Not fatal: without it only the native dialog comes back.
    */
   private async installWebAuthnGuard(tabId: number): Promise<void> {
     const target = { tabId };
@@ -371,6 +406,18 @@ export class TabManager {
         },
       }) as { authenticatorId: string };
       await chrome.debugger.sendCommand(target, 'WebAuthn.setResponseOverrideBits', { authenticatorId, isBadUP: true });
+
+      // One copy per session: a re-attach on the same session would otherwise stack them.
+      if (this.webauthnPinScript?.tabId === tabId) {
+        await chrome.debugger.sendCommand(target, 'Page.removeScriptToEvaluateOnNewDocument', {
+          identifier: this.webauthnPinScript.identifier,
+        }).catch(() => undefined);
+      }
+      const { identifier } = await chrome.debugger.sendCommand(target, 'Page.addScriptToEvaluateOnNewDocument', {
+        source: WEBAUTHN_PIN_SCRIPT,
+        runImmediately: true,
+      }) as { identifier: string };
+      this.webauthnPinScript = { tabId, identifier };
     } catch (error) {
       log.warn('WebAuthn guard not installed, native security-key dialogs may appear:', error);
     }
@@ -505,6 +552,7 @@ export class TabManager {
 
     // Always reset flag
     this.debuggerAttached = false;
+    this.webauthnPinScript = null; // the session's scripts go with it
 
     try {
       chrome.debugger.onEvent.removeListener(this.handleDebuggerEvent);
@@ -540,6 +588,7 @@ export class TabManager {
     this.cancelEventWaiters();
     pageEvents.reset();
     this.debuggerAttached = false;
+    this.webauthnPinScript = null;
     this.lastCdpError = 'CDP_DEBUGGER_DETACHED: Debugger detached unexpectedly';
   }
 

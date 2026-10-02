@@ -59,7 +59,8 @@ vi.mock('@/background/activity-log', () => ({
   logError: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { TabManager } from '@/background/tab-manager';
+import { TabManager, WEBAUTHN_PIN_SCRIPT } from '@/background/tab-manager';
+import { runInNewContext } from 'node:vm';
 import { pageEvents } from '@/background/page-events';
 
 describe('TabManager CDP readiness', () => {
@@ -209,6 +210,51 @@ describe('TabManager CDP readiness', () => {
       options: expect.objectContaining({ hasUserVerification: true, isUserVerified: false, automaticPresenceSimulation: true }),
     });
     expect(webauthn[3][2]).toEqual({ authenticatorId: 'va-1', isBadUP: true });
+  });
+
+  it('pins navigator.credentials to Chrome in every document, once per session', async () => {
+    // Regression: 1Password replaces navigator.credentials in the page and keeps discoverable
+    // passkey requests (no allowCredentials) waiting on its unlock UI forever.
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    let n = 0;
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method) => {
+      if (method === 'WebAuthn.addVirtualAuthenticator') return { authenticatorId: 'va-1' };
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: `s${++n}` };
+      return {};
+    });
+
+    await manager.connectTab(101, 'https://example.com');
+    await manager.reattachDebugger();
+
+    const scripts = mockChrome.debugger.sendCommand.mock.calls
+      .filter(([, method]) => String(method).includes('ScriptToEvaluateOnNewDocument'))
+      .map(([, method, params]) => [method, params]);
+    expect(scripts).toEqual([
+      ['Page.addScriptToEvaluateOnNewDocument', { source: WEBAUTHN_PIN_SCRIPT, runImmediately: true }],
+      ['Page.removeScriptToEvaluateOnNewDocument', { identifier: 's1' }],
+      ['Page.addScriptToEvaluateOnNewDocument', { source: WEBAUTHN_PIN_SCRIPT, runImmediately: true }],
+    ]);
+  });
+
+  it('the pin script hands get/create back to the native implementation and keeps them there', () => {
+    class CredentialsContainer {
+      get() { return 'native-get'; }
+      create() { return 'native-create'; }
+    }
+    const credentials = new CredentialsContainer() as CredentialsContainer & Record<string, unknown>;
+    // What a password manager does in the page before (or after) we run.
+    credentials.get = () => 'hijacked';
+    const window = { CredentialsContainer, navigator: { credentials } } as Record<string, unknown>;
+    window.window = window;
+
+    runInNewContext(WEBAUTHN_PIN_SCRIPT, window);
+    credentials.create = () => 'hijacked';
+    runInNewContext(WEBAUTHN_PIN_SCRIPT, window); // second run in the same document: no-op
+
+    expect(credentials.get()).toBe('native-get');
+    expect(credentials.create()).toBe('native-create');
   });
 
   it('still connects when the WebAuthn domain is unavailable', async () => {
