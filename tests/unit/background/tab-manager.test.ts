@@ -515,6 +515,33 @@ describe('TabManager background-tab control', () => {
     });
   });
 
+  it('withTabInFront shows the tab for the action and puts the visible one back', async () => {
+    const manager = new TabManager();
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 9 }]).mockResolvedValueOnce([{ id: 5 }]);
+    mockChrome.tabs.update.mockResolvedValue(undefined);
+    const order: string[] = [];
+    mockChrome.tabs.update.mockImplementation(async (id: number) => { order.push(`activate ${id}`); });
+
+    const result = await manager.withTabInFront(async () => { order.push('act'); return 42; });
+
+    expect(result).toBe(42);
+    expect(order).toEqual(['activate 5', 'act', 'activate 9']);
+  });
+
+  it('withTabInFront leaves a tab that is already in front alone', async () => {
+    const manager = new TabManager();
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 5 }]);
+    mockChrome.tabs.update.mockClear();
+
+    await manager.withTabInFront(async () => 'ok');
+
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
   it('bringTabToFront activates the tab and returns the previous one', async () => {
     const manager = new TabManager();
     mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });

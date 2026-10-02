@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { schemas } from '@/background/tools/schemas';
-import { createInteractionHandlers } from '@/background/tools/handlers/interaction';
+import { createInteractionHandlers, INPUT_TOOLS } from '@/background/tools/handlers/interaction';
 import { createQueryHandlers } from '@/background/tools/handlers/queries';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
@@ -38,6 +38,7 @@ function fakeContext(content: Record<string, (payload: Record<string, unknown>) 
       startNewTabDetection: vi.fn(),
       stopNewTabDetection: vi.fn(() => null),
       sendDebuggerCommand: vi.fn().mockResolvedValue({}),
+      withTabInFront: vi.fn(<T>(fn: () => Promise<T>) => fn()),
     },
     sendToContent: vi.fn(async (action: string, payload?: Record<string, unknown>, frameId?: number) => {
       calls.push([action, payload, frameId]);
@@ -105,5 +106,19 @@ describe('handlers', () => {
     const { ctx, calls } = fakeContext({ getText: () => 'hola' });
     await expect(createQueryHandlers(ctx).browser_get_text({ selector: 'h1' })).resolves.toBe('hola');
     expect(calls[0]).toEqual(['getText', { selector: 'h1' }, 0]);
+  });
+});
+
+describe('input tools run with the tab in front', () => {
+  // Regression: in the x86 Chrome a hidden tab got no CDP mouse/key event at all, while the
+  // tools answered "clicked"/"typed".
+  it.each(INPUT_TOOLS)('%s goes through withTabInFront', async (tool) => {
+    const { ctx } = fakeContext({ getElementCoordinates: () => ({ x: 1, y: 1 }), fieldLength: () => ({ length: 0 }) });
+    const payload = tool === 'browser_drag' ? { startSelector: '#a', endSelector: '#b' }
+      : tool === 'browser_press_key' ? { key: 'Enter' }
+      : tool === 'browser_type' ? { selector: '#a', text: 'x' }
+      : { selector: '#a' };
+    await createInteractionHandlers(ctx)[tool](payload).catch(() => undefined);
+    expect(ctx.tabManager.withTabInFront).toHaveBeenCalledTimes(1);
   });
 });

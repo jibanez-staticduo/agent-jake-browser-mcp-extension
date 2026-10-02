@@ -856,6 +856,25 @@ export class TabManager {
   }
 
   /**
+   * Run fn with the connected tab in front of its window and put the previously visible tab
+   * back afterwards (if the user did not switch meanwhile). CDP input — mouse and keys — does
+   * not reach a hidden tab in the x86 Chrome: the tools answered "clicked"/"typed" and the page
+   * got no event at all. A capture of a hidden tab paints unreliably too. The user sees a flash.
+   */
+  async withTabInFront<T>(fn: () => Promise<T>): Promise<T> {
+    const tabId = this.connectedTabId;
+    if (!tabId) return fn();
+    const previousTabId = await this.bringTabToFront(tabId);
+    try {
+      // One beat for the renderer to show its first frame after activation.
+      if (previousTabId !== null) await new Promise((resolve) => setTimeout(resolve, 150));
+      return await fn();
+    } finally {
+      await this.restoreTabBehind(tabId, previousTabId);
+    }
+  }
+
+  /**
    * Undo a bringTabToFront: put the previously visible tab back, but only if
    * our tab is still the one in front. If the user switched tabs meanwhile,
    * their choice wins and we leave it alone.
