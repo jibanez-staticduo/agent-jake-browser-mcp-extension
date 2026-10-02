@@ -133,6 +133,8 @@ export class TabManager {
   private fileChooserInProgress = false;
   private webauthnPinScript: { tabId: number; identifier: string } | null = null;
   private frontTail: Promise<unknown> = Promise.resolve();
+  private pendingRestore: { tabId: number; previousTabId: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  static readonly RESTORE_DELAY_MS = 1500;
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
   /**
@@ -272,6 +274,7 @@ export class TabManager {
 
     this.disconnecting = true;
     const tabId = this.connectedTabId;
+    await this.flushPendingRestore().catch(() => undefined);
     if (this.frameCommitListener) {
       chrome.webNavigation.onCommitted.removeListener(this.frameCommitListener);
       this.frameCommitListener = null;
@@ -858,7 +861,7 @@ export class TabManager {
 
   /**
    * Run fn with the connected tab in front of its window and put the previously visible tab
-   * back afterwards (if the user did not switch meanwhile). CDP input — mouse and keys — does
+   * back once the actions stop (scheduleRestore; not if the user switched meanwhile). CDP input — mouse and keys — does
    * not reach a hidden tab in the x86 Chrome: the tools answered "clicked"/"typed" and the page
    * got no event at all. A capture of a hidden tab paints unreliably too. The user sees a flash.
    *
@@ -874,17 +877,59 @@ export class TabManager {
       if (this.connectedTabId !== tabId) {
         throw new Error(`CONNECTED_TAB_CHANGED: the connected tab changed from ${tabId} to ${this.connectedTabId} while this action waited its turn; nothing was done`);
       }
-      const previousTabId = await this.bringTabToFront(tabId);
+      const pendingPrevious = await this.takePendingRestore(tabId);
+      const brought = await this.bringTabToFront(tabId);
+      const previousTabId = brought ?? pendingPrevious;
       try {
-        if (previousTabId !== null) await this.waitUntilVisible(tabId);
+        if (brought !== null) await this.waitUntilVisible(tabId);
         return await fn();
       } finally {
-        await this.restoreTabBehind(tabId, previousTabId);
+        this.scheduleRestore(tabId, previousTabId);
       }
     };
     const result = this.frontTail.then(run, run);
     this.frontTail = result.catch(() => undefined);
     return result;
+  }
+
+  /**
+   * The user's tab comes back RESTORE_DELAY_MS after the last action, not after each one: an
+   * agent's burst (click, type, type, Enter) is one flash instead of four. The restore goes
+   * through the same queue, so it never lands in the middle of an action.
+   */
+  private scheduleRestore(tabId: number, previousTabId: number | null): void {
+    if (previousTabId === null) return;
+    const timer = setTimeout(() => {
+      if (this.pendingRestore?.timer !== timer) return;
+      this.pendingRestore = null;
+      this.frontTail = this.frontTail
+        .then(() => this.restoreTabBehind(tabId, previousTabId))
+        .catch(() => undefined);
+    }, TabManager.RESTORE_DELAY_MS);
+    this.pendingRestore = { tabId, previousTabId, timer };
+  }
+
+  /**
+   * Cancel the pending restore. For the same tab, hand back the tab to restore later (it is
+   * still in front: nothing to flash); for another tab, restore it now.
+   */
+  private async takePendingRestore(tabId: number): Promise<number | null> {
+    const pending = this.pendingRestore;
+    if (!pending) return null;
+    clearTimeout(pending.timer);
+    this.pendingRestore = null;
+    if (pending.tabId === tabId) return pending.previousTabId;
+    await this.restoreTabBehind(pending.tabId, pending.previousTabId);
+    return null;
+  }
+
+  /** Put the user's tab back now instead of waiting for the delay (disconnect). */
+  async flushPendingRestore(): Promise<void> {
+    const pending = this.pendingRestore;
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingRestore = null;
+    await this.restoreTabBehind(pending.tabId, pending.previousTabId);
   }
 
   /** After activation the renderer takes a moment to show; poll for it (50 ms, up to 1 s). */
