@@ -27,23 +27,15 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
         throw new Error('No tab connected');
       }
 
-      const previousTabId = await ctx.tabManager.bringTabToFront(tabId);
-      try {
-        if (previousTabId !== null) {
-          // One beat for the renderer to paint its first frame after activation.
-          await new Promise(resolve => setTimeout(resolve, 150));
-        }
+      return ctx.tabManager.withTabInFront(async () => {
         const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
           'Page.captureScreenshot',
           { format: 'png' }
         );
-
         return {
           image: `data:image/png;base64,${result.data}`,
         };
-      } finally {
-        await ctx.tabManager.restoreTabBehind(tabId, previousTabId);
-      }
+      });
     },
 
     /**

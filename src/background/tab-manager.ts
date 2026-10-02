@@ -132,6 +132,7 @@ export class TabManager {
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
   private fileChooserInProgress = false;
   private webauthnPinScript: { tabId: number; identifier: string } | null = null;
+  private frontTail: Promise<unknown> = Promise.resolve();
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
   /**
@@ -853,6 +854,50 @@ export class TabManager {
     }
     await chrome.tabs.update(tabId, { active: true });
     return previous?.id ?? null;
+  }
+
+  /**
+   * Run fn with the connected tab in front of its window and put the previously visible tab
+   * back afterwards (if the user did not switch meanwhile). CDP input — mouse and keys — does
+   * not reach a hidden tab in the x86 Chrome: the tools answered "clicked"/"typed" and the page
+   * got no event at all. A capture of a hidden tab paints unreliably too. The user sees a flash.
+   *
+   * Serialized: commands from several MCP sessions arrive concurrently, and without the queue
+   * one action's restore hid the tab while another was still typing into it. An action that
+   * waited its turn while the connected tab changed under it fails instead of acting on
+   * someone else's tab.
+   */
+  async withTabInFront<T>(fn: () => Promise<T>): Promise<T> {
+    const tabId = this.connectedTabId;
+    const run = async (): Promise<T> => {
+      if (!tabId) return fn();
+      if (this.connectedTabId !== tabId) {
+        throw new Error(`CONNECTED_TAB_CHANGED: the connected tab changed from ${tabId} to ${this.connectedTabId} while this action waited its turn; nothing was done`);
+      }
+      const previousTabId = await this.bringTabToFront(tabId);
+      try {
+        if (previousTabId !== null) await this.waitUntilVisible(tabId);
+        return await fn();
+      } finally {
+        await this.restoreTabBehind(tabId, previousTabId);
+      }
+    };
+    const result = this.frontTail.then(run, run);
+    this.frontTail = result.catch(() => undefined);
+    return result;
+  }
+
+  /** After activation the renderer takes a moment to show; poll for it (50 ms, up to 1 s). */
+  private async waitUntilVisible(tabId: number): Promise<void> {
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline) {
+      const state = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+        expression: 'document.visibilityState',
+        returnByValue: true,
+      }).catch(() => undefined) as { result?: { value?: unknown } } | undefined;
+      if (state?.result?.value === 'visible') return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
 
   /**

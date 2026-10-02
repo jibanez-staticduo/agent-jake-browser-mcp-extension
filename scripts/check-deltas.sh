@@ -31,4 +31,5 @@ chk "9 token soportado en el cliente WS"            grep -q WS_TOKEN src/config/
 chk "10 browser_close_tab cierra el tabId pedido"   bash -c 'grep -q "schemas.browser_close_tab.parse" src/background/tools/handlers/tabs.ts && grep -q "closeById: true" src/background/tools/handlers/tabs.ts'
 chk "11 guard de WebAuthn (sin diálogo nativo, 1Password fijado)" bash -c 'grep -q "WebAuthn.addVirtualAuthenticator" src/background/tab-manager.ts && grep -q "export function pinWebAuthn" src/background/tab-manager.ts && grep -q "pinWebAuthnInFrames" src/background/tab-manager.ts'
 chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" src/background/tools/utils.ts
+chk "13 la entrada CDP se hace con la pestaña delante" bash -c 'grep -q "withTabInFront" src/background/tools/handlers/interaction.ts && grep -q "INPUT_TOOLS" src/background/tools/handlers/interaction.ts'
 exit $fail
