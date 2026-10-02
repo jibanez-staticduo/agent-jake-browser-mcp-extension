@@ -294,6 +294,11 @@ export class TabManager {
     await logTab('tab_disconnect', `Disconnected from tab ${tabId}`, true, { tabId });
   }
 
+  /** Whether a tab still exists (routeToTargetTab checks before connecting). */
+  async hasTab(tabId: number): Promise<boolean> {
+    return this.tabExists(tabId);
+  }
+
   /**
    * Check if a tab exists.
    */

@@ -10,6 +10,7 @@ function fakeTabs(connected: number | null, existing: number[]) {
   return {
     state,
     getConnectedTabId: () => state.connected,
+    hasTab: vi.fn(async (tabId: number) => existing.includes(tabId)),
     connectTab: vi.fn(async (tabId: number) => {
       if (!existing.includes(tabId)) throw new Error(`Tab ${tabId} does not exist`);
       state.connected = tabId;
@@ -41,9 +42,12 @@ describe('routeToTargetTab', () => {
     expect(tabs.connectTab).not.toHaveBeenCalled();
   });
 
-  it('answers TAB_GONE when the session tab was closed', async () => {
+  it('answers TAB_GONE without touching the connected tab when the session tab was closed', async () => {
+    // Regression (architect, #23): connectTab lets go of the current tab first, so calling it for
+    // a gone tab dropped the tab (and debugger) another session was using.
     const tabs = fakeTabs(10, [10]);
     await expect(routeToTargetTab(tabs, { targetTabId: 99 })).rejects.toMatchObject({ name: 'TAB_GONE' });
+    expect(tabs.connectTab).not.toHaveBeenCalled();
     expect(tabs.state.connected).toBe(10);
   });
 

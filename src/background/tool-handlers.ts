@@ -55,22 +55,21 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
  * it — and hand the handler the payload without the routing field.
  */
 export async function routeToTargetTab(
-  tabManager: Pick<TabManager, 'getConnectedTabId' | 'connectTab'>,
+  tabManager: Pick<TabManager, 'getConnectedTabId' | 'connectTab' | 'hasTab'>,
   payload: unknown,
 ): Promise<unknown> {
   if (!payload || typeof payload !== 'object') return payload;
   const { targetTabId, ...rest } = payload as Record<string, unknown>;
   if (typeof targetTabId !== 'number') return payload;
   if (tabManager.getConnectedTabId() !== targetTabId) {
-    try {
-      await tabManager.connectTab(targetTabId);
-    } catch (error) {
-      const message = (error as Error).message ?? '';
-      if (!/does not exist|No tab with id/i.test(message)) throw error;
+    // Check first: connectTab lets go of the current tab before it looks at the new one, and a
+    // gone tab would leave the browser with nothing connected — another session's tab dropped.
+    if (!await tabManager.hasTab(targetTabId)) {
       const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
       gone.name = 'TAB_GONE';
       throw gone;
     }
+    await tabManager.connectTab(targetTabId);
   }
   return rest;
 }
