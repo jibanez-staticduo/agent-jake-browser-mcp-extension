@@ -14,28 +14,55 @@ import { pageEvents } from './page-events';
  * navigator.credentials.get/create to CredentialsContainer.prototype — Chrome's own
  * implementation, which a page-world override leaves untouched — so the call reaches the
  * virtual authenticator. The PublicKeyCredential capability checks are pinned too while they
- * are still native. Idempotent per document.
+ * are still native.
+ *
+ * In a document that was already loaded when we got there (a popup, a tab the agent switches
+ * to, a cross-site iframe), 1Password has usually made its own get/create non-configurable
+ * first. Then the page gets a stand-in container instead: navigator.credentials (a
+ * configurable getter on Navigator.prototype) returns an object whose methods run Chrome's
+ * implementation on the real container. Idempotent per document.
+ *
+ * Self-contained on purpose: it is serialized for CDP and injected with chrome.scripting.
  */
-export const WEBAUTHN_PIN_SCRIPT = `(() => {
+export function pinWebAuthn(): void {
   const mark = Symbol.for('agent-jake.webauthn-pinned');
-  const creds = window.navigator && navigator.credentials;
+  const nav = window.navigator;
+  const creds = nav && (nav.credentials as CredentialsContainer & Record<PropertyKey, unknown>);
   const proto = window.CredentialsContainer && CredentialsContainer.prototype;
   if (!creds || !proto || creds[mark]) return;
+  const methods = proto as unknown as Record<string, unknown>;
   for (const name of ['get', 'create']) {
-    const native = proto[name];
+    const native = methods[name];
     try {
       Object.defineProperty(creds, name, { configurable: false, enumerable: true, get: () => native, set: () => {} });
-    } catch (_) {}
+    } catch (_) { /* already non-configurable: the stand-in below takes over */ }
   }
-  const pkc = window.PublicKeyCredential;
-  if (pkc) for (const name of ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable', 'getClientCapabilities']) {
-    const fn = pkc[name];
-    if (typeof fn === 'function' && /\\[native code\\]/.test(Function.prototype.toString.call(fn))) {
-      try { Object.defineProperty(pkc, name, { configurable: false, writable: false, value: fn }); } catch (_) {}
+  if (creds.get !== proto.get || creds.create !== proto.create) {
+    const standIn = Object.create(proto) as Record<PropertyKey, unknown>;
+    for (const name of ['get', 'create', 'store', 'preventSilentAccess']) {
+      const native = methods[name];
+      if (typeof native !== 'function') continue;
+      const call = { [name](...args: unknown[]) { return native.apply(creds, args); } }[name];
+      Object.defineProperty(standIn, name, { enumerable: true, value: call });
+    }
+    Object.defineProperty(standIn, mark, { value: true });
+    try {
+      Object.defineProperty(nav, 'credentials', { configurable: false, enumerable: true, get: () => standIn });
+    } catch (_) { /* navigator.credentials itself is taken: nothing more we can do here */ }
+  }
+  const pkc = window.PublicKeyCredential as unknown as Record<string, unknown> | undefined;
+  if (pkc) {
+    for (const name of ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable', 'getClientCapabilities']) {
+      const fn = pkc[name];
+      if (typeof fn === 'function' && /\[native code\]/.test(Function.prototype.toString.call(fn))) {
+        try { Object.defineProperty(pkc, name, { configurable: false, writable: false, value: fn }); } catch (_) { /* taken */ }
+      }
     }
   }
   Object.defineProperty(creds, mark, { value: true });
-})();`;
+}
+
+export const WEBAUTHN_PIN_SCRIPT = `(${pinWebAuthn.toString()})();`;
 
 export interface CdpStatus {
   connectedTabId: number | null;
@@ -105,6 +132,7 @@ export class TabManager {
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
   private fileChooserInProgress = false;
   private webauthnPinScript: { tabId: number; identifier: string } | null = null;
+  private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
   /**
    * Initialize tab manager, restoring state from storage.
@@ -418,8 +446,40 @@ export class TabManager {
         runImmediately: true,
       }) as { identifier: string };
       this.webauthnPinScript = { tabId, identifier };
+
+      // CDP scripts only reach the tab's own process; cross-site iframes get the pin through
+      // chrome.scripting, now and whenever one commits a document.
+      if (!this.frameCommitListener) {
+        this.frameCommitListener = (details) => {
+          if (details.tabId === this.connectedTabId && details.frameId !== 0) {
+            void this.pinWebAuthnInFrames(details.tabId, [details]);
+          }
+        };
+        chrome.webNavigation.onCommitted.addListener(this.frameCommitListener);
+      }
+      await this.pinWebAuthnInFrames(tabId);
     } catch (error) {
       log.warn('WebAuthn guard not installed, native security-key dialogs may appear:', error);
+    }
+  }
+
+  /**
+   * Run pinWebAuthn in the tab's web frames (all of them, or the ones given). Not allFrames:
+   * a foreign extension frame (1Password's) fails the whole call, so web frames only.
+   */
+  private async pinWebAuthnInFrames(tabId: number, frames?: Array<{ frameId: number; url: string }>): Promise<void> {
+    try {
+      const candidates = frames ?? (await chrome.webNavigation.getAllFrames({ tabId })) ?? [];
+      const frameIds = candidates.filter((f) => /^https?:/.test(f.url)).map((f) => f.frameId);
+      if (!frameIds.length) return;
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds },
+        world: 'MAIN',
+        injectImmediately: true,
+        func: pinWebAuthn,
+      });
+    } catch (error) {
+      log.debug('WebAuthn pin not injected in frames:', error);
     }
   }
 
