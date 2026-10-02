@@ -32,4 +32,5 @@ chk "10 browser_close_tab cierra el tabId pedido"   bash -c 'grep -q "schemas.br
 chk "11 guard de WebAuthn (sin diálogo nativo, 1Password fijado)" bash -c 'grep -q "WebAuthn.addVirtualAuthenticator" src/background/tab-manager.ts && grep -q "export function pinWebAuthn" src/background/tab-manager.ts && grep -q "pinWebAuthnInFrames" src/background/tab-manager.ts'
 chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" src/background/tools/utils.ts
 chk "13 la entrada CDP se hace con la pestaña delante" bash -c 'grep -q "withTabInFront" src/background/tools/handlers/interaction.ts && grep -q "INPUT_TOOLS" src/background/tools/handlers/interaction.ts'
+chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
 exit $fail
