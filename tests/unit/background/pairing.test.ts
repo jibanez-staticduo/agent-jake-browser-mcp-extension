@@ -31,14 +31,7 @@ const mockChrome = {
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
-vi.mock('@/utils/logger', () => ({
-  log: {
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+vi.mock('@/utils/logger', () => import('../helpers/logger'));
 
 import { STORAGE_KEYS } from '@/config/runtime';
 
