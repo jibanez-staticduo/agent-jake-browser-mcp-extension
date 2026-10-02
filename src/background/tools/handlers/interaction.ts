@@ -106,10 +106,16 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       }
 
       if (clear) {
-        await ctx.dispatchKeyEventTyped('keyDown', 'Control');
-        await ctx.dispatchKeyEventTyped('keyDown', 'a');
-        await ctx.dispatchKeyEventTyped('keyUp', 'a');
-        await ctx.dispatchKeyEventTyped('keyUp', 'Control');
+        // A bare Control keyDown does not modify the next key over CDP: without
+        // `modifiers` the "a" just types, and Backspace then eats one char
+        // ("Dani" + clear + "Luis" = "DanLuis"). The editing command selects all
+        // on every platform.
+        await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+          type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2, commands: ['selectAll'],
+        });
+        await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+        });
         await ctx.dispatchKeyEventTyped('keyDown', 'Backspace');
         await ctx.dispatchKeyEventTyped('keyUp', 'Backspace');
       }

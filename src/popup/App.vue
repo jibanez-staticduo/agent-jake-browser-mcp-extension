@@ -22,6 +22,15 @@ const activity = useActivityStore();
 // Show the runtime-effective endpoint once known, build default until then.
 const wsEndpoint = computed(() => server.effectiveUrl || buildWsEndpoint);
 
+// sidePanel.open() needs the click's user gesture: resolve the window up front.
+let windowId: number | undefined;
+chrome.windows.getCurrent().then((w) => { windowId = w.id; });
+
+function openCopilot() {
+  if (windowId === undefined) return;
+  chrome.sidePanel.open({ windowId }).then(() => window.close());
+}
+
 onMounted(() => {
   status.startPolling();
   server.startPolling();
@@ -44,6 +53,8 @@ onUnmounted(() => {
       </div>
       <span class="endpoint">{{ wsEndpoint }}</span>
     </div>
+
+    <button class="copilot-open" title="Alt+J" @click="openCopilot">Abrir copiloto (Alt+J)</button>
 
     <!-- Connection Status Panel -->
     <ConnectionStatus />
@@ -135,5 +146,16 @@ h1 {
 
 .footer a:hover {
   color: var(--text-primary);
+}
+.copilot-open {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary-dim);
+  color: var(--text-primary);
+  cursor: pointer;
+  font: inherit;
 }
 </style>
