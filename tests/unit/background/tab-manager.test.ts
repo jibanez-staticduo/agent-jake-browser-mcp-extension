@@ -526,6 +526,8 @@ describe('TabManager background-tab control', () => {
 
     mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
     const result = await manager.withTabInFront(async () => { order.push('act'); return 42; });
+    expect(order).toEqual(['activate 5', 'act']); // the user's tab comes back after the delay
+    await manager.flushPendingRestore();
 
     expect(result).toBe(42);
     expect(order).toEqual(['activate 5', 'act', 'activate 9']);
@@ -556,6 +558,7 @@ describe('TabManager background-tab control', () => {
     await Promise.all([a, b]);
 
     expect(log).toEqual(['A starts, front=5', 'A ends, front=5', 'B runs, front=5']);
+    await manager.flushPendingRestore();
     expect(front).toBe(9); // the user's tab is back in front at the end
     mockChrome.tabs.query.mockReset();
     mockChrome.tabs.update.mockReset();
@@ -571,6 +574,7 @@ describe('TabManager background-tab control', () => {
     mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
 
     await expect(manager.withTabInFront(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    await manager.flushPendingRestore();
     expect(front).toBe(9);
     await expect(manager.withTabInFront(async () => 'next')).resolves.toBe('next');
     mockChrome.tabs.query.mockReset();
@@ -595,6 +599,72 @@ describe('TabManager background-tab control', () => {
     await expect(b).rejects.toThrow('CONNECTED_TAB_CHANGED');
     expect(bAction).not.toHaveBeenCalled();
     mockChrome.tabs.query.mockReset();
+  });
+
+  it('withTabInFront turns a burst of actions into one flash', async () => {
+    const manager = new TabManager();
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+    let front = 9;
+    const activations: number[] = [];
+    mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
+    mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; activations.push(id); });
+    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
+
+    await manager.withTabInFront(async () => 'click');
+    await manager.withTabInFront(async () => 'type');
+    await manager.withTabInFront(async () => 'enter');
+    expect(activations).toEqual([5]);
+
+    await manager.flushPendingRestore();
+    expect(activations).toEqual([5, 9]);
+    mockChrome.tabs.query.mockReset();
+    mockChrome.tabs.update.mockReset();
+  });
+
+  it('withTabInFront puts the user tab back RESTORE_DELAY_MS after the last action', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new TabManager();
+      (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
+      mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
+      let front = 9;
+      mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
+      mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; });
+      mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
+
+      await manager.withTabInFront(async () => 'act');
+      await vi.advanceTimersByTimeAsync(TabManager.RESTORE_DELAY_MS - 100);
+      expect(front).toBe(5);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(front).toBe(9);
+    } finally {
+      vi.useRealTimers();
+      mockChrome.tabs.query.mockReset();
+      mockChrome.tabs.update.mockReset();
+    }
+  });
+
+  it('withTabInFront restores a pending tab of another connection before bringing a different one', async () => {
+    const manager = new TabManager();
+    const fronts: Record<number, number> = { 1: 9 }; // window 1
+    mockChrome.tabs.get.mockImplementation(async (id: number) => ({ id, windowId: 1 }));
+    mockChrome.tabs.query.mockImplementation(async () => [{ id: fronts[1] }]);
+    const activations: number[] = [];
+    mockChrome.tabs.update.mockImplementation(async (id: number) => { fronts[1] = id; activations.push(id); });
+    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
+
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
+    await manager.withTabInFront(async () => 'on 5');
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 6;
+    await manager.withTabInFront(async () => 'on 6');
+
+    expect(activations).toEqual([5, 9, 6]); // 5 in, 9 back, then 6 in
+    await manager.flushPendingRestore();
+    expect(activations).toEqual([5, 9, 6, 9]);
+    mockChrome.tabs.get.mockReset();
+    mockChrome.tabs.query.mockReset();
+    mockChrome.tabs.update.mockReset();
   });
 
   it('withTabInFront leaves a tab that is already in front alone', async () => {

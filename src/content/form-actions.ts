@@ -123,16 +123,13 @@ export async function handleFieldLength(payload: { selector: string }): Promise<
 }
 
 /**
- * Empty an editable field from inside the page: the native value setter (so a framework's
- * own setter does not swallow it) plus the input/change events it listens to.
+ * Empty an editable field from inside the page: setNativeValue (the native setter, so a
+ * framework's own setter does not swallow it, plus the input/change events it listens to).
  */
 export async function handleClearField(payload: { selector: string }): Promise<{ length: number }> {
   const el = await findElement(payload.selector);
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
-    Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, '');
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    setNativeValue(el, '');
     return { length: el.value.length };
   }
   if (el instanceof HTMLElement && el.isContentEditable) {
