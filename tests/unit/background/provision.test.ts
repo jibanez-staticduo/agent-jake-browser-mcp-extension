@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { provisionCopilot, type ProvisionStorage } from '@/background/provision';
+import { provisionCopilot, sha256, type ProvisionStorage } from '@/background/provision';
 import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 
+const hashes = async (v: { baseUrl: string; apiKey: string }) => ({ baseUrl: await sha256(v.baseUrl), apiKey: await sha256(v.apiKey) });
 const BUILD = { baseUrl: 'https://litellm.example/v1', apiKey: 'test-key-1' };
 
 function mem(initial: Record<string, unknown> = {}) {
@@ -22,13 +23,14 @@ describe('provisionCopilot', () => {
     const { store, storage } = mem();
     expect(await provisionCopilot(BUILD, storage)).toBe(true);
     expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...BUILD, model: 'qwen38-flash-next' });
-    expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual(BUILD);
+    expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual(await hashes(BUILD));
+    expect(JSON.stringify(store.get(COPILOT_PROVISIONED_KEY))).not.toContain(BUILD.apiKey);
   });
 
   it('does not overwrite what the user changed', async () => {
     const { store, storage } = mem({
       [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://mine.example/v1', apiKey: 'mine' },
-      [COPILOT_PROVISIONED_KEY]: { baseUrl: 'https://old.example/v1', apiKey: 'old' },
+      [COPILOT_PROVISIONED_KEY]: await hashes({ baseUrl: 'https://old.example/v1', apiKey: 'old' }),
     });
     expect(await provisionCopilot(BUILD, storage)).toBe(false);
     expect(store.get(COPILOT_SETTINGS_KEY)).toEqual({ baseUrl: 'https://mine.example/v1', apiKey: 'mine' });
@@ -37,11 +39,11 @@ describe('provisionCopilot', () => {
   it('replaces a rotated key when the stored value is the last seeded one', async () => {
     const { store, storage } = mem({
       [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, ...BUILD, maxSteps: 10 },
-      [COPILOT_PROVISIONED_KEY]: BUILD,
+      [COPILOT_PROVISIONED_KEY]: await hashes(BUILD),
     });
     expect(await provisionCopilot({ ...BUILD, apiKey: 'test-key-2' }, storage)).toBe(true);
     expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: BUILD.baseUrl, apiKey: 'test-key-2', maxSteps: 10 });
-    expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual({ ...BUILD, apiKey: 'test-key-2' });
+    expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual(await hashes({ ...BUILD, apiKey: 'test-key-2' }));
   });
 
   it('is a no-op without build values', async () => {

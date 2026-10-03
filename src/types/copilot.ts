@@ -5,7 +5,7 @@
 
 export const COPILOT_PORT = 'copilot';
 export const COPILOT_SETTINGS_KEY = 'copilotSettings';
-/** What background/provision.ts last seeded ({ baseUrl, apiKey }), to tell a user edit from a stale seed. */
+/** SHA-256 hashes of what background/provision.ts last seeded ({ baseUrl, apiKey }), to tell a user edit from a stale seed. */
 export const COPILOT_PROVISIONED_KEY = 'copilotProvisioned';
 export const COPILOT_ALLOWED_ORIGINS_KEY = 'copilotAllowedOrigins';
 
