@@ -12,7 +12,8 @@
     "storage",
     "tabs",
     "webNavigation",
-    "activeTab"
+    "activeTab",
+    "notifications"
   ],
   "host_permissions": [
     "<all_urls>"

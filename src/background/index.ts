@@ -25,6 +25,16 @@ import {
 import { log } from '@/utils/logger';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
 import {
+  UPDATE_ALARM,
+  UPDATE_NOTIFICATION_ID,
+  UPDATE_PERIOD_MINUTES,
+  UPDATE_STATE_KEY,
+  checkForUpdate,
+  chromeUpdateDeps,
+  latestUrlFor,
+  type UpdateState,
+} from './update-check';
+import {
   buildDisplayUrl,
   getEffectiveConfig,
   parseWsUrl,
@@ -121,9 +131,45 @@ async function updateKeepAliveAlarm(): Promise<void> {
 }
 
 /**
+ * New-version check (update-check.ts): when the browser starts, after an install or reload of
+ * the extension, and every UPDATE_PERIOD_MINUTES.
+ */
+async function runUpdateCheck(): Promise<void> {
+  try {
+    const config = await getEffectiveConfig();
+    const state = await checkForUpdate(latestUrlFor(config), chromeUpdateDeps());
+    if (state?.available) log.info(`[Update] ${state.latest?.version} published; running ${state.current.version}`);
+  } catch (error) {
+    log.warn('[Update] check failed:', error);
+  }
+}
+
+async function ensureUpdateAlarm(): Promise<void> {
+  if (!await chrome.alarms.get(UPDATE_ALARM)) {
+    await chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: UPDATE_PERIOD_MINUTES, periodInMinutes: UPDATE_PERIOD_MINUTES });
+  }
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  void ensureUpdateAlarm();
+  void runUpdateCheck();
+});
+
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  if (notificationId !== UPDATE_NOTIFICATION_ID) return;
+  const state = (await chrome.storage.local.get(UPDATE_STATE_KEY))[UPDATE_STATE_KEY] as UpdateState | undefined;
+  if (state?.downloadUrl) await chrome.tabs.create({ url: state.downloadUrl });
+  await chrome.notifications.clear(notificationId);
+});
+
+/**
  * Handle keep-alive alarm - triggers connection check.
  */
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === UPDATE_ALARM) {
+    void runUpdateCheck();
+    return;
+  }
   if (alarm.name === KEEPALIVE_ALARM) {
     log.debug('[KeepAlive] Alarm fired - checking connection');
     wsClient?.sendHeartbeat();
@@ -378,6 +424,8 @@ async function handlePopupMessage(message: {
  */
 chrome.runtime.onInstalled.addListener((details) => {
   log.info(`Extension installed: ${details.reason}`);
+  void ensureUpdateAlarm();
+  void runUpdateCheck();
 });
 
 /**

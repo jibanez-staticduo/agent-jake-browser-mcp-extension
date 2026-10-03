@@ -33,4 +33,5 @@ chk "11 guard de WebAuthn (sin diálogo nativo, 1Password fijado)" bash -c 'grep
 chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" src/background/tools/utils.ts
 chk "13 foco emulado: la entrada llega a pestañas en segundo plano" grep -q "Emulation.setFocusEmulationEnabled" src/background/tab-manager.ts
 chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
+chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "UPDATE_PERIOD_MINUTES = 30" src/background/update-check.ts && grep -q "onStartup" src/background/index.ts && grep -q "publish-latest.sh" .github/workflows/ci.yml'
 exit $fail
