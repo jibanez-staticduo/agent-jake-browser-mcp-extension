@@ -15,6 +15,13 @@ export const CONFIG = {
   // Shared secret with the server (compiled in via VITE_WS_TOKEN).
   WS_TOKEN: import.meta.env.VITE_WS_TOKEN ?? '',
 
+  // Build identity for the update check (vite.config.ts fills them from git).
+  BUILD_NUMBER: Number(import.meta.env.VITE_BUILD_NUMBER || 0),
+  BUILD_SHA: import.meta.env.VITE_BUILD_SHA ?? '',
+  // Where to read the newest published build. Empty: derived from the server URL; a browser
+  // whose server is local (127.0.0.1) needs it set at build time to the central one.
+  LATEST_URL: import.meta.env.VITE_LATEST_URL ?? '',
+
   // Reconnection settings
   RECONNECT_INTERVAL_MS: 5000,  // Check every 5 seconds (fixed, no backoff)
   MAX_RECONNECT_ATTEMPTS: 0,    // 0 = unlimited retries

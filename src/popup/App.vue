@@ -5,7 +5,8 @@ import { computed } from 'vue';
  * Root Vue component for extension popup.
  * Uses Pinia stores for centralized state management.
  */
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
+import { UPDATE_STATE_KEY, type UpdateState } from '@/background/update-check';
 import { useServerStore, useStatusStore, useActivityStore } from './stores';
 import ConnectionStatus from './components/ConnectionStatus.vue';
 import ServerSettings from './components/ServerSettings.vue';
@@ -31,13 +32,22 @@ function openCopilot() {
   chrome.sidePanel.open({ windowId }).then(() => window.close());
 }
 
+// New published build (background/update-check.ts writes it; cleared once up to date).
+const update = ref<UpdateState | null>(null);
+const onStorage = (changes: Record<string, chrome.storage.StorageChange>) => {
+  if (UPDATE_STATE_KEY in changes) update.value = (changes[UPDATE_STATE_KEY].newValue as UpdateState | undefined) ?? null;
+};
+
 onMounted(() => {
+  chrome.storage.local.get(UPDATE_STATE_KEY).then((r) => { update.value = (r[UPDATE_STATE_KEY] as UpdateState | undefined) ?? null; });
+  chrome.storage.onChanged.addListener(onStorage);
   status.startPolling();
   server.startPolling();
   activity.startPolling();
 });
 
 onUnmounted(() => {
+  chrome.storage.onChanged.removeListener(onStorage);
   status.stopPolling();
   server.stopPolling();
   activity.stopPolling();
@@ -52,6 +62,11 @@ onUnmounted(() => {
         <h1>Agent Jake Browser</h1>
       </div>
       <span class="endpoint">{{ wsEndpoint }}</span>
+    </div>
+
+    <div v-if="update?.available" class="update-banner">
+      Versión nueva <strong>{{ update.latest?.version }}</strong> publicada · tienes la {{ update.current.version }}
+      <a v-if="update.downloadUrl" :href="update.downloadUrl" target="_blank">Descargar</a>
     </div>
 
     <button class="copilot-open" title="Alt+J" @click="openCopilot">Abrir copiloto (Alt+J)</button>
@@ -82,6 +97,20 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.update-banner {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--accent-primary);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.update-banner a {
+  margin-left: 6px;
+  color: var(--accent-primary);
+}
+
 .container {
   padding: 20px;
   background: var(--bg-deep);
