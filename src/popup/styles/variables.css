@@ -49,3 +49,33 @@
   --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 }
+
+/* Light theme (follows the browser; the side panel is used in both). Same token names. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-deepest: #f4f5f9;
+    --bg-deep: #ffffff;
+    --bg-surface: #eef0f6;
+    --bg-elevated: #e2e5ef;
+    --bg-hover: #d8dce9;
+
+    --accent-primary: #006f99;
+    --accent-primary-dim: rgba(0, 111, 153, 0.12);
+    --accent-primary-glow: rgba(0, 111, 153, 0.3);
+    --accent-secondary: #7e22ce;
+    --accent-secondary-dim: rgba(126, 34, 206, 0.12);
+    --accent-success: #047857;
+    --accent-success-dim: rgba(4, 120, 87, 0.12);
+    --accent-warning: #b45309;
+    --accent-warning-dim: rgba(180, 83, 9, 0.14);
+    --accent-danger: #b91c1c;
+    --accent-danger-dim: rgba(185, 28, 28, 0.12);
+
+    --text-primary: #14141f;
+    --text-secondary: #53536a;
+    --text-tertiary: #6b6b80;
+
+    --border-subtle: rgba(0, 0, 0, 0.06);
+    --border-default: rgba(0, 0, 0, 0.14);
+  }
+}

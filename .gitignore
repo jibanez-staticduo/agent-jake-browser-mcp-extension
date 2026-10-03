@@ -32,3 +32,5 @@ coverage/
 # built extension download artifacts
 agent-jake-browser-mcp-extension-*.zip
 dist/
+
+.company/
