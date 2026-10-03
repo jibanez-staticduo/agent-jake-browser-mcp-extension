@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copia versionada en este fork del subset de aserciones de
 # ~/mcp-servers/agent-browser/scripts/check-deltas.sh que le toca a la extension
-# (deltas 2, 2b y 3-10). Ruling CTO DGX-309: el script compartido NO se mueve ni
+# (deltas 2, 2b y 3-17). Ruling CTO DGX-309: el script compartido NO se mueve ni
 # se cambia (lo usa el timer systemd de producción); esta copia está adaptada
 # a un checkout de un solo repo, con rutas relativas a la raíz del repo.
 # Un auto-update que revierta cualquiera de estos es un FALLO, no un exito.
@@ -34,4 +34,8 @@ chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" 
 chk "13 foco emulado: la entrada llega a pestañas en segundo plano" grep -q "Emulation.setFocusEmulationEnabled" src/background/tab-manager.ts
 chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
 chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "UPDATE_PERIOD_MINUTES = 30" src/background/update-check.ts && grep -q "onStartup" src/background/index.ts'
+# Ventana por sesión (INFRA-413): el agente no activa pestañas ni enfoca ventanas. Los botones del
+# popup humano (src/popup) quedan fuera por ruta.
+chk "16 el agente no activa ni enfoca (sin active:true / focused:true en background)" bash -c '! grep -rnE "active: ?true|focused: ?true" src/background'
+chk "17 las ventanas del agente se abren sin foco"  grep -q "focused: false" src/background/tab-manager.ts
 exit $fail

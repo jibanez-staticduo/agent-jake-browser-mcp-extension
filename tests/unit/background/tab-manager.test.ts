@@ -1,12 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// chrome.storage.session stand-in that really stores, to prove the registry survives a restart.
+const sessionStore: Record<string, unknown> = {};
+const sessionArea = {
+  get: vi.fn(async (key: string) => (key in sessionStore ? { [key]: sessionStore[key] } : {})),
+  set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionStore, items); }),
+};
+
 const mockChrome = {
   storage: {
+    session: sessionArea,
     local: {
       get: vi.fn().mockResolvedValue({}),
       set: vi.fn().mockResolvedValue(undefined),
       remove: vi.fn().mockResolvedValue(undefined),
     },
+  },
+  windows: {
+    create: vi.fn(),
+    get: vi.fn(),
+    remove: vi.fn().mockResolvedValue(undefined),
   },
   tabs: {
     get: vi.fn(),
@@ -447,18 +460,74 @@ describe('TabManager CDP readiness', () => {
 describe('TabManager background-tab control', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    for (const key of Object.keys(sessionStore)) delete sessionStore[key];
+    mockChrome.tabs.remove.mockResolvedValue(undefined);
+    mockChrome.windows.remove.mockResolvedValue(undefined);
   });
 
-  it('createTab opens in the background by default', async () => {
+  /** windows.create answers like Chrome: a window with its one tab. */
+  function windowCreates(windowId: number, tabId: number) {
+    mockChrome.windows.create.mockImplementation(async (props) => ({
+      id: windowId,
+      tabs: [{ id: tabId, windowId, url: props.url, title: '', active: true, status: 'complete' }],
+    }));
+  }
+
+  it('createTab opens a new window without focusing it', async () => {
     const manager = new TabManager();
-    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: false });
+    windowCreates(30, 5);
+
+    const info = await manager.createTab('https://example.com', false);
+
+    expect(mockChrome.windows.create).toHaveBeenCalledWith({ url: 'https://example.com', focused: false, state: 'normal' });
+    expect(mockChrome.tabs.create).not.toHaveBeenCalled();
+    expect(info).toMatchObject({ id: 5, windowId: 30, windowCreated: true });
+  });
+
+  it('createTab registers the window it created in storage.session', async () => {
+    const manager = new TabManager();
+    windowCreates(30, 5);
 
     await manager.createTab('https://example.com', false);
 
-    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
-      url: 'https://example.com',
-      active: false,
-    });
+    expect(sessionStore['ajb.agentWindows']).toEqual([30]);
+  });
+
+  it('createTab with one of our live windows adds a background tab to it', async () => {
+    const manager = new TabManager();
+    sessionStore['ajb.agentWindows'] = [30];
+    mockChrome.windows.get.mockResolvedValue({ id: 30 });
+    mockChrome.tabs.create.mockResolvedValue({ id: 6, windowId: 30, url: 'https://example.com', title: '', active: false });
+
+    const info = await manager.createTab('https://example.com', false, 30);
+
+    expect(mockChrome.tabs.create).toHaveBeenCalledWith({ windowId: 30, url: 'https://example.com', active: false });
+    expect(mockChrome.windows.create).not.toHaveBeenCalled();
+    expect(info).toMatchObject({ id: 6, windowId: 30, windowCreated: false });
+  });
+
+  it('createTab with a window that died opens a new one and forgets the dead one', async () => {
+    const manager = new TabManager();
+    sessionStore['ajb.agentWindows'] = [30];
+    mockChrome.windows.get.mockRejectedValue(new Error('No window with id: 30'));
+    windowCreates(31, 7);
+
+    const info = await manager.createTab('https://example.com', false, 30);
+
+    expect(mockChrome.windows.create).toHaveBeenCalledWith(expect.objectContaining({ focused: false }));
+    expect(info).toMatchObject({ windowId: 31, windowCreated: true });
+    expect(sessionStore['ajb.agentWindows']).toEqual([31]);
+  });
+
+  it('createTab never opens into a window it did not create', async () => {
+    const manager = new TabManager();
+    mockChrome.windows.get.mockResolvedValue({ id: 99 });
+    windowCreates(32, 8);
+
+    const info = await manager.createTab('https://example.com', false, 99);
+
+    expect(mockChrome.tabs.create).not.toHaveBeenCalled();
+    expect(info.windowId).toBe(32);
   });
 
   it('createTab attaches on a blank page before loading the URL it will drive', async () => {
@@ -468,11 +537,11 @@ describe('TabManager background-tab control', () => {
     const order: string[] = [];
     let onUpdated: ((tabId: number, info: { status?: string }) => void) | undefined;
     mockChrome.tabs.onUpdated.addListener.mockImplementation((fn) => { onUpdated = fn; });
-    mockChrome.tabs.create.mockImplementation(async (props) => {
+    mockChrome.windows.create.mockImplementation(async (props) => {
       order.push(`create ${props.url}`);
-      return { id: 7, url: props.url, title: '', active: false, status: 'complete' };
+      return { id: 40, tabs: [{ id: 7, windowId: 40, url: props.url, title: '', active: true, status: 'complete' }] };
     });
-    mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://example.com/', title: 'Example', active: false, status: 'complete' });
+    mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://example.com/', title: 'Example', active: true, status: 'complete' });
     mockChrome.tabs.update.mockImplementation(async (_id, props) => {
       order.push(`navigate ${props.url}`);
       queueMicrotask(() => onUpdated?.(7, { status: 'complete' }));
@@ -487,15 +556,14 @@ describe('TabManager background-tab control', () => {
     const info = await manager.createTab('https://example.com/');
 
     expect(order).toEqual(['create about:blank', 'attach', 'pin script', 'navigate https://example.com/']);
-    expect(info).toMatchObject({ id: 7, url: 'https://example.com/', title: 'Example', connected: true });
+    expect(info).toMatchObject({ id: 7, url: 'https://example.com/', title: 'Example', connected: true, windowId: 40 });
   });
 
   it('createTab closes the blank tab when it cannot load the URL', async () => {
     const manager = new TabManager();
-    mockChrome.tabs.create.mockResolvedValue({ id: 8, url: 'about:blank', status: 'complete' });
+    windowCreates(41, 8);
     mockChrome.tabs.get.mockResolvedValue({ id: 8, url: 'about:blank', status: 'complete' });
     mockChrome.tabs.update.mockRejectedValueOnce(new Error('Cannot navigate'));
-    mockChrome.tabs.remove.mockResolvedValue(undefined);
     mockChrome.debugger.attach.mockResolvedValue(undefined);
     mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
       method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
@@ -518,47 +586,81 @@ describe('TabManager background-tab control', () => {
     expect(mockChrome.webNavigation.onCommitted.removeListener).toHaveBeenCalledWith(listener);
   });
 
-  it('createTab activates the tab only when asked', async () => {
+  it('listTabs reports the window of each tab', async () => {
     const manager = new TabManager();
-    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 5, windowId: 30, url: 'https://a.example/', title: 'a', active: false }]);
 
-    await manager.createTab('https://example.com', false, true);
+    const tabs = await manager.listTabs();
 
-    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
-      url: 'https://example.com',
-      active: true,
+    expect(tabs[0]).toMatchObject({ id: 5, windowId: 30 });
+  });
+
+  it('switchTab connects the tab without activating it', async () => {
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 30, url: 'https://a.example/', title: 'a' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+
+    await manager.switchTab(5);
+
+    expect(manager.getConnectedTabId()).toBe(5);
+    expect(mockChrome.tabs.update).not.toHaveBeenCalledWith(5, expect.objectContaining({ active: true }));
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('sendTabToBack is a no-op: it activates nothing', async () => {
+    const manager = new TabManager();
+
+    const activated = await manager.sendTabToBack(5);
+
+    expect(activated).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
+  describe('closeWindow', () => {
+    it('rejects a window the agent did not create, and closes nothing', async () => {
+      const manager = new TabManager();
+      sessionStore['ajb.agentWindows'] = [30];
+
+      await expect(manager.closeWindow(99, [5])).rejects.toThrow(/NOT_AGENT_WINDOW/);
+      expect(mockChrome.windows.remove).not.toHaveBeenCalled();
+      expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
     });
-  });
 
-  it('sendTabToBack activates a sibling tab of the same window', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
+    it('closes the whole window when only its own tabs are inside, and forgets it', async () => {
+      const manager = new TabManager();
+      sessionStore['ajb.agentWindows'] = [30, 31];
+      mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
 
-    const activated = await manager.sendTabToBack(5);
+      const answer = await manager.closeWindow(30, [5, 6]);
 
-    expect(activated).toBe(6);
-    expect(mockChrome.tabs.update).toHaveBeenCalledWith(6, { active: true });
-  });
+      expect(mockChrome.windows.remove).toHaveBeenCalledWith(30);
+      expect(answer).toEqual({ windowId: 30, closed: true, closedTabIds: [5, 6] });
+      expect(sessionStore['ajb.agentWindows']).toEqual([31]);
+    });
 
-  it('sendTabToBack is a no-op for an already hidden tab', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: false });
+    it('does not close tabs outside tabIds: only its own, and the window stays', async () => {
+      const manager = new TabManager();
+      sessionStore['ajb.agentWindows'] = [30];
+      mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 77 }]);
 
-    const activated = await manager.sendTabToBack(5);
+      const answer = await manager.closeWindow(30, [5]);
 
-    expect(activated).toBeNull();
-    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
-  });
+      expect(mockChrome.tabs.remove).toHaveBeenCalledTimes(1);
+      expect(mockChrome.tabs.remove).toHaveBeenCalledWith(5);
+      expect(mockChrome.windows.remove).not.toHaveBeenCalled();
+      expect(answer).toEqual({ windowId: 30, closed: false, closedTabIds: [5] });
+    });
 
-  it('sendTabToBack is a no-op when the tab is alone in its window', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
+    it('survives a service-worker restart: a new manager still knows the window', async () => {
+      windowCreates(30, 5);
+      await new TabManager().createTab('https://example.com', false);
+      mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
 
-    const activated = await manager.sendTabToBack(5);
+      const answer = await new TabManager().closeWindow(30, [5]);
 
-    expect(activated).toBeNull();
-    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+      expect(answer.closed).toBe(true);
+    });
   });
 });

@@ -26,6 +26,7 @@ export type ToolName =
   | 'browser_switch_tab'
   | 'browser_send_to_back'
   | 'browser_close_tab'
+  | 'browser_close_window'
   | 'browser_get_text'
   | 'browser_get_attribute'
   | 'browser_is_visible'
@@ -104,6 +105,7 @@ export interface TabInfo {
   title: string;
   active: boolean;
   connected: boolean;
+  windowId?: number;
 }
 
 // Viewport coordinates

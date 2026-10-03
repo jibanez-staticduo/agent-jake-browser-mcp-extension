@@ -9,6 +9,9 @@ import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 import { pageEvents } from './page-events';
 
+/** chrome.storage.session key holding the ids of the windows created for the agent. */
+const AGENT_WINDOWS_KEY = 'ajb.agentWindows';
+
 /**
  * Runs in every document of a controlled tab (see installWebAuthnGuard). Pins
  * navigator.credentials.get/create to CredentialsContainer.prototype — Chrome's own
@@ -772,7 +775,7 @@ export class TabManager {
    */
   async listTabs(): Promise<TabInfo[]> {
     // Get the active tab in the last focused window (most reliable method)
-    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const currentTab = (await chrome.tabs.query({ lastFocusedWindow: true })).find((t) => t.active);
     const currentTabId = currentTab?.id;
 
     const tabs = await chrome.tabs.query({});
@@ -784,22 +787,23 @@ export class TabManager {
       // Only mark the specific current tab as active
       active: tab.id === currentTabId,
       connected: tab.id === this.connectedTabId,
+      windowId: tab.windowId,
     }));
   }
 
   /**
    * Create a new tab and optionally connect to it.
    *
-   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
-   * `active: false` would jump the window to the new tab and steal the user's
-   * view. Pass `active: true` only when the user is meant to see it.
+   * It opens in the BACKGROUND, in a window of its own unless `windowId` names a window this
+   * extension already created for the agent (see openTab). Nothing here brings a tab or a window
+   * to the front: the user's view is never touched.
    */
-  async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
+  async createTab(url: string, connect = true, windowId?: number): Promise<TabInfo & { windowCreated: boolean }> {
     // The WebAuthn guard's page script only beats a password manager's content script in
     // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
     // drive opens blank, we attach, and only then does it load the URL.
     const guardFirst = connect && /^https?:/i.test(url);
-    const tab = await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
+    const { tab, windowCreated } = await this.openTab(guardFirst ? 'about:blank' : url, windowId);
 
     if (connect && tab.id) {
       if (guardFirst) {
@@ -809,7 +813,7 @@ export class TabManager {
         try {
           await chrome.tabs.update(tab.id, { url });
         } catch (error) {
-          // Do not leave a connected about:blank behind.
+          // Do not leave a connected about:blank behind (nor an empty window of ours).
           await chrome.tabs.remove(tab.id).catch(() => undefined);
           throw error;
         }
@@ -828,7 +832,124 @@ export class TabManager {
       title: current.title || '',
       active: current.active,
       connected: connect && tab.id === this.connectedTabId,
+      windowId: tab.windowId,
+      windowCreated,
     };
+  }
+
+  /**
+   * Open a tab for the agent without focusing anything. With no `windowId`, or one that is not
+   * a live window of ours, a new unfocused window is created and its only tab is the result (no
+   * empty tab is left behind); with a live window of ours the tab joins it as a background tab.
+   * Only windows we created are reused, so the agent never opens into one of the user's.
+   */
+  private async openTab(url: string, windowId?: number): Promise<{ tab: chrome.tabs.Tab; windowCreated: boolean }> {
+    if (windowId !== undefined && (await this.isAgentWindow(windowId)) && (await this.windowExists(windowId))) {
+      const tab = await chrome.tabs.create({ windowId, url, active: false });
+      return { tab, windowCreated: false };
+    }
+    if (windowId !== undefined) await this.forgetAgentWindow(windowId);
+
+    const created = await chrome.windows.create({ url, focused: false, state: 'normal' });
+    const tab = created?.tabs?.[0];
+    if (created?.id === undefined || !tab) {
+      throw new Error('chrome.windows.create returned no window or tab');
+    }
+    await this.rememberAgentWindow(created.id);
+    return { tab, windowCreated: true };
+  }
+
+  private async windowExists(windowId: number): Promise<boolean> {
+    try {
+      await chrome.windows.get(windowId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Windows this extension created for the agent. They live in chrome.storage.session because
+   * the MV3 service worker restarts; the in-memory copy is only the fallback when that storage
+   * is unavailable.
+   */
+  private agentWindows = new Set<number>();
+
+  private async loadAgentWindows(): Promise<Set<number>> {
+    try {
+      const stored = (await chrome.storage.session.get(AGENT_WINDOWS_KEY))[AGENT_WINDOWS_KEY];
+      if (Array.isArray(stored)) return new Set(stored.filter((id): id is number => typeof id === 'number'));
+    } catch {
+      // fall back to memory
+    }
+    return this.agentWindows;
+  }
+
+  private async saveAgentWindows(windows: Set<number>): Promise<void> {
+    this.agentWindows = windows;
+    try {
+      await chrome.storage.session.set({ [AGENT_WINDOWS_KEY]: [...windows] });
+    } catch {
+      // memory copy stays
+    }
+  }
+
+  private async isAgentWindow(windowId: number): Promise<boolean> {
+    return (await this.loadAgentWindows()).has(windowId);
+  }
+
+  private async rememberAgentWindow(windowId: number): Promise<void> {
+    const windows = await this.loadAgentWindows();
+    windows.add(windowId);
+    await this.saveAgentWindows(windows);
+  }
+
+  private async forgetAgentWindow(windowId: number): Promise<void> {
+    const windows = await this.loadAgentWindows();
+    if (windows.delete(windowId)) await this.saveAgentWindows(windows);
+  }
+
+  /**
+   * Close a window this extension created for the agent. `tabIds` are the tabs the caller owns:
+   * only those are closed, and the window is closed whole (`closed: true`) only when nothing else
+   * is inside it. A tab of the user's dragged into the window is never closed.
+   */
+  async closeWindow(windowId: number, tabIds?: number[]): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
+    if (!await this.isAgentWindow(windowId)) {
+      const err = new Error(`NOT_AGENT_WINDOW: window ${windowId} was not created by the agent; nothing was closed`);
+      err.name = 'NOT_AGENT_WINDOW';
+      throw err;
+    }
+
+    let inside: chrome.tabs.Tab[] = [];
+    try {
+      inside = await chrome.tabs.query({ windowId });
+    } catch {
+      // the window is gone
+    }
+    const insideIds = inside.map((t) => t.id).filter((id): id is number => id !== undefined);
+    const ours = tabIds ? tabIds.filter((id) => insideIds.includes(id)) : insideIds;
+    const foreign = insideIds.filter((id) => !ours.includes(id));
+
+    if (this.connectedTabId !== null && ours.includes(this.connectedTabId)) {
+      await this.disconnectTab();
+    }
+    if (foreign.length === 0) {
+      await chrome.windows.remove(windowId).catch(() => undefined);
+      await this.forgetAgentWindow(windowId);
+      log.info(`Closed agent window: ${windowId}`);
+      return { windowId, closed: true, closedTabIds: ours };
+    }
+    const closedTabIds: number[] = [];
+    for (const id of ours) {
+      try {
+        await chrome.tabs.remove(id);
+        closedTabIds.push(id);
+      } catch {
+        // already gone
+      }
+    }
+    return { windowId, closed: false, closedTabIds };
   }
 
   /**
@@ -853,32 +974,15 @@ export class TabManager {
   }
 
   /**
-   * Push a tab to the background by activating another tab of its window.
-   * No-op when the tab is already hidden or it is the only tab there.
+   * Kept for the tool's sake, does nothing: the agent's tabs already live in windows of their own
+   * and nothing here may activate a tab. The popup's own buttons are the only activations left.
    */
-  async sendTabToBack(tabId?: number): Promise<number | null> {
-    const targetId = tabId ?? this.connectedTabId;
-    if (!targetId) {
-      throw new Error('No tab specified and no connected tab');
-    }
-
-    const tab = await chrome.tabs.get(targetId);
-    if (!tab.active) {
-      return null;
-    }
-
-    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
-    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
-    if (!other?.id) {
-      return null;
-    }
-
-    await chrome.tabs.update(other.id, { active: true });
-    return other.id;
+  async sendTabToBack(_tabId?: number): Promise<number | null> {
+    return null;
   }
 
   /**
-   * Switch to a different tab.
+   * Point the agent at a different tab. It does not activate it or focus its window.
    */
   async switchTab(tabId: number): Promise<void> {
     if (!await this.tabExists(tabId)) {
@@ -886,7 +990,6 @@ export class TabManager {
     }
 
     await this.connectTab(tabId);
-    await chrome.tabs.update(tabId, { active: true });
   }
 
   /**
@@ -943,6 +1046,7 @@ export class TabManager {
           title: tab.title || '',
           active: tab.active,
           connected: false,
+          windowId: tab.windowId,
         };
       }
     };

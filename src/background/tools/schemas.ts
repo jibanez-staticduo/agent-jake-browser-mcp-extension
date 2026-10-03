@@ -60,7 +60,10 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
+    // Accepted and ignored: the agent never brings a tab to the front.
     switchTo: z.boolean().optional().default(false),
+    // The agent's window for this session; absent or gone = a new unfocused window.
+    windowId: z.number().int().optional(),
   }),
 
   browser_switch_tab: z.object({
@@ -73,6 +76,12 @@ export const schemas = {
 
   browser_close_tab: z.object({
     tabId: z.number().optional(),
+  }),
+
+  // Internal message from the server's tab reaper, not an MCP tool.
+  browser_close_window: z.object({
+    windowId: z.number().int(),
+    tabIds: z.array(z.number().int()).optional(),
   }),
 
   browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),

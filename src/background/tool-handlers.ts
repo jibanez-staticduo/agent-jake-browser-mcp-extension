@@ -184,6 +184,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Switch to tab ${p?.tabId}`;
     case 'browser_close_tab':
       return 'Close tab';
+    case 'browser_close_window':
+      return `Close window ${p?.windowId}`;
     case 'browser_evaluate':
       return `Evaluate JS via CDP (${String(p?.code || '').length} chars)`;
     case 'browser_get_html':
