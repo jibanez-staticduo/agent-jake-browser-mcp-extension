@@ -96,12 +96,3 @@ jobs:
     steps:
       - name: agent-browser-sync --force all
         run: bash "$HOME/.local/libexec/x86-host-runtime/agent-browser-sync.sh" --force all
-      # Después de instalar en x86 y Mac: anuncia la build a las demás instalaciones
-      # (/download/latest.json, que miran al arrancar y cada 30 min) y deja su zip en /download.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0   # el nº de build es el nº de commits de main
-      - name: Instalar dependencias
-        run: npm ci --no-audit --no-fund
-      - name: Publicar la versión en el servidor MCP
-        run: bash scripts/publish-latest.sh
