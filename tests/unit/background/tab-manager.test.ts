@@ -318,6 +318,21 @@ describe('TabManager CDP readiness', () => {
     expect(pinCalls()[1].target).toEqual({ tabId: 101, frameIds: [12] });
   });
 
+  it('emulates focus on the tab it drives, so input reaches it in the background', async () => {
+    // Regression: a hidden tab got no CDP mouse/key event at all and the tools answered success;
+    // the fix used to bring the tab in front of the user for every action.
+    const manager = new TabManager();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+
+    await manager.connectTab(101, 'https://example.com');
+
+    expect(mockChrome.debugger.sendCommand).toHaveBeenCalledWith({ tabId: 101 }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    expect(mockChrome.tabs.update).not.toHaveBeenCalledWith(101, { active: true });
+  });
+
   it('still connects when the WebAuthn domain is unavailable', async () => {
     const manager = new TabManager();
     mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
@@ -513,219 +528,6 @@ describe('TabManager background-tab control', () => {
       url: 'https://example.com',
       active: true,
     });
-  });
-
-  it('withTabInFront shows the tab for the action and puts the visible one back', async () => {
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 9 }]).mockResolvedValueOnce([{ id: 5 }]);
-    mockChrome.tabs.update.mockResolvedValue(undefined);
-    const order: string[] = [];
-    mockChrome.tabs.update.mockImplementation(async (id: number) => { order.push(`activate ${id}`); });
-
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-    const result = await manager.withTabInFront(async () => { order.push('act'); return 42; });
-    expect(order).toEqual(['activate 5', 'act']); // the user's tab comes back after the delay
-    await manager.flushPendingRestore();
-
-    expect(result).toBe(42);
-    expect(order).toEqual(['activate 5', 'act', 'activate 9']);
-  });
-
-  it('withTabInFront runs one action at a time: a second session cannot hide the tab mid-typing', async () => {
-    // Regression (architect, #21): sessions arrive concurrently; A's restore hid the tab while
-    // B was still typing, so B's keys went nowhere again.
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    let front = 9;
-    mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
-    mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; });
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-    const log: string[] = [];
-    let releaseA!: () => void;
-
-    const a = manager.withTabInFront(async () => {
-      log.push(`A starts, front=${front}`);
-      await new Promise<void>((resolve) => { releaseA = resolve; });
-      log.push(`A ends, front=${front}`);
-    });
-    const b = manager.withTabInFront(async () => { log.push(`B runs, front=${front}`); });
-    await vi.waitFor(() => expect(log).toContain('A starts, front=5'));
-    expect(log).not.toContain('B runs, front=5');
-    releaseA();
-    await Promise.all([a, b]);
-
-    expect(log).toEqual(['A starts, front=5', 'A ends, front=5', 'B runs, front=5']);
-    await manager.flushPendingRestore();
-    expect(front).toBe(9); // the user's tab is back in front at the end
-    mockChrome.tabs.query.mockReset();
-    mockChrome.tabs.update.mockReset();
-  });
-
-  it('withTabInFront restores the tab and rethrows when the action fails, and the queue goes on', async () => {
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    let front = 9;
-    mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
-    mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; });
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-
-    await expect(manager.withTabInFront(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
-    await manager.flushPendingRestore();
-    expect(front).toBe(9);
-    await expect(manager.withTabInFront(async () => 'next')).resolves.toBe('next');
-    mockChrome.tabs.query.mockReset();
-    mockChrome.tabs.update.mockReset();
-  });
-
-  it('withTabInFront refuses to act if the connected tab changed while it waited its turn', async () => {
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-    let releaseA!: () => void;
-    const a = manager.withTabInFront(() => new Promise<void>((resolve) => { releaseA = resolve; }));
-    const bAction = vi.fn();
-    const b = manager.withTabInFront(async () => bAction());
-    await vi.waitFor(() => expect(typeof releaseA).toBe('function')); // A is running, B is queued
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 6; // another session switched tabs
-    releaseA();
-    await a;
-
-    await expect(b).rejects.toThrow('CONNECTED_TAB_CHANGED');
-    expect(bAction).not.toHaveBeenCalled();
-    mockChrome.tabs.query.mockReset();
-  });
-
-  it('withTabInFront turns a burst of actions into one flash', async () => {
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    let front = 9;
-    const activations: number[] = [];
-    mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
-    mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; activations.push(id); });
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-
-    await manager.withTabInFront(async () => 'click');
-    await manager.withTabInFront(async () => 'type');
-    await manager.withTabInFront(async () => 'enter');
-    expect(activations).toEqual([5]);
-
-    await manager.flushPendingRestore();
-    expect(activations).toEqual([5, 9]);
-    mockChrome.tabs.query.mockReset();
-    mockChrome.tabs.update.mockReset();
-  });
-
-  it('withTabInFront puts the user tab back RESTORE_DELAY_MS after the last action', async () => {
-    vi.useFakeTimers();
-    try {
-      const manager = new TabManager();
-      (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-      mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-      let front = 9;
-      mockChrome.tabs.query.mockImplementation(async () => [{ id: front }]);
-      mockChrome.tabs.update.mockImplementation(async (id: number) => { front = id; });
-      mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-
-      await manager.withTabInFront(async () => 'act');
-      await vi.advanceTimersByTimeAsync(TabManager.RESTORE_DELAY_MS - 100);
-      expect(front).toBe(5);
-      await vi.advanceTimersByTimeAsync(200);
-      expect(front).toBe(9);
-    } finally {
-      vi.useRealTimers();
-      mockChrome.tabs.query.mockReset();
-      mockChrome.tabs.update.mockReset();
-    }
-  });
-
-  it('withTabInFront restores a pending tab of another connection before bringing a different one', async () => {
-    const manager = new TabManager();
-    const fronts: Record<number, number> = { 1: 9 }; // window 1
-    mockChrome.tabs.get.mockImplementation(async (id: number) => ({ id, windowId: 1 }));
-    mockChrome.tabs.query.mockImplementation(async () => [{ id: fronts[1] }]);
-    const activations: number[] = [];
-    mockChrome.tabs.update.mockImplementation(async (id: number) => { fronts[1] = id; activations.push(id); });
-    mockChrome.debugger.sendCommand.mockResolvedValue({ result: { value: 'visible' } });
-
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    await manager.withTabInFront(async () => 'on 5');
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 6;
-    await manager.withTabInFront(async () => 'on 6');
-
-    expect(activations).toEqual([5, 9, 6]); // 5 in, 9 back, then 6 in
-    await manager.flushPendingRestore();
-    expect(activations).toEqual([5, 9, 6, 9]);
-    mockChrome.tabs.get.mockReset();
-    mockChrome.tabs.query.mockReset();
-    mockChrome.tabs.update.mockReset();
-  });
-
-  it('withTabInFront leaves a tab that is already in front alone', async () => {
-    const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 5;
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 5 }]);
-    mockChrome.tabs.update.mockClear();
-
-    await manager.withTabInFront(async () => 'ok');
-
-    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
-  });
-
-  it('bringTabToFront activates the tab and returns the previous one', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 3 }]);
-
-    const previous = await manager.bringTabToFront(5);
-
-    expect(previous).toBe(3);
-    expect(mockChrome.tabs.update).toHaveBeenCalledWith(5, { active: true });
-  });
-
-  it('bringTabToFront is a no-op when the tab is already visible', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
-
-    const previous = await manager.bringTabToFront(5);
-
-    expect(previous).toBeNull();
-    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
-  });
-
-  it('restoreTabBehind puts the user tab back when ours is still in front', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
-
-    await manager.restoreTabBehind(5, 3);
-
-    expect(mockChrome.tabs.update).toHaveBeenCalledWith(3, { active: true });
-  });
-
-  it('restoreTabBehind leaves the user alone if they switched tabs meanwhile', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1 });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 9 }]);
-
-    await manager.restoreTabBehind(5, 3);
-
-    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
-  });
-
-  it('restoreTabBehind survives the previous tab being closed', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockRejectedValue(new Error('No tab with id: 3'));
-
-    await expect(manager.restoreTabBehind(5, 3)).resolves.toBeUndefined();
   });
 
   it('sendTabToBack activates a sibling tab of the same window', async () => {

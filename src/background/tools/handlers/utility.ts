@@ -16,10 +16,8 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     /**
-     * A hidden tab does not paint reliably (throttled renderer, stale surface),
-     * so the capture briefly brings the connected tab to the front of its
-     * window and restores the previously visible tab right after. The user
-     * only ever sees a flash; nothing else activates tabs.
+     * Captures the connected tab where it is: with focus emulation (TabManager) a background
+     * tab paints like a visible one, so the user's tab is never moved.
      */
     browser_screenshot: async () => {
       const tabId = ctx.tabManager.getConnectedTabId();
@@ -27,15 +25,13 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
         throw new Error('No tab connected');
       }
 
-      return ctx.tabManager.withTabInFront(async () => {
-        const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
-          'Page.captureScreenshot',
-          { format: 'png' }
-        );
-        return {
-          image: `data:image/png;base64,${result.data}`,
-        };
-      });
+      const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
+        'Page.captureScreenshot',
+        { format: 'png' }
+      );
+      return {
+        image: `data:image/png;base64,${result.data}`,
+      };
     },
 
     /**

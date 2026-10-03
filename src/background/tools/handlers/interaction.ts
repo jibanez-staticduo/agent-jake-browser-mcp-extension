@@ -10,16 +10,10 @@
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap, Coordinates } from './types';
 
-/**
- * Tools that act through CDP input events (mouse, keyboard). Those events do not reach a
- * hidden tab in the x86 Chrome, so each runs with the tab briefly in front (withTabInFront).
- */
-export const INPUT_TOOLS = ['browser_click', 'browser_type', 'browser_hover', 'browser_drag', 'browser_press_key'] as const;
-
 export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
   const { sendToContent, sendToAllFrames, resolveTarget, waitForStableOrNavigation } = ctx;
 
-  const handlers: HandlerMap = {
+  return {
     browser_snapshot: async () => {
       const frames = await sendToAllFrames<string>('generateSnapshot');
       const { url, title } = await sendToContent<{ url: string; title: string }>('getPageInfo');
@@ -233,10 +227,4 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       return { pressed: key };
     },
   };
-
-  for (const name of INPUT_TOOLS) {
-    const run = handlers[name];
-    handlers[name] = (payload) => ctx.tabManager.withTabInFront(() => run(payload));
-  }
-  return handlers;
 }
