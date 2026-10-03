@@ -383,6 +383,15 @@ function host(url: string): string {
   }
 }
 
+function pathOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.pathname === '/' ? '' : u.pathname;
+  } catch {
+    return '';
+  }
+}
+
 function when(ts: number): string {
   return new Date(ts).toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
@@ -396,18 +405,28 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
       @back="view = 'chat'" @save="saveSettings" />
     <template v-else>
     <header>
-      <div class="target" :title="target?.url">
-        <span class="dot" :class="{ pinned }" />
-        <span class="title">{{ target ? target.title || host(target.url) : 'Sin pestaña' }}</span>
-        <span class="host">{{ target ? host(target.url) : '' }}</span>
-      </div>
       <div class="actions">
-        <button class="icon" :class="{ on: pinned }" :title="pinned ? 'Seguir la pestaña activa' : 'Fijar esta pestaña'"
-          @click="pinned = !pinned; refreshTarget()">📌</button>
-        <button class="icon" title="Nueva conversación" :disabled="running" @click="startNewChat">✚</button>
-        <button class="icon" :class="{ on: panel === 'history' }" title="Conversaciones" @click="openHistory">🕘</button>
-        <button class="opts" :class="{ on: view === 'options', warn: needsSetup }" @click="view = view === 'options' ? 'chat' : 'options'">Opciones</button>
+        <button type="button" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
+          @click="startNewChat">Nueva conversación</button>
+        <button type="button" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
+        <button type="button" class="opts" :class="{ on: view === 'options', warn: needsSetup }"
+          :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
+          @click="view = view === 'options' ? 'chat' : 'options'">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
       </div>
+      <div class="target" :title="target?.url">
+        <template v-if="target">
+          <span class="dot" :class="{ pinned }" />
+          <div class="where">
+            <span class="host">{{ host(target.url) }}<span class="path">{{ pathOf(target.url) }}</span></span>
+            <span class="title">{{ target.title || 'Sin título' }}</span>
+          </div>
+        </template>
+        <span v-else class="muted">Sin pestaña objetivo</span>
+        <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
+          :title="pinned ? 'Dejar de fijar: seguir la pestaña activa' : 'Fijar esta pestaña como objetivo'"
+          @click="pinned = !pinned; refreshTarget()">{{ pinned ? 'Fijada' : 'Fijar' }}</button>
+      </div>
+      <span v-if="target" class="muted follow">{{ pinned ? 'Fijada: el agente trabaja en esta pestaña' : 'Sigue la activa: cambia con la pestaña que abras' }}</span>
     </header>
 
     <div v-if="panel === 'history'" class="drawer history">
@@ -415,7 +434,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
       <div v-for="c in chats" :key="c.id" class="chat-row" :class="{ current: c.id === chat.id }">
         <button class="link" @click="openChat(c)">{{ c.title }}</button>
         <span class="muted">{{ when(c.updatedAt) }}</span>
-        <button class="icon" title="Borrar" @click="removeChat(c)">🗑</button>
+        <button class="link" :aria-label="`Borrar ${c.title}`" @click="removeChat(c)">Borrar</button>
       </div>
     </div>
 
@@ -503,25 +522,29 @@ body::before { display: none; } /* base.css scanline overlay: not in the panel *
 .panel { display: flex; flex-direction: column; height: 100%; }
 .grow { flex: 1; overflow-y: auto; }
 header {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 12px;
   border-bottom: 1px solid var(--border-default); background: var(--bg-deep);
 }
-.target { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
-.target .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.target .host { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
+.target { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.where { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.where .host { font-weight: 700; font-family: var(--font-mono, monospace); font-size: 12px; word-break: break-all; }
+.where .path { font-weight: 400; color: var(--text-secondary); }
+.where .title { color: var(--text-secondary); word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.follow { font-size: 11px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; margin-top: 5px; }
 .dot.pinned { background: var(--accent-warning); }
-.actions { display: flex; gap: 2px; }
+button.pin { margin-left: auto; flex-shrink: 0; min-height: 28px; padding: 3px 10px; }
+button.pin.on { border-color: var(--accent-warning); }
+.warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions button { min-height: 32px; }
+.actions button.on { border-color: var(--accent-primary); }
 button {
   background: var(--accent-primary-dim); color: var(--text-primary); border: 1px solid var(--border-default);
   border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit;
 }
 button:disabled { opacity: 0.4; cursor: default; }
-button.opts { padding: 4px 10px; min-height: 32px; }
-button.opts.on { border-color: var(--accent-primary); }
 button.opts.warn { border-color: var(--accent-warning); }
-button.icon { background: none; border: none; padding: 4px 6px; opacity: 0.6; }
-button.icon.on, button.icon:hover:not(:disabled) { opacity: 1; }
 button.link { background: none; border: none; padding: 0; text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.stop { background: var(--accent-danger-dim); border-color: var(--accent-danger); }
 .muted { color: var(--text-secondary); }
