@@ -81,7 +81,5 @@ code { font-family: var(--font-mono, monospace); }
 .buttons.wrap { flex-wrap: wrap; }
 .free { display: flex; gap: 6px; }
 .free input { flex: 1; min-width: 0; }
-button.primary { border-color: var(--accent-success); background: var(--accent-success-dim); }
-button.danger { border-color: var(--accent-danger); background: var(--accent-danger-dim); }
 .answered { color: var(--text-secondary); font-style: italic; }
 </style>

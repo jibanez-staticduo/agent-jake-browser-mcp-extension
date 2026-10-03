@@ -179,7 +179,7 @@ test('Opciones renders the MCP status and reads server config from background', 
   try {
     await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
     await panel.getByRole('button', { name: 'Opciones' }).first().click();
-    await expect(panel.getByRole('heading', { name: 'Conexión MCP' })).toBeVisible();
+    await expect(panel.getByRole('heading', { name: /Conexión MCP/ })).toBeVisible();
 
     // The 'En uso:' hint renders only after getServerConfig round-trips
     // through the background service worker, so this proves panel <-> SW
@@ -188,7 +188,7 @@ test('Opciones renders the MCP status and reads server config from background', 
 
     // With no MCP WebSocket server listening on 8765, the indicator must
     // report the real state from getStatus: OFFLINE.
-    await expect(panel.locator('.mcp-indicator .indicator-value')).toHaveText('OFFLINE', {
+    await expect(panel.locator('.mcp-indicator .indicator-value')).toHaveText('DESCONECTADO', {
       timeout: 15000,
     });
   } finally {
@@ -206,7 +206,7 @@ test('copilot panel opens in a fresh install without contacting a model', async 
     await expect(panel.getByRole('button', { name: 'Enviar' })).toBeDisabled();
     await panel.getByRole('button', { name: 'Abrir Opciones' }).click();
     await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue('');
-    await expect(panel.getByRole('button', { name: 'Guardar' })).toBeDisabled();
+    await expect(panel.getByRole('button', { name: 'Guardar copiloto' })).toBeDisabled();
   } finally {
     await panel.close();
   }

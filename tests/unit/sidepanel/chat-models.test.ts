@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chatModels, groupChatModels, modelGroupOf, modelLabel } from '@/sidepanel/chats';
+import { chatModels, groupChatModels, humanizeModel, isPaidModel, modelGroupOf, modelLabel } from '@/sidepanel/chats';
 
 /**
  * model_name ids of k8s-litellm-pocharlies/k8s/manifest.yaml (chat aliases, 2026-10-03):
@@ -89,10 +89,40 @@ describe('groupChatModels', () => {
 });
 
 describe('modelLabel', () => {
-  it('drops the group prefix and capitalises', () => {
-    expect(modelLabel('alibaba-q38-max')).toBe('Q38 Max');
-    expect(modelLabel('or-gemma-26b')).toBe('Gemma 26b');
-    expect(modelLabel('qwen38-flash-next')).toBe('Qwen38 Flash Next');
-    expect(modelLabel('tooling')).toBe('Tooling');
+  it('never shows an abbreviation or a raw alias as a name', () => {
+    const ugly = /\b(dsv\d*\w*|fl|q\d+|u|off|uncensored|lfm|glm)\b/;
+    for (const id of LITELLM_IDS) {
+      const name = modelLabel(id);
+      expect(name, id).not.toMatch(ugly);
+      expect(name, id).not.toBe(id);
+      expect(name, id).toMatch(/^[A-Z0-9]/);
+    }
+  });
+
+  it('gives each alias a different name inside its group', () => {
+    for (const g of groupChatModels(LITELLM_IDS)) {
+      const names = g.models.map(modelLabel);
+      expect(new Set(names).size, g.id).toBe(names.length);
+    }
+  });
+
+  it('names the ones the designer flagged', () => {
+    expect(modelLabel('alibaba-dsv41-fl')).toBe('DeepSeek V4.1 Flash');
+    expect(modelLabel('qwen38-u-off')).toBe('Qwen 3.8 Flash · sin pensar y sin censura');
+    expect(modelLabel('or-lfm')).toBe('LFM 2.5 2.6B');
+  });
+
+  it('humanizes an alias that is not in the map', () => {
+    expect(humanizeModel('alibaba-new-model')).toBe('New Model');
+    expect(humanizeModel('or-glm-9')).toBe('GLM 9');
+    expect(humanizeModel('foo-27b')).toBe('Foo 27B');
+  });
+});
+
+describe('isPaidModel', () => {
+  it('marks only the OpenRouter group as paid', () => {
+    expect(isPaidModel('or-glm')).toBe(true);
+    expect(isPaidModel('alibaba-glm-53')).toBe(false);
+    expect(isPaidModel('qwen38-flash-next')).toBe(false);
   });
 });

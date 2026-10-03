@@ -25,8 +25,8 @@ function handleBackdropClick(e: MouseEvent) {
     >
       <div class="modal-content">
         <div class="modal-header">
-          <div class="modal-title">Activity Log</div>
-          <button class="modal-close" @click="activity.closeModal">×</button>
+          <div class="modal-title">Registro de actividad</div>
+          <button class="modal-close" aria-label="Cerrar" @click="activity.closeModal">×</button>
         </div>
 
         <div class="modal-filters">
@@ -43,7 +43,7 @@ function handleBackdropClick(e: MouseEvent) {
 
         <div class="modal-body">
           <div v-if="activity.filtered.length === 0" class="empty-state">
-            No activity found
+            No hay actividad
           </div>
           <ActivityEntryComponent
             v-for="entry in activity.filtered"

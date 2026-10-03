@@ -5,6 +5,7 @@
 import { ref, computed } from 'vue';
 import type { ActivityEntry } from '../types';
 import { formatTime, formatDuration } from '../composables/useFormatting';
+import { ACTIVITY_TYPE_LABELS, describeActivity } from '../constants/activityFilters';
 
 const props = defineProps<{
   entry: ActivityEntry;
@@ -37,14 +38,14 @@ function toggle() {
   >
     <div class="activity-header">
       <span class="activity-time">{{ formatTime(entry.timestamp) }}</span>
-      <span class="activity-type">{{ entry.type }}</span>
+      <span class="activity-type">{{ ACTIVITY_TYPE_LABELS[entry.type] ?? entry.type }}</span>
       <span class="activity-spacer"></span>
       <span class="activity-icon">{{ entry.success ? '✓' : '✕' }}</span>
       <span v-if="entry.durationMs" class="activity-duration">
         {{ formatDuration(entry.durationMs) }}
       </span>
     </div>
-    <div class="activity-desc">{{ entry.description }}</div>
+    <div class="activity-desc">{{ describeActivity(entry) }}</div>
     <div v-if="details && expanded" class="activity-details">{{ details }}</div>
   </div>
 </template>

@@ -92,7 +92,7 @@ export const useServerStore = defineStore('server', () => {
     try {
       const result = await sendMessage<StartPairingResult>('startPairing');
       if (result && result.success === false) {
-        error.value = result.error || 'No se pudo iniciar el pairing';
+        error.value = result.error || 'No se pudo iniciar el emparejamiento';
       } else if (result?.otp) {
         info.value = info.value
           ? { ...info.value, pairing: { state: 'pending', otp: result.otp, approveUrl: result.approveUrl } }

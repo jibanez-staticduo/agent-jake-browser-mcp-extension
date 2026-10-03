@@ -10,15 +10,13 @@ const server = useServerStore();
 
 const pairingStateText = computed(() => {
   switch (server.pairing.state) {
-    case 'pending': return 'PARPENDIENTE';
-    case 'approved': return 'PAREADO';
+    case 'pending': return 'PENDIENTE';
+    case 'approved': return 'EMPAREJADO';
     case 'expired': return 'CADUCADO';
     case 'error': return 'ERROR';
     default: return '';
   }
 });
-
-const connectionText = computed(() => (server.connected ? 'CONECTADO' : 'DESCONECTADO'));
 
 const sourceLabel = computed(() => {
   switch (server.info?.source) {
@@ -34,7 +32,10 @@ const sourceLabel = computed(() => {
   <div class="server-panel">
     <div class="panel-title">
       <span>Servidor MCP</span>
-      <span class="conn-state" :class="{ online: server.connected }">{{ connectionText }}</span>
+    </div>
+
+    <div v-if="!server.connected" class="conn-problem" role="status">
+      Sin conexión con el servidor MCP. Revisa la URL y el token, o empareja de nuevo.
     </div>
 
     <div class="field">
@@ -83,7 +84,7 @@ const sourceLabel = computed(() => {
         :disabled="server.saving"
         @click="server.save()"
       >
-        {{ server.saving ? 'Guardando…' : 'Guardar' }}
+        {{ server.saving ? 'Guardando…' : 'Guardar servidor' }}
       </button>
       <button
         class="btn btn-pair"
@@ -91,13 +92,13 @@ const sourceLabel = computed(() => {
         :disabled="server.pairingLoading || server.pairing.state === 'pending'"
         @click="server.startPairing()"
       >
-        {{ server.pairing.state === 'pending' ? 'Esperando…' : 'Parear' }}
+        {{ server.pairing.state === 'pending' ? 'Esperando aprobación…' : 'Emparejar con el servidor' }}
       </button>
       <span v-if="server.savedFlash" class="saved-flash">Guardado</span>
     </div>
 
     <div v-if="server.pairing.state === 'pending' && server.pairing.otp" class="pairing-box">
-      <div class="pairing-label">Código de pairing</div>
+      <div class="pairing-label">Código de emparejamiento</div>
       <div class="pairing-otp">{{ server.pairing.otp }}</div>
       <a
         v-if="server.pairing.approveUrl"
@@ -109,7 +110,7 @@ const sourceLabel = computed(() => {
       <div class="pairing-hint">Abre el enlace en el servidor y aprueba para emitir el token.</div>
     </div>
     <div v-else-if="server.pairing.state !== 'idle'" class="pairing-status">
-      Pairing: {{ pairingStateText }}
+      Emparejamiento: {{ pairingStateText }}
       <span v-if="server.pairing.error" class="pairing-error"> — {{ server.pairing.error }}</span>
     </div>
 
@@ -142,12 +143,13 @@ const sourceLabel = computed(() => {
   color: var(--accent-primary);
 }
 
-.conn-state {
-  color: var(--text-tertiary);
-}
-
-.conn-state.online {
-  color: var(--accent-success);
+.conn-problem {
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--accent-warning);
+  background: var(--bg-deep);
+  border-radius: var(--radius-sm);
 }
 
 .field {

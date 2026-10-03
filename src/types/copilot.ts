@@ -37,16 +37,35 @@ export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   vision: false,
 };
 
+export type CopilotField = 'baseUrl' | 'apiKey' | 'model';
+
+function isLoopback(url: URL): boolean {
+  return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+}
+
+/**
+ * What is still missing before the copilot can run. The single source for the worker, the chat
+ * notice, the Opciones summary and the amber dot. The key is optional only for a loopback endpoint.
+ */
+export function copilotMissing(settings: CopilotSettings): CopilotField[] {
+  const missing: CopilotField[] = [];
+  let loopback = false;
+  try {
+    const url = new URL(String(settings.baseUrl).trim());
+    loopback = isLoopback(url);
+    const safe = !url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
+    if (!safe) missing.push('baseUrl');
+  } catch {
+    missing.push('baseUrl');
+  }
+  if (!loopback && !(typeof settings.apiKey === 'string' && settings.apiKey.trim())) missing.push('apiKey');
+  if (typeof settings.model !== 'string' || !settings.model.trim()) missing.push('model');
+  return missing;
+}
+
 /** Shared by the panel and worker: no browser data is sent before setup. */
 export function isCopilotConfigured(settings: CopilotSettings): boolean {
-  if (typeof settings.baseUrl !== 'string' || typeof settings.model !== 'string' || !settings.model.trim()) return false;
-  try {
-    const url = new URL(settings.baseUrl.trim());
-    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
-    return !url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
-  } catch {
-    return false;
-  }
+  return copilotMissing(settings).length === 0;
 }
 
 /** One finished turn of the visible conversation (tool traffic stays in the worker). */
