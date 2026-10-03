@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copia versionada en este fork del subset de aserciones de
 # ~/mcp-servers/agent-browser/scripts/check-deltas.sh que le toca a la extension
-# (deltas 2, 2b y 3-10). Ruling CTO DGX-309: el script compartido NO se mueve ni
+# (deltas 2, 2b y 3-16). Ruling CTO DGX-309: el script compartido NO se mueve ni
 # se cambia (lo usa el timer systemd de producción); esta copia está adaptada
 # a un checkout de un solo repo, con rutas relativas a la raíz del repo.
 # Un auto-update que revierta cualquiera de estos es un FALLO, no un exito.
@@ -34,4 +34,6 @@ chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" 
 chk "13 foco emulado: la entrada llega a pestañas en segundo plano" grep -q "Emulation.setFocusEmulationEnabled" src/background/tab-manager.ts
 chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
 chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "UPDATE_PERIOD_MINUTES = 30" src/background/update-check.ts && grep -q "onStartup" src/background/index.ts'
+# INFRA-421: el botón de la barra abre el side panel (sin popup) y la provisión del copiloto corre al arrancar.
+chk "16 el botón abre el side panel, sin popup"         bash -c 'grep -q "openPanelOnActionClick: true" src/background/index.ts && ! grep -q default_popup manifest.json'
 exit $fail

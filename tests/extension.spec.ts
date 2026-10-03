@@ -171,27 +171,28 @@ test('extension loads successfully', async () => {
     };
   });
   expect(manifest.name).toBe(EXTENSION_NAME);
-  expect(manifest.popup).toBe('src/popup/index.html');
+  expect(manifest.popup).toBe('');
 });
 
-test('popup renders status panel and reads server config from background', async () => {
-  const popup = await context.newPage();
+test('Opciones renders the MCP status and reads server config from background', async () => {
+  const panel = await context.newPage();
   try {
-    await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
-    await expect(popup.getByRole('heading', { name: 'Agent Jake Browser' })).toBeVisible();
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await panel.getByRole('button', { name: 'Opciones' }).first().click();
+    await expect(panel.getByRole('heading', { name: 'Conexión MCP' })).toBeVisible();
 
     // The 'En uso:' hint renders only after getServerConfig round-trips
-    // through the background service worker, so this proves popup <-> SW
+    // through the background service worker, so this proves panel <-> SW
     // messaging, not just a static shell.
-    await expect(popup.getByText('En uso: ws://127.0.0.1:8765')).toBeVisible({ timeout: 15000 });
+    await expect(panel.getByText('En uso: ws://127.0.0.1:8765')).toBeVisible({ timeout: 15000 });
 
     // With no MCP WebSocket server listening on 8765, the indicator must
     // report the real state from getStatus: OFFLINE.
-    await expect(popup.locator('.mcp-indicator .indicator-value')).toHaveText('OFFLINE', {
+    await expect(panel.locator('.mcp-indicator .indicator-value')).toHaveText('OFFLINE', {
       timeout: 15000,
     });
   } finally {
-    await popup.close();
+    await panel.close();
   }
 });
 
@@ -199,10 +200,9 @@ test('copilot panel opens in a fresh install without contacting a model', async 
   const panel = await context.newPage();
   try {
     await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
-    await expect(panel.getByText('Pide algo sobre esta página u otras pestañas.')).toBeVisible();
+    // Without settings the panel opens on Opciones, with the endpoint empty and Guardar off.
     await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue('');
     await expect(panel.getByRole('button', { name: 'Guardar' })).toBeDisabled();
-    await expect(panel.locator('textarea')).toBeDisabled();
   } finally {
     await panel.close();
   }

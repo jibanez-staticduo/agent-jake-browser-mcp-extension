@@ -70,6 +70,11 @@ chrome.commands.onCommand.addListener((command, tab) => {
   }
 });
 
+// The toolbar button opens the side panel (no popup): the click is the user gesture.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+  log.warn('[Copilot] Could not set the panel behavior:', error);
+});
+
 /**
  * Initialize the extension.
  */

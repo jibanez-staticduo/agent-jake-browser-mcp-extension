@@ -6,7 +6,6 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-  COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
@@ -19,6 +18,7 @@ import {
   type WorkerToPanel,
 } from '@/types/copilot';
 import { renderMarkdown } from './markdown';
+import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
@@ -50,11 +50,11 @@ const running = ref(false);
 const step = ref(0);
 const target = ref<Target | null>(null);
 const pinned = ref(false);
-const panel = ref<'none' | 'settings' | 'history'>('none');
+const panel = ref<'none' | 'history'>('none');
+const view = ref<'chat' | 'options'>('chat');
 const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
 const models = ref<string[]>([]);
 const modelsError = ref('');
-const allowed = ref<string[]>([]);
 const planOpen = ref(true);
 const log = ref<HTMLElement | null>(null);
 const textarea = ref<HTMLTextAreaElement | null>(null);
@@ -167,7 +167,7 @@ function onWorker(event: WorkerToPanel) {
       break;
     case 'mode':
       settings.value.mode = event.mode;
-      void saveSettings(false);
+      void saveSettings();
       break;
     case 'assistant': {
       const s = streamingItem();
@@ -244,7 +244,7 @@ function cycleMode() {
 
 function setMode(mode: CopilotMode) {
   settings.value.mode = mode;
-  void saveSettings(false);
+  void saveSettings();
 }
 
 function onKey(e: KeyboardEvent) {
@@ -285,13 +285,11 @@ async function removeChat(c: Chat) {
   if (c.id === chat.value.id) chat.value = newChat();
 }
 
-async function saveSettings(close = true) {
+async function saveSettings(next?: CopilotSettings) {
+  if (next) settings.value = next;
   if (!isCopilotConfigured(settings.value)) return;
   await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: { ...settings.value } });
-  if (close) {
-    panel.value = 'none';
-    void loadModels();
-  }
+  if (next) void loadModels();
 }
 
 async function loadModels() {
@@ -311,22 +309,12 @@ async function loadModels() {
 }
 
 function onModelChange() {
-  void saveSettings(false);
+  void saveSettings();
 }
 
-async function loadAllowed() {
-  const stored = await chrome.storage.local.get(COPILOT_ALLOWED_ORIGINS_KEY);
-  allowed.value = Array.isArray(stored[COPILOT_ALLOWED_ORIGINS_KEY]) ? stored[COPILOT_ALLOWED_ORIGINS_KEY] as string[] : [];
-}
-
-async function forgetOrigin(origin: string) {
-  allowed.value = allowed.value.filter((o) => o !== origin);
-  await chrome.storage.local.set({ [COPILOT_ALLOWED_ORIGINS_KEY]: allowed.value });
-}
-
-async function toggleSettings() {
-  panel.value = panel.value === 'settings' ? 'none' : 'settings';
-  if (panel.value === 'settings') await loadAllowed();
+function openOptions() {
+  panel.value = 'none';
+  view.value = 'options';
 }
 
 async function refreshTarget() {
@@ -354,7 +342,7 @@ onMounted(async () => {
   windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
-  if (needsSetup.value) panel.value = 'settings';
+  if (needsSetup.value) view.value = 'options';
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -396,6 +384,9 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
 
 <template>
   <div class="panel">
+    <OptionsView v-if="view === 'options'" class="grow" :settings="settings"
+      @back="view = 'chat'" @save="saveSettings" />
+    <template v-else>
     <header>
       <div class="target" :title="target?.url">
         <span class="dot" :class="{ pinned }" />
@@ -407,25 +398,11 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           @click="pinned = !pinned; refreshTarget()">📌</button>
         <button class="icon" title="Nueva conversación" :disabled="running" @click="startNewChat">✚</button>
         <button class="icon" :class="{ on: panel === 'history' }" title="Conversaciones" @click="openHistory">🕘</button>
-        <button class="icon" :class="{ on: panel === 'settings' }" title="Ajustes" @click="toggleSettings">⚙</button>
+        <button class="opts" :class="{ on: view === 'options', warn: needsSetup }" @click="view = view === 'options' ? 'chat' : 'options'">Opciones</button>
       </div>
     </header>
 
-    <form v-if="panel === 'settings'" class="drawer settings" @submit.prevent="saveSettings()">
-      <label>Endpoint (OpenAI-compatible)<input v-model="settings.baseUrl" placeholder="https://…/v1"></label>
-      <label>API key<input v-model="settings.apiKey" type="password" autocomplete="off"></label>
-      <div class="row">
-        <label>Pasos máx.<input v-model.number="settings.maxSteps" type="number" min="1" max="100"></label>
-        <label class="check"><input v-model="settings.vision" type="checkbox"> Visión (capturas al modelo)</label>
-      </div>
-      <div v-if="allowed.length" class="allowed">
-        <span>Sitios con permiso permanente (modo Preguntar):</span>
-        <div v-for="o in allowed" :key="o" class="origin">{{ o }} <button type="button" class="icon" @click="forgetOrigin(o)">✕</button></div>
-      </div>
-      <button type="submit" :disabled="needsSetup">Guardar</button>
-    </form>
-
-    <div v-else-if="panel === 'history'" class="drawer history">
+    <div v-if="panel === 'history'" class="drawer history">
       <p v-if="!chats.length" class="muted">No hay conversaciones guardadas.</p>
       <div v-for="c in chats" :key="c.id" class="chat-row" :class="{ current: c.id === chat.id }">
         <button class="link" @click="openChat(c)">{{ c.title }}</button>
@@ -497,22 +474,26 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <button v-else class="send" :disabled="!input.trim() || needsSetup" @click="send">↑</button>
       </div>
     </footer>
+    </template>
   </div>
 </template>
 
 <style>
 html, body { margin: 0; height: 100%; }
-body {
+html body {
+  width: auto; /* popup/styles/base.css fixes 340px for the old popup */
   background: var(--bg-deepest);
   color: var(--text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
 }
 #app { height: 100%; }
+body::before { display: none; } /* base.css scanline overlay: not in the panel */
 </style>
 
 <style scoped>
 .panel { display: flex; flex-direction: column; height: 100%; }
+.grow { flex: 1; overflow-y: auto; }
 header {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   border-bottom: 1px solid var(--border-default); background: var(--bg-deep);
@@ -528,6 +509,9 @@ button {
   border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit;
 }
 button:disabled { opacity: 0.4; cursor: default; }
+button.opts { padding: 4px 10px; min-height: 32px; }
+button.opts.on { border-color: var(--accent-primary); }
+button.opts.warn { border-color: var(--accent-warning); }
 button.icon { background: none; border: none; padding: 4px 6px; opacity: 0.6; }
 button.icon.on, button.icon:hover:not(:disabled) { opacity: 1; }
 button.link { background: none; border: none; padding: 0; text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
