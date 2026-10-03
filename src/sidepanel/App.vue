@@ -18,6 +18,7 @@ import {
   type WorkerToPanel,
 } from '@/types/copilot';
 import { renderMarkdown } from './markdown';
+import ModelPicker from './ModelPicker.vue';
 import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
@@ -55,6 +56,7 @@ const view = ref<'chat' | 'options'>('chat');
 const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
 const models = ref<string[]>([]);
 const modelsError = ref('');
+const modelsLoading = ref(false);
 const planOpen = ref(true);
 const log = ref<HTMLElement | null>(null);
 const textarea = ref<HTMLTextAreaElement | null>(null);
@@ -66,8 +68,6 @@ const items = computed(() => chat.value.items);
 const plan = computed(() => chat.value.plan);
 const needsSetup = computed(() => !isCopilotConfigured(settings.value));
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
-const modelOptions = computed(() =>
-  models.value.includes(settings.value.model) ? models.value : [settings.value.model, ...models.value]);
 /** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
 type Block = { key: number; item: Item } | { key: number; steps: Item[] };
 
@@ -295,6 +295,7 @@ async function saveSettings(next?: CopilotSettings) {
 async function loadModels() {
   modelsError.value = '';
   if (!isCopilotConfigured(settings.value)) return;
+  modelsLoading.value = true;
   try {
     const base = settings.value.baseUrl.trim().replace(/\/+$/, '');
     const res = await fetch(`${base}/models`, {
@@ -304,7 +305,9 @@ async function loadModels() {
     const data = await res.json() as { data?: { id: string }[] };
     models.value = chatModels((data.data ?? []).map((m) => m.id));
   } catch (error) {
-    modelsError.value = `No pude listar modelos: ${(error as Error).message}`;
+    modelsError.value = `No pude listar modelos: ${(error as Error).message}.`;
+  } finally {
+    modelsLoading.value = false;
   }
 }
 
@@ -494,9 +497,8 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           <button v-for="m in MODES" :key="m.id" type="button" class="mode" :class="[m.id, { on: settings.mode === m.id }]"
             :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
         </div>
-        <select v-model="settings.model" class="model" :title="modelsError || 'Modelo'" @change="onModelChange">
-          <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
-        </select>
+        <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+          @update:model-value="onModelChange" @options="openOptions" />
         <button v-if="running" class="stop" @click="stop">Stop</button>
         <button v-else class="send" :disabled="!input.trim() || needsSetup" @click="send">↑</button>
       </div>
@@ -605,6 +607,5 @@ footer textarea { resize: none; }
 .mode.on.ask { background: var(--accent-warning-dim); color: var(--text-primary); }
 .mode.on.auto { background: var(--accent-success-dim); color: var(--text-primary); }
 .mode.on.plan { background: var(--accent-secondary-dim); color: var(--text-primary); }
-.model { flex: 1; min-width: 0; padding: 4px 6px; }
 .send { font-weight: 700; }
 </style>

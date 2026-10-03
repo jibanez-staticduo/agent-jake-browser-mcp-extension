@@ -67,8 +67,49 @@ export async function currentChatId(): Promise<string | null> {
   return typeof stored[CURRENT_CHAT_KEY] === 'string' ? stored[CURRENT_CHAT_KEY] as string : null;
 }
 
+/** The resident local model: first in its group and the default (DEFAULT_COPILOT_SETTINGS.model). */
+const RESIDENT = 'qwen38-flash-next';
+const NON_CHAT = /(bge|embed|rerank|whisper|stt|tts|omnivoice|imagine|image|video|probe)/i;
+
 /** Models a chat composer should offer: drop embeddings, audio, image and probes. */
 export function chatModels(ids: string[]): string[] {
-  const nonChat = /(bge|embed|rerank|whisper|stt|tts|omnivoice|imagine|image|video|probe)/i;
-  return [...new Set(ids.filter((id) => !nonChat.test(id)))].sort();
+  return [...new Set(ids.filter((id) => !NON_CHAT.test(id)))].sort();
+}
+
+export type ModelGroupId = 'local' | 'alibaba' | 'openrouter';
+
+export interface ModelGroup {
+  id: ModelGroupId;
+  label: string;
+  models: string[];
+}
+
+export const MODEL_GROUPS: { id: ModelGroupId; label: string }[] = [
+  { id: 'local', label: 'Local · gratis' },
+  { id: 'alibaba', label: 'Plan Alibaba' },
+  { id: 'openrouter', label: 'Pago · OpenRouter' },
+];
+
+export function modelGroupOf(id: string): ModelGroupId {
+  if (id.startsWith('alibaba-')) return 'alibaba';
+  if (id.startsWith('or-')) return 'openrouter';
+  return 'local';
+}
+
+/** Chat models split by where they run (LiteLLM alias prefix), local resident first, then A-Z. */
+export function groupChatModels(ids: string[]): ModelGroup[] {
+  const chat = chatModels(ids);
+  return MODEL_GROUPS
+    .map((g) => ({
+      ...g,
+      models: chat.filter((id) => modelGroupOf(id) === g.id)
+        .sort((a, b) => Number(b === RESIDENT) - Number(a === RESIDENT) || a.localeCompare(b)),
+    }))
+    .filter((g) => g.models.length);
+}
+
+/** Readable name for a LiteLLM alias: group prefix off, words capitalised ("alibaba-q38-max" -> "Q38 Max"). */
+export function modelLabel(id: string): string {
+  return id.replace(/^(alibaba|or)-/, '').split('-').filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || id;
 }
