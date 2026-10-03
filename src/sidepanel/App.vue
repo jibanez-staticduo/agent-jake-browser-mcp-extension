@@ -336,6 +336,12 @@ const onRemoved = (tabId: number) => {
   }
 };
 
+// The service worker may seed the settings (provision.ts) after the panel is open.
+const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+  const next = changes[COPILOT_SETTINGS_KEY]?.newValue as Partial<CopilotSettings> | undefined;
+  if (area === 'local' && next) settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...next };
+};
+
 onMounted(async () => {
   // ?windowId=N: the panel runs detached in its own window and follows N's active tab.
   const detached = Number(new URLSearchParams(location.search).get('windowId'));
@@ -358,12 +364,14 @@ onMounted(async () => {
   chrome.tabs.onActivated.addListener(onActivated);
   chrome.tabs.onUpdated.addListener(onUpdated);
   chrome.tabs.onRemoved.addListener(onRemoved);
+  chrome.storage.onChanged.addListener(onStorage);
 });
 
 onUnmounted(() => {
   chrome.tabs.onActivated.removeListener(onActivated);
   chrome.tabs.onUpdated.removeListener(onUpdated);
   chrome.tabs.onRemoved.removeListener(onRemoved);
+  chrome.storage.onChanged.removeListener(onStorage);
   port?.disconnect();
 });
 

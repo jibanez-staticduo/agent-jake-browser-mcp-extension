@@ -23,6 +23,7 @@ import {
   startPairing,
 } from './pairing';
 import { log } from '@/utils/logger';
+import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
 import {
   UPDATE_ALARM,
@@ -155,7 +156,15 @@ async function ensureUpdateAlarm(): Promise<void> {
   }
 }
 
+/** Copilot endpoint/key seeded by the build (provision.ts); runs on install, reload and browser start. */
+function runProvision(): void {
+  provisionCopilot(buildProvision(), chromeProvisionStorage()).catch((error) => {
+    log.warn('[Provision] copilot settings not seeded:', error);
+  });
+}
+
 chrome.runtime.onStartup.addListener(() => {
+  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });
@@ -429,6 +438,7 @@ async function handlePopupMessage(message: {
  */
 chrome.runtime.onInstalled.addListener((details) => {
   log.info(`Extension installed: ${details.reason}`);
+  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });
