@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chatModels, groupChatModels, humanizeModel, isPaidModel, modelGroupOf, modelLabel } from '@/sidepanel/chats';
+import { chatModels, groupChatModels, humanizeModel, isExternalModel, modelGroupOf, modelLabel } from '@/sidepanel/chats';
 
 /**
  * model_name ids of k8s-litellm-pocharlies/k8s/manifest.yaml (chat aliases, 2026-10-03):
@@ -119,10 +119,10 @@ describe('modelLabel', () => {
   });
 });
 
-describe('isPaidModel', () => {
-  it('marks only the OpenRouter group as paid', () => {
-    expect(isPaidModel('or-glm')).toBe(true);
-    expect(isPaidModel('alibaba-glm-53')).toBe(false);
-    expect(isPaidModel('qwen38-flash-next')).toBe(false);
+describe('isExternalModel', () => {
+  it('marks only the OpenRouter group as external', () => {
+    expect(isExternalModel('or-glm')).toBe(true);
+    expect(isExternalModel('alibaba-glm-53')).toBe(false);
+    expect(isExternalModel('qwen38-flash-next')).toBe(false);
   });
 });

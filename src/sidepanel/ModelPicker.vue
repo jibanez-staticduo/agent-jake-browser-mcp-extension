@@ -4,11 +4,12 @@
  * models grouped Local / Alibaba / OpenRouter (grouping and filtering live in chats.ts).
  */
 import { computed, nextTick, ref, watch } from 'vue';
-import { MODEL_GROUPS, groupChatModels, isPaidModel, modelGroupOf, modelLabel } from './chats';
+import { MODEL_GROUPS, groupChatModels, isExternalModel, modelGroupOf, modelLabel } from './chats';
 
 const props = defineProps<{ modelValue: string; models: string[]; loading: boolean; error: string }>();
 const emit = defineEmits<{ 'update:modelValue': [id: string]; options: [] }>();
 
+const EXTERNAL_HINT = 'Este modelo corre fuera de casa: tus datos salen a un tercero.';
 const open = ref(false);
 const query = ref('');
 const cursor = ref(0);
@@ -73,7 +74,7 @@ function onKey(e: KeyboardEvent) {
   <button ref="chipEl" type="button" class="chip" :title="`Modelo: ${modelValue} · ${groupLabel(modelValue)}`" aria-haspopup="dialog"
     :aria-expanded="open" @click="show">
     <span class="name">{{ modelLabel(modelValue) }}</span>
-    <span v-if="isPaidModel(modelValue)" class="paid">Pago</span>
+    <span v-if="isExternalModel(modelValue)" class="external" :title="EXTERNAL_HINT">Externo</span>
     <span class="grp">{{ groupLabel(modelValue) }}</span>
     <span aria-hidden="true">▾</span>
   </button>
@@ -96,7 +97,7 @@ function onKey(e: KeyboardEvent) {
             :class="{ current: id === modelValue, cursor: flat[cursor] === id }" :aria-selected="id === modelValue" @click="pick(id)">
             <span class="rname">{{ modelLabel(id) }}<code>{{ id }}</code></span>
             <span class="tags">
-              <span v-if="isPaidModel(id)" class="paid">Pago</span>
+              <span v-if="isExternalModel(id)" class="external" :title="EXTERNAL_HINT">Externo</span>
               <span v-if="id === modelValue" class="cur">✓ Actual</span>
             </span>
           </button>
@@ -110,7 +111,7 @@ function onKey(e: KeyboardEvent) {
 
 <style scoped>
 .chip { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; background: var(--bg-elevated); }
-.paid { border: 1px solid var(--accent-warning); color: var(--accent-warning); border-radius: 4px; padding: 0 5px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.external { border: 1px solid var(--accent-warning); color: var(--accent-warning); border-radius: 4px; padding: 0 5px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
 .tags { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 @media (max-width: 379px) { .chip .grp { display: none; } }
 .chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }

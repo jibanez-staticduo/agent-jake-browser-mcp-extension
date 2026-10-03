@@ -87,7 +87,7 @@ export interface ModelGroup {
 export const MODEL_GROUPS: { id: ModelGroupId; label: string }[] = [
   { id: 'local', label: 'Local · gratis' },
   { id: 'alibaba', label: 'Plan Alibaba' },
-  { id: 'openrouter', label: 'Pago · OpenRouter' },
+  { id: 'openrouter', label: 'Externo · OpenRouter' },
 ];
 
 export function modelGroupOf(id: string): ModelGroupId {
@@ -166,7 +166,7 @@ export function modelLabel(id: string): string {
   return MODEL_NAMES[id] ?? humanizeModel(id);
 }
 
-/** OpenRouter models are the paid group: the picker and the composer chip carry a «Pago» badge. */
-export function isPaidModel(id: string): boolean {
+/** OpenRouter models run outside our infrastructure (your data leaves for a third party): the picker and the composer chip carry an «Externo» badge. */
+export function isExternalModel(id: string): boolean {
   return modelGroupOf(id) === 'openrouter';
 }
