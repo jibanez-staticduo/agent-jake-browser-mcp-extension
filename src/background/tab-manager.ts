@@ -132,9 +132,6 @@ export class TabManager {
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
   private fileChooserInProgress = false;
   private webauthnPinScript: { tabId: number; identifier: string } | null = null;
-  private frontTail: Promise<unknown> = Promise.resolve();
-  private pendingRestore: { tabId: number; previousTabId: number; timer: ReturnType<typeof setTimeout> } | null = null;
-  static readonly RESTORE_DELAY_MS = 1500;
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
   /**
@@ -274,7 +271,6 @@ export class TabManager {
 
     this.disconnecting = true;
     const tabId = this.connectedTabId;
-    await this.flushPendingRestore().catch(() => undefined);
     if (this.frameCommitListener) {
       chrome.webNavigation.onCommitted.removeListener(this.frameCommitListener);
       this.frameCommitListener = null;
@@ -406,6 +402,16 @@ export class TabManager {
       } catch (enableError) {
         log.warn(`${domain} domain not enabled:`, enableError);
       }
+    }
+
+    // A hidden tab gets no CDP mouse/key input at all (Chrome, measured with an http page: 0
+    // events, while the tools answered "clicked"/"typed") and paints lazily. With focus
+    // emulation the page counts as visible and focused: it gets the input and paints for the
+    // capture, so nothing has to bring the agent's tab in front of the user.
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+    } catch (error) {
+      log.warn('Focus emulation not enabled: input to a hidden tab will be lost', error);
     }
 
     await this.installWebAuthnGuard(tabId);
@@ -844,134 +850,6 @@ export class TabManager {
         chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, () => undefined);
       }
     });
-  }
-
-  /**
-   * Activate a tab inside its own window (no window focus change).
-   * Returns the tab that was active there before, or null when the tab was
-   * already in front — callers use it as the token for restoreTabBehind.
-   */
-  async bringTabToFront(tabId: number): Promise<number | null> {
-    const tab = await chrome.tabs.get(tabId);
-    const [previous] = await chrome.tabs.query({
-      windowId: tab.windowId,
-      active: true,
-    });
-    if (previous?.id === tabId) {
-      return null;
-    }
-    await chrome.tabs.update(tabId, { active: true });
-    return previous?.id ?? null;
-  }
-
-  /**
-   * Run fn with the connected tab in front of its window and put the previously visible tab
-   * back once the actions stop (scheduleRestore; not if the user switched meanwhile). CDP input — mouse and keys — does
-   * not reach a hidden tab in the x86 Chrome: the tools answered "clicked"/"typed" and the page
-   * got no event at all. A capture of a hidden tab paints unreliably too. The user sees a flash.
-   *
-   * Serialized: commands from several MCP sessions arrive concurrently, and without the queue
-   * one action's restore hid the tab while another was still typing into it. An action that
-   * waited its turn while the connected tab changed under it fails instead of acting on
-   * someone else's tab.
-   */
-  async withTabInFront<T>(fn: () => Promise<T>): Promise<T> {
-    const tabId = this.connectedTabId;
-    const run = async (): Promise<T> => {
-      if (!tabId) return fn();
-      if (this.connectedTabId !== tabId) {
-        throw new Error(`CONNECTED_TAB_CHANGED: the connected tab changed from ${tabId} to ${this.connectedTabId} while this action waited its turn; nothing was done`);
-      }
-      const pendingPrevious = await this.takePendingRestore(tabId);
-      const brought = await this.bringTabToFront(tabId);
-      const previousTabId = brought ?? pendingPrevious;
-      try {
-        if (brought !== null) await this.waitUntilVisible(tabId);
-        return await fn();
-      } finally {
-        this.scheduleRestore(tabId, previousTabId);
-      }
-    };
-    const result = this.frontTail.then(run, run);
-    this.frontTail = result.catch(() => undefined);
-    return result;
-  }
-
-  /**
-   * The user's tab comes back RESTORE_DELAY_MS after the last action, not after each one: an
-   * agent's burst (click, type, type, Enter) is one flash instead of four. The restore goes
-   * through the same queue, so it never lands in the middle of an action.
-   */
-  private scheduleRestore(tabId: number, previousTabId: number | null): void {
-    if (previousTabId === null) return;
-    const timer = setTimeout(() => {
-      if (this.pendingRestore?.timer !== timer) return;
-      this.pendingRestore = null;
-      this.frontTail = this.frontTail
-        .then(() => this.restoreTabBehind(tabId, previousTabId))
-        .catch(() => undefined);
-    }, TabManager.RESTORE_DELAY_MS);
-    this.pendingRestore = { tabId, previousTabId, timer };
-  }
-
-  /**
-   * Cancel the pending restore. For the same tab, hand back the tab to restore later (it is
-   * still in front: nothing to flash); for another tab, restore it now.
-   */
-  private async takePendingRestore(tabId: number): Promise<number | null> {
-    const pending = this.pendingRestore;
-    if (!pending) return null;
-    clearTimeout(pending.timer);
-    this.pendingRestore = null;
-    if (pending.tabId === tabId) return pending.previousTabId;
-    await this.restoreTabBehind(pending.tabId, pending.previousTabId);
-    return null;
-  }
-
-  /** Put the user's tab back now instead of waiting for the delay (disconnect). */
-  async flushPendingRestore(): Promise<void> {
-    const pending = this.pendingRestore;
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    this.pendingRestore = null;
-    await this.restoreTabBehind(pending.tabId, pending.previousTabId);
-  }
-
-  /** After activation the renderer takes a moment to show; poll for it (50 ms, up to 1 s). */
-  private async waitUntilVisible(tabId: number): Promise<void> {
-    const deadline = Date.now() + 1000;
-    while (Date.now() < deadline) {
-      const state = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-        expression: 'document.visibilityState',
-        returnByValue: true,
-      }).catch(() => undefined) as { result?: { value?: unknown } } | undefined;
-      if (state?.result?.value === 'visible') return;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
-
-  /**
-   * Undo a bringTabToFront: put the previously visible tab back, but only if
-   * our tab is still the one in front. If the user switched tabs meanwhile,
-   * their choice wins and we leave it alone.
-   */
-  async restoreTabBehind(tabId: number, previousTabId: number | null): Promise<void> {
-    if (previousTabId === null) {
-      return;
-    }
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      const [current] = await chrome.tabs.query({
-        windowId: tab.windowId,
-        active: true,
-      });
-      if (current?.id !== tabId) {
-        return;
-      }
-      await chrome.tabs.update(previousTabId, { active: true });
-    } catch {
-      // The tab to restore was closed mid-capture; nothing to undo.
-    }
   }
 
   /**
