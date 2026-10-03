@@ -9,7 +9,7 @@ function contextWith(connectedTabId: number) {
   const createTab = vi.fn(async (url: string, _connect: boolean, windowId?: number) => ({
     id: 9, url, title: '', active: false, connected: true, windowId: windowId ?? 50, windowCreated: windowId === undefined,
   }));
-  const closeWindow = vi.fn(async (windowId: number, tabIds?: number[]) => ({ windowId, closed: true, closedTabIds: tabIds ?? [] }));
+  const closeWindow = vi.fn(async (windowId: number, tabIds: number[]) => ({ windowId, closed: true, closedTabIds: tabIds }));
   const ctx = { tabManager: { closeTab, listTabs, createTab, closeWindow } } as unknown as HandlerContext;
   return { handlers: createTabHandlers(ctx), closeTab, createTab, closeWindow };
 }
@@ -89,6 +89,13 @@ describe('browser_close_window', () => {
 
     expect(closeWindow).toHaveBeenCalledWith(30, [5, 6]);
     expect(answer).toEqual({ windowId: 30, closed: true, closedTabIds: [5, 6] });
+  });
+
+  it('rejects a payload without tabIds: it would close nothing it was told to', async () => {
+    const { handlers, closeWindow } = contextWith(7);
+
+    await expect(handlers.browser_close_window({ windowId: 30 })).rejects.toThrow();
+    expect(closeWindow).not.toHaveBeenCalled();
   });
 
   it('rejects a payload without windowId', async () => {

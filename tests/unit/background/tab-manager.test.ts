@@ -628,14 +628,16 @@ describe('TabManager background-tab control', () => {
       expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
     });
 
-    it('closes the whole window when only its own tabs are inside, and forgets it', async () => {
+    it('closes its own tabs one by one, reports the window gone and forgets it; windows.remove is never used', async () => {
       const manager = new TabManager();
       sessionStore['ajb.agentWindows'] = [30, 31];
       mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
+      mockChrome.windows.get.mockRejectedValue(new Error('No window with id: 30'));
 
       const answer = await manager.closeWindow(30, [5, 6]);
 
-      expect(mockChrome.windows.remove).toHaveBeenCalledWith(30);
+      expect(mockChrome.tabs.remove).toHaveBeenCalledTimes(2);
+      expect(mockChrome.windows.remove).not.toHaveBeenCalled();
       expect(answer).toEqual({ windowId: 30, closed: true, closedTabIds: [5, 6] });
       expect(sessionStore['ajb.agentWindows']).toEqual([31]);
     });
@@ -644,6 +646,7 @@ describe('TabManager background-tab control', () => {
       const manager = new TabManager();
       sessionStore['ajb.agentWindows'] = [30];
       mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 77 }]);
+      mockChrome.windows.get.mockResolvedValue({ id: 30 });
 
       const answer = await manager.closeWindow(30, [5]);
 
@@ -651,12 +654,39 @@ describe('TabManager background-tab control', () => {
       expect(mockChrome.tabs.remove).toHaveBeenCalledWith(5);
       expect(mockChrome.windows.remove).not.toHaveBeenCalled();
       expect(answer).toEqual({ windowId: 30, closed: false, closedTabIds: [5] });
+      expect(sessionStore['ajb.agentWindows']).toEqual([30]);
+    });
+
+    it('without tabIds (empty or missing) closes nothing', async () => {
+      const manager = new TabManager();
+      sessionStore['ajb.agentWindows'] = [30];
+      mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 77 }]);
+      mockChrome.windows.get.mockResolvedValue({ id: 30 });
+
+      expect(await manager.closeWindow(30, [])).toEqual({ windowId: 30, closed: false, closedTabIds: [] });
+      await manager.closeWindow(30, undefined as unknown as number[]).catch(() => undefined);
+      expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
+      expect(mockChrome.windows.remove).not.toHaveBeenCalled();
+    });
+
+    it('closeTab forgets an agent window that closed with its last tab', async () => {
+      const manager = new TabManager();
+      sessionStore['ajb.agentWindows'] = [30, 31];
+      mockChrome.windows.get.mockImplementation(async (id: number) => {
+        if (id === 30) throw new Error('No window');
+        return { id };
+      });
+
+      await manager.closeTab(5);
+
+      expect(sessionStore['ajb.agentWindows']).toEqual([31]);
     });
 
     it('survives a service-worker restart: a new manager still knows the window', async () => {
       windowCreates(30, 5);
       await new TabManager().createTab('https://example.com', false);
       mockChrome.tabs.query.mockResolvedValue([{ id: 5 }]);
+      mockChrome.windows.get.mockRejectedValue(new Error('No window'));
 
       const answer = await new TabManager().closeWindow(30, [5]);
 

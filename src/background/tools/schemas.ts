@@ -81,7 +81,9 @@ export const schemas = {
   // Internal message from the server's tab reaper, not an MCP tool.
   browser_close_window: z.object({
     windowId: z.number().int(),
-    tabIds: z.array(z.number().int()).optional(),
+    // Required: without the caller's tab ids nothing is closed, so a window can never drag along
+    // tabs that are not the caller's.
+    tabIds: z.array(z.number().int()),
   }),
 
   browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),

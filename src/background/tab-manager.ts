@@ -894,6 +894,15 @@ export class TabManager {
     }
   }
 
+  /** Forget the registered windows that no longer exist (a closed tab may have been the last). */
+  private async pruneAgentWindows(): Promise<void> {
+    const windows = await this.loadAgentWindows();
+    for (const id of [...windows]) {
+      if (!await this.windowExists(id)) windows.delete(id);
+    }
+    await this.saveAgentWindows(windows);
+  }
+
   private async isAgentWindow(windowId: number): Promise<boolean> {
     return (await this.loadAgentWindows()).has(windowId);
   }
@@ -910,35 +919,29 @@ export class TabManager {
   }
 
   /**
-   * Close a window this extension created for the agent. `tabIds` are the tabs the caller owns:
-   * only those are closed, and the window is closed whole (`closed: true`) only when nothing else
-   * is inside it. A tab of the user's dragged into the window is never closed.
+   * Close the tabs a caller owns inside a window this extension created for the agent.
+   * `tabIds` is required: nothing is closed that is not named in it, and an empty list closes
+   * nothing. Chrome closes the window by itself when its last tab goes, so `windows.remove` is
+   * never called: it would take along any tab of the user's dragged into the window in the
+   * meantime. `closed` says whether the window is gone afterwards.
    */
-  async closeWindow(windowId: number, tabIds?: number[]): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
+  async closeWindow(windowId: number, tabIds: number[]): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
     if (!await this.isAgentWindow(windowId)) {
       const err = new Error(`NOT_AGENT_WINDOW: window ${windowId} was not created by the agent; nothing was closed`);
       err.name = 'NOT_AGENT_WINDOW';
       throw err;
     }
 
-    let inside: chrome.tabs.Tab[] = [];
+    let insideIds: number[] = [];
     try {
-      inside = await chrome.tabs.query({ windowId });
+      insideIds = (await chrome.tabs.query({ windowId })).map((t) => t.id).filter((id): id is number => id !== undefined);
     } catch {
       // the window is gone
     }
-    const insideIds = inside.map((t) => t.id).filter((id): id is number => id !== undefined);
-    const ours = tabIds ? tabIds.filter((id) => insideIds.includes(id)) : insideIds;
-    const foreign = insideIds.filter((id) => !ours.includes(id));
+    const ours = tabIds.filter((id) => insideIds.includes(id));
 
     if (this.connectedTabId !== null && ours.includes(this.connectedTabId)) {
       await this.disconnectTab();
-    }
-    if (foreign.length === 0) {
-      await chrome.windows.remove(windowId).catch(() => undefined);
-      await this.forgetAgentWindow(windowId);
-      log.info(`Closed agent window: ${windowId}`);
-      return { windowId, closed: true, closedTabIds: ours };
     }
     const closedTabIds: number[] = [];
     for (const id of ours) {
@@ -949,7 +952,12 @@ export class TabManager {
         // already gone
       }
     }
-    return { windowId, closed: false, closedTabIds };
+    const closed = !await this.windowExists(windowId);
+    if (closed) {
+      await this.forgetAgentWindow(windowId);
+      log.info(`Closed agent window: ${windowId}`);
+    }
+    return { windowId, closed, closedTabIds };
   }
 
   /**
@@ -1008,6 +1016,7 @@ export class TabManager {
 
     await chrome.tabs.remove(targetTabId);
     log.info(`Closed tab: ${targetTabId}`);
+    await this.pruneAgentWindows();
     return targetTabId;
   }
 
