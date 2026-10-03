@@ -232,7 +232,7 @@ export async function runAgent(
   settings: CopilotSettings,
   deps: AgentDeps,
 ): Promise<string> {
-  if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint and model before using Copilot.');
+  if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
   let mode: CopilotMode = settings.mode;
   const context = await deps.getContext();
   const messages: ChatMessage[] = [

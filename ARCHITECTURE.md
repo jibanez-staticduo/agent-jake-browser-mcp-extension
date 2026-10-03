@@ -4,20 +4,20 @@ Extensión de Chrome (Manifest V3) que deja a un agente controlar un navegador r
 
 ## Clientes y versiones
 
-- Un único cliente: el navegador Chrome donde se instala (Mac y x86; el servidor las distingue por nombre de conexión), con dos superficies: el popup y el side panel (copiloto, Alt+J) en `src/sidepanel/`.
+- Un único cliente: el navegador Chrome donde se instala (Mac y x86; el servidor las distingue por nombre de conexión), con una sola superficie: el side panel (`src/sidepanel/`). El botón de la barra lo abre (`setPanelBehavior({ openPanelOnActionClick: true })`, sin `default_popup`) y Alt+J también. El popup se retiró (INFRA-421).
 - Versión 2.4.0 (`package.json` y `manifest.json` coinciden; el nombre del manifiesto es «Browser Harness (pocharlies)»).
 - Consumidor: `pocharlies-org/agent-browser-server` (protocolo WebSocket con token). No hay iOS, Mac nativo ni API pública.
 
 ## Dependencias (en ambos sentidos)
 
 - Depende de: `agent-browser-server` (WebSocket; la extensión se empareja con un token que emite el servidor, `src/background/pairing.ts`) y de las API de Chrome `debugger`, `scripting`, `tabs`, `webNavigation`, `storage`, `alarms`, `sidePanel`.
-- El copiloto del side panel llama a un endpoint OpenAI-compatible que configura el usuario (`baseUrl` en `src/types/copilot.ts`, vacío por defecto), sin servidor de por medio.
+- El copiloto del side panel llama a un endpoint OpenAI-compatible (`baseUrl` en `src/types/copilot.ts`), sin servidor de por medio. Lo siembra la provisión (ver «Decisiones y trampas»); si el usuario lo cambia en Opciones, manda lo suyo.
 - Dependen de ella: el MCP `browser` de las sesiones (vía el servidor) y el despliegue `k8s-agentjake-browser-mcp-pocharlies` (el servidor sirve el zip de la extensión).
 - El protocolo mensaje a mensaje no es un contrato versionado: cambiar un mensaje exige tocar el servidor en el mismo cambio.
 
 ## Stack
 
-TypeScript 5.9, Vue 3.5 + Pinia 3 (popup; el side panel es Vue 3 en `src/sidepanel/`), Vite 7 con `@crxjs/vite-plugin` 2.0.0-beta.33, zod 4, sharp 0.34. Tests: Playwright 1.57 (e2e) y Vitest 2.1 (unitarios). Node 22.23.2 en CI.
+TypeScript 5.9, Vue 3.5 + Pinia 3 (el side panel es Vue 3 en `src/sidepanel/`; Pinia y `popup/styles` se montan en `sidepanel/main.ts`), Vite 7 con `@crxjs/vite-plugin` 2.0.0-beta.33, zod 4, sharp 0.34. Tests: Playwright 1.57 (e2e) y Vitest 2.1 (unitarios). Node 22.23.2 en CI.
 
 ## Componentes compartidos
 
@@ -25,6 +25,7 @@ TypeScript 5.9, Vue 3.5 + Pinia 3 (popup; el side panel es Vue 3 en `src/sidepan
 - `src/content/` (árbol ARIA, selectores, estado compacto): lo único que toca el DOM de la página.
 - `src/background/redact.ts` y `storage-privacy.ts`: redacción de datos sensibles antes de enviar al servidor; no se saltan.
 - `src/background/agent/` (bucle del copiloto): ejecuta las herramientas por el mismo `handleMessage` que el WebSocket MCP, nunca con handlers propios. `src/types/copilot.ts`: tipos y ajustes del copiloto.
+- `src/sidepanel/`: `App.vue` (barra, conversación, composer), `OptionsView.vue` («Opciones»: conexión MCP, pestaña, actividad, aviso de versión y ajustes del copiloto) y `ModelPicker.vue`. Los estilos de botón, campo y foco del panel viven una sola vez en `src/popup/styles/base.css` (y los tokens, con tema oscuro y claro, en `variables.css`; `tests/unit/sidepanel/contrast.test.ts` exige ≥ 4,5:1 al texto en los dos temas); un componente no redefine el botón. «Qué falta» para enviar es `copilotMissing` en `src/types/copilot.ts` (endpoint, key salvo loopback, modelo), la única regla del worker, el chat y Opciones. `src/popup/` ya no tiene entrada propia: queda como librería de componentes y stores que importa Opciones (`ServerSettings`, `ConnectionStatus`, `TabSelector`, `ActivityLog`, `ActivityModal`, `stores/`, `styles/`); no se copian. `chatModels`/`groupChatModels`/`modelLabel` en `src/sidepanel/chats.ts` son la única lista de modelos de chat (grupos Local / Alibaba / OpenRouter por prefijo `alibaba-` / `or-`). `src/background/provision.ts`: siembra de los ajustes del copiloto.
 - `scripts/check-deltas.sh`: aserciones que protegen los cambios propios frente a un auto-update del upstream.
 
 ## Cómo se construye
@@ -53,3 +54,4 @@ Código en `src/` por contexto de ejecución (`background`, `content`, `popup`, 
   - Una extensión anterior a esto ignora `targetTabId` y actúa en la pestaña conectada, como antes.
 - Toda herramienta que actúa sobre un elemento acepta `ref` **o** `selector` (el servidor MCP anuncia los dos); el selector es del frame principal.
 - Los clones de trabajo tienen tres remotos (`origin`, `upstream`, `fork`) y hay clones duplicados en el host (ver C5 de SC-1425).
+- **Provisión de los ajustes del copiloto** (`background/provision.ts`, INFRA-452): `agent-browser-sync` (x86-host-runtime) compila con `VITE_COPILOT_BASE_URL` y `VITE_COPILOT_API_KEY`, leídos de ficheros locales del host fuera de cualquier repo, en los dos builds (x86 y Mac) y nunca en el zip neutro que sirve `/download`. En `onInstalled` y `onStartup` el service worker siembra `chrome.storage.local[copilotSettings]`: sobrescribe `baseUrl`/`apiKey` si lo guardado está vacío o es igual a lo último sembrado (`copilotProvisioned` guarda los SHA-256, no la key), así una key rotada llega al navegador; lo que el usuario cambió en Opciones no se toca. El modelo por defecto es `DEFAULT_COPILOT_SETTINGS.model` (`qwen38-flash-next`). La key queda en el bundle compilado del host (como el token WS): clave virtual de LiteLLM solo de chat, rotable. Sin esas variables en el build, no hace nada y el panel muestra el aviso «Abrir Opciones».

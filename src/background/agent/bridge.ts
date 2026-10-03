@@ -148,7 +148,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       try {
         const stored = await loadCopilotSettings();
         const settings: CopilotSettings = { ...stored, mode: msg.mode ?? stored.mode, model: msg.model || stored.model };
-        if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint and model before using Copilot.');
+        if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
         const { tabManager, acquireLease } = await getDeps();
         if (!tabManager || !acquireLease) throw new Error('Extension not initialized yet');
         releaseLease = acquireLease();

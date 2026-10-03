@@ -30,7 +30,7 @@ function setup() {
   vi.stubGlobal('chrome', {
     runtime: { onConnect: { addListener: onConnect } },
     storage: { local: { get: vi.fn(async () => ({
-      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', model: 'chat' },
+      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat' },
     })) } },
     tabs: { get: vi.fn(async (id: number) => ({ id, url: `https://tab${id}.test/` })) },
   });

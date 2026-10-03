@@ -15,6 +15,11 @@ export const CONFIG = {
   // Shared secret with the server (compiled in via VITE_WS_TOKEN).
   WS_TOKEN: import.meta.env.VITE_WS_TOKEN ?? '',
 
+  // Copilot settings seeded by agent-browser-sync at build time (background/provision.ts).
+  // The key is never in the repo: the host's sync script reads it from a local file.
+  COPILOT_BASE_URL: import.meta.env.VITE_COPILOT_BASE_URL ?? '',
+  COPILOT_API_KEY: import.meta.env.VITE_COPILOT_API_KEY ?? '',
+
   // Build identity for the update check (vite.config.ts fills them from git).
   BUILD_NUMBER: Number(import.meta.env.VITE_BUILD_NUMBER || 0),
   BUILD_SHA: import.meta.env.VITE_BUILD_SHA ?? '',

@@ -6,29 +6,62 @@
 
 body {
   font-family: var(--font-sans);
-  width: 340px;
   background: var(--bg-deepest);
   color: var(--text-primary);
   overflow-x: hidden;
 }
 
-/* Scanline effect overlay */
-body::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0, 0, 0, 0.03) 2px,
-    rgba(0, 0, 0, 0.03) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
+/*
+ * Shared controls of the side panel. Every component (App, RequestCard, ModelPicker, Opciones and
+ * the src/popup components) gets them from here; a component only adds what is its own.
+ * Buttons: readable text, >= 32px tall, a visible focus ring.
+ */
+button {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--accent-primary-dim);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 5px 10px;
+  min-height: 32px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  border-color: var(--accent-success);
+  background: var(--accent-success-dim);
+}
+
+button.danger {
+  border-color: var(--accent-danger);
+  background: var(--accent-danger-dim);
+}
+
+button.link {
+  background: none;
+  border: none;
+  color: var(--accent-primary);
+  padding: 4px 6px;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--bg-deep);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
 }
 
 /* Scrollbar styling */

@@ -1,6 +1,6 @@
 /**
  * Vite config for standalone preview mode.
- * Runs without @crxjs/vite-plugin so the popup renders
+ * Runs without @crxjs/vite-plugin so «Opciones» renders
  * in a normal browser tab with mocked Chrome APIs.
  */
 import { defineConfig } from 'vite';

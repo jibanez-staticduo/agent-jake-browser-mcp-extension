@@ -67,8 +67,106 @@ export async function currentChatId(): Promise<string | null> {
   return typeof stored[CURRENT_CHAT_KEY] === 'string' ? stored[CURRENT_CHAT_KEY] as string : null;
 }
 
+/** The resident local model: first in its group and the default (DEFAULT_COPILOT_SETTINGS.model). */
+const RESIDENT = 'qwen38-flash-next';
+const NON_CHAT = /(bge|embed|rerank|whisper|stt|tts|omnivoice|imagine|image|video|probe)/i;
+
 /** Models a chat composer should offer: drop embeddings, audio, image and probes. */
 export function chatModels(ids: string[]): string[] {
-  const nonChat = /(bge|embed|rerank|whisper|stt|tts|omnivoice|imagine|image|video|probe)/i;
-  return [...new Set(ids.filter((id) => !nonChat.test(id)))].sort();
+  return [...new Set(ids.filter((id) => !NON_CHAT.test(id)))].sort();
+}
+
+export type ModelGroupId = 'local' | 'alibaba' | 'openrouter';
+
+export interface ModelGroup {
+  id: ModelGroupId;
+  label: string;
+  models: string[];
+}
+
+export const MODEL_GROUPS: { id: ModelGroupId; label: string }[] = [
+  { id: 'local', label: 'Local · gratis' },
+  { id: 'alibaba', label: 'Plan Alibaba' },
+  { id: 'openrouter', label: 'Externo · OpenRouter' },
+];
+
+export function modelGroupOf(id: string): ModelGroupId {
+  if (id.startsWith('alibaba-')) return 'alibaba';
+  if (id.startsWith('or-')) return 'openrouter';
+  return 'local';
+}
+
+/** Chat models split by where they run (LiteLLM alias prefix), local resident first, then A-Z. */
+export function groupChatModels(ids: string[]): ModelGroup[] {
+  const chat = chatModels(ids);
+  return MODEL_GROUPS
+    .map((g) => ({
+      ...g,
+      models: chat.filter((id) => modelGroupOf(id) === g.id)
+        .sort((a, b) => Number(b === RESIDENT) - Number(a === RESIDENT) || a.localeCompare(b)),
+    }))
+    .filter((g) => g.models.length);
+}
+
+/**
+ * Readable names, by LiteLLM alias (litellm manifest `model_name`; the underlying model in the
+ * comment of each group). An alias missing here falls back to humanizeModel().
+ */
+const MODEL_NAMES: Record<string, string> = {
+  // local: the resident and its variants
+  'qwen38-flash-next': 'Qwen 3.8 Flash (residente)',
+  'qwen38-flash-next-uncensored': 'Qwen 3.8 Flash · sin censura',
+  'qwen38-off': 'Qwen 3.8 Flash · sin pensar',
+  'qwen38-u-off': 'Qwen 3.8 Flash · sin pensar y sin censura',
+  'qwen38-27b': 'Qwen 3.8 27B',
+  'qwen38-27b-uncensored': 'Qwen 3.8 27B · sin censura',
+  tooling: 'Tooling',
+  'tooling-uncensored': 'Tooling · sin censura',
+  // Alibaba plan
+  'alibaba-q38-max': 'Qwen 3.8 Max',
+  'alibaba-q38-flash': 'Qwen 3.8 Flash',
+  'alibaba-q37-max': 'Qwen 3.7 Max',
+  'alibaba-q37-plus': 'Qwen 3.7 Plus',
+  'alibaba-q36-flash': 'Qwen 3.6 Flash',
+  'alibaba-dsv41-fl': 'DeepSeek V4.1 Flash',
+  'alibaba-dsv4-pro': 'DeepSeek V4 Pro',
+  'alibaba-dsv4f0731': 'DeepSeek V4 Flash 0731',
+  'alibaba-glm-53': 'GLM 5.3',
+  'alibaba-glm-52': 'GLM 5.2',
+  // OpenRouter
+  'or-nemotron': 'Nemotron 3 Super 120B',
+  'or-ultra': 'Nemotron 3 Ultra 550B',
+  'or-lightning': 'Nemotron 3.5 Lightning',
+  'or-omni': 'Nemotron 3 Nano Omni 30B',
+  'or-code': 'North Mini Code',
+  'or-minimax': 'MiniMax M3',
+  'or-minimax-m27': 'MiniMax M2.7',
+  'or-dots': 'Dots 3 Note',
+  'or-laguna-s': 'Laguna S 2.1',
+  'or-laguna-xs': 'Laguna XS 2.1',
+  'or-lfm': 'LFM 2.5 2.6B',
+  'or-inkling': 'Inkling',
+  'or-inkling-small': 'Inkling Small',
+  'or-glm': 'GLM 5.2',
+  'or-gemma-26b': 'Gemma 4 26B',
+  'or-gemma-31b': 'Gemma 4 31B',
+};
+
+const ACRONYMS = /^(glm|lfm|llm|ai|ocr)$/i;
+
+/** Fallback for an alias with no entry: prefix off, words capitalised, acronyms and sizes upper-case. */
+export function humanizeModel(id: string): string {
+  return id.replace(/^(alibaba|or)-/, '').split('-').filter(Boolean)
+    .map((w) => (ACRONYMS.test(w) || /^\d+(\.\d+)?b$/i.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ') || id;
+}
+
+/** Readable name of a model alias. */
+export function modelLabel(id: string): string {
+  return MODEL_NAMES[id] ?? humanizeModel(id);
+}
+
+/** OpenRouter models run outside our infrastructure (your data leaves for a third party): the picker and the composer chip carry an «Externo» badge. */
+export function isExternalModel(id: string): boolean {
+  return modelGroupOf(id) === 'openrouter';
 }

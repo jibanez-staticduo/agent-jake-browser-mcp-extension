@@ -113,7 +113,7 @@ Together, these provide a complete browser automation solution enabling AI agent
 ## Copilot side panel
 
 A Claude-style chat in Chrome's side panel whose agent acts on your tabs, without any MCP
-client: open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the
+client: open it with the toolbar button or **Alt+J**, type a prompt, and the
 agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 - **Sees the page by default**: every prompt carries a `<page_context>` block with the
@@ -167,9 +167,9 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 2. **Connect to Server** - The extension automatically connects to Reverb WebSocket on successful login
 
-3. **Select a Tab** - Choose a browser tab to automate from the popup
+3. **Select a Tab** - Choose a browser tab to automate from Opciones in the side panel
 
-4. **Monitor Status** - The popup shows connection state and activity log
+4. **Monitor Status** - Opciones shows connection state and activity log
 
 ### Network inspection
 
@@ -232,7 +232,7 @@ src/
 │   ├── activity-log.ts      # Action logging to Chrome storage
 │   ├── connection-state.ts  # Connection state with backoff
 │   └── tools/               # Tool schemas & utilities
-├── popup/                   # Vue 3 popup UI
+├── popup/                   # Vue components and stores reused by the side panel's Opciones view
 │   ├── App.vue              # Root component
 │   ├── main.ts              # Vue app initialization
 │   ├── components/          # UI components

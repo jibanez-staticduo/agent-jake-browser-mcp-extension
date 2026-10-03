@@ -6,10 +6,11 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-  COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
+  copilotMissing,
+  type CopilotField,
   isCopilotConfigured,
   type ChatTurn,
   type CopilotMode,
@@ -19,6 +20,9 @@ import {
   type WorkerToPanel,
 } from '@/types/copilot';
 import { renderMarkdown } from './markdown';
+import ModelPicker from './ModelPicker.vue';
+import { explainError, isControllable, missingText as describeMissing } from './setup';
+import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
@@ -50,11 +54,14 @@ const running = ref(false);
 const step = ref(0);
 const target = ref<Target | null>(null);
 const pinned = ref(false);
-const panel = ref<'none' | 'settings' | 'history'>('none');
+const panel = ref<'none' | 'history'>('none');
+const view = ref<'chat' | 'options'>('chat');
 const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
 const models = ref<string[]>([]);
 const modelsError = ref('');
-const allowed = ref<string[]>([]);
+const modelsLoading = ref(false);
+/** Result of the last model listing, shown under the endpoint in Opciones («Guardar y probar»). */
+const check = ref<{ state: 'idle' | 'ok' | 'error'; text: string }>({ state: 'idle', text: '' });
 const planOpen = ref(true);
 const log = ref<HTMLElement | null>(null);
 const textarea = ref<HTMLTextAreaElement | null>(null);
@@ -64,10 +71,23 @@ let windowId: number | null = null;
 
 const items = computed(() => chat.value.items);
 const plan = computed(() => chat.value.plan);
-const needsSetup = computed(() => !isCopilotConfigured(settings.value));
+/** One rule for «what is missing» (types/copilot.ts): chat notice, Opciones summary and amber dot. */
+const missing = computed(() => copilotMissing(settings.value));
+const needsSetup = computed(() => missing.value.length > 0);
+const missingText = computed(() => describeMissing(settings.value));
+const controllable = computed(() => !target.value || isControllable(target.value.url));
+const blockedReason = computed(() => {
+  if (needsSetup.value) return 'Falta configurar el copiloto';
+  if (running.value) return 'Esperando al agente';
+  if (!controllable.value) return 'Esta pestaña no se puede controlar';
+  return '';
+});
+const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
+const placeholder = computed(() => {
+  if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
+  return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
+});
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
-const modelOptions = computed(() =>
-  models.value.includes(settings.value.model) ? models.value : [settings.value.model, ...models.value]);
 /** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
 type Block = { key: number; item: Item } | { key: number; steps: Item[] };
 
@@ -167,7 +187,7 @@ function onWorker(event: WorkerToPanel) {
       break;
     case 'mode':
       settings.value.mode = event.mode;
-      void saveSettings(false);
+      void saveSettings();
       break;
     case 'assistant': {
       const s = streamingItem();
@@ -211,7 +231,7 @@ function connect(): chrome.runtime.Port {
 
 function send() {
   const prompt = input.value.trim();
-  if (!prompt || running.value || needsSetup.value) return;
+  if (!prompt || blockedReason.value) return;
   const turns = history();
   input.value = '';
   running.value = true;
@@ -244,7 +264,7 @@ function cycleMode() {
 
 function setMode(mode: CopilotMode) {
   settings.value.mode = mode;
-  void saveSettings(false);
+  void saveSettings();
 }
 
 function onKey(e: KeyboardEvent) {
@@ -279,24 +299,34 @@ function openChat(c: Chat) {
   void scroll();
 }
 
+const undoable = ref<Chat | null>(null);
+
+async function undoRemove() {
+  if (!undoable.value) return;
+  await saveChat(undoable.value);
+  chats.value = await listChats();
+  undoable.value = null;
+}
+
 async function removeChat(c: Chat) {
+  undoable.value = JSON.parse(JSON.stringify(c)) as Chat;
   await deleteChat(c.id);
   chats.value = await listChats();
   if (c.id === chat.value.id) chat.value = newChat();
 }
 
-async function saveSettings(close = true) {
+async function saveSettings(next?: CopilotSettings) {
+  if (next) settings.value = next;
   if (!isCopilotConfigured(settings.value)) return;
   await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: { ...settings.value } });
-  if (close) {
-    panel.value = 'none';
-    void loadModels();
-  }
+  if (next) void loadModels();
 }
 
 async function loadModels() {
   modelsError.value = '';
+  check.value = { state: 'idle', text: '' };
   if (!isCopilotConfigured(settings.value)) return;
+  modelsLoading.value = true;
   try {
     const base = settings.value.baseUrl.trim().replace(/\/+$/, '');
     const res = await fetch(`${base}/models`, {
@@ -305,28 +335,27 @@ async function loadModels() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as { data?: { id: string }[] };
     models.value = chatModels((data.data ?? []).map((m) => m.id));
+    check.value = { state: 'ok', text: `Conecta: ${models.value.length} modelos de chat disponibles.` };
   } catch (error) {
-    modelsError.value = `No pude listar modelos: ${(error as Error).message}`;
+    const msg = (error as Error).message;
+    modelsError.value = /HTTP 40[13]/.test(msg) ? 'La key no vale.' : `No pude listar modelos: ${msg}.`;
+    check.value = { state: 'error', text: /HTTP 40[13]/.test(msg) ? 'El endpoint responde pero la API key no vale.' : `No llego al endpoint (${msg}).` };
+  } finally {
+    modelsLoading.value = false;
   }
 }
 
 function onModelChange() {
-  void saveSettings(false);
+  void saveSettings();
 }
 
-async function loadAllowed() {
-  const stored = await chrome.storage.local.get(COPILOT_ALLOWED_ORIGINS_KEY);
-  allowed.value = Array.isArray(stored[COPILOT_ALLOWED_ORIGINS_KEY]) ? stored[COPILOT_ALLOWED_ORIGINS_KEY] as string[] : [];
-}
+const focusField = ref<CopilotField | null>(null);
 
-async function forgetOrigin(origin: string) {
-  allowed.value = allowed.value.filter((o) => o !== origin);
-  await chrome.storage.local.set({ [COPILOT_ALLOWED_ORIGINS_KEY]: allowed.value });
-}
-
-async function toggleSettings() {
-  panel.value = panel.value === 'settings' ? 'none' : 'settings';
-  if (panel.value === 'settings') await loadAllowed();
+/** «Abrir Opciones»: lands on the first missing field (Opciones scrolls to it and focuses it). */
+function openOptions() {
+  panel.value = 'none';
+  focusField.value = missing.value[0] ?? null;
+  view.value = 'options';
 }
 
 async function refreshTarget() {
@@ -348,13 +377,18 @@ const onRemoved = (tabId: number) => {
   }
 };
 
+// The service worker may seed the settings (provision.ts) after the panel is open.
+const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+  const next = changes[COPILOT_SETTINGS_KEY]?.newValue as Partial<CopilotSettings> | undefined;
+  if (area === 'local' && next) settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...next };
+};
+
 onMounted(async () => {
   // ?windowId=N: the panel runs detached in its own window and follows N's active tab.
   const detached = Number(new URLSearchParams(location.search).get('windowId'));
   windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
-  if (needsSetup.value) panel.value = 'settings';
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -370,20 +404,32 @@ onMounted(async () => {
   chrome.tabs.onActivated.addListener(onActivated);
   chrome.tabs.onUpdated.addListener(onUpdated);
   chrome.tabs.onRemoved.addListener(onRemoved);
+  chrome.storage.onChanged.addListener(onStorage);
 });
 
 onUnmounted(() => {
   chrome.tabs.onActivated.removeListener(onActivated);
   chrome.tabs.onUpdated.removeListener(onUpdated);
   chrome.tabs.onRemoved.removeListener(onRemoved);
+  chrome.storage.onChanged.removeListener(onStorage);
   port?.disconnect();
 });
 
 function host(url: string): string {
   try {
-    return new URL(url).host || url;
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? u.host || url : url;
   } catch {
     return url;
+  }
+}
+
+function pathOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) && u.pathname !== '/' ? u.pathname : '';
+  } catch {
+    return '';
   }
 }
 
@@ -396,41 +442,41 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
 
 <template>
   <div class="panel">
+    <OptionsView v-if="view === 'options'" class="grow" :settings="settings" :focus-field="focusField" :check="check"
+      @back="view = 'chat'" @save="saveSettings" />
+    <template v-else>
     <header>
-      <div class="target" :title="target?.url">
-        <span class="dot" :class="{ pinned }" />
-        <span class="title">{{ target ? target.title || host(target.url) : 'Sin pestaña' }}</span>
-        <span class="host">{{ target ? host(target.url) : '' }}</span>
-      </div>
       <div class="actions">
-        <button class="icon" :class="{ on: pinned }" :title="pinned ? 'Seguir la pestaña activa' : 'Fijar esta pestaña'"
-          @click="pinned = !pinned; refreshTarget()">📌</button>
-        <button class="icon" title="Nueva conversación" :disabled="running" @click="startNewChat">✚</button>
-        <button class="icon" :class="{ on: panel === 'history' }" title="Conversaciones" @click="openHistory">🕘</button>
-        <button class="icon" :class="{ on: panel === 'settings' }" title="Ajustes" @click="toggleSettings">⚙</button>
+        <button type="button" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
+          @click="startNewChat">Nueva conversación</button>
+        <button type="button" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
+        <button type="button" class="opts" :class="{ on: view === 'options', warn: needsSetup }"
+          :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
+          @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
       </div>
+      <div class="target" :title="target?.url">
+        <template v-if="target">
+          <span class="dot" :class="{ pinned }" />
+          <div class="where">
+            <span class="host">{{ host(target.url) }}<span class="path">{{ pathOf(target.url) }}</span></span>
+            <span class="title">{{ target.title || 'Sin título' }}</span>
+          </div>
+        </template>
+        <span v-else class="muted">Sin pestaña objetivo</span>
+        <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
+          :title="pinned ? 'Dejar de fijar: seguir la pestaña activa' : 'Fijar esta pestaña como objetivo'"
+          @click="pinned = !pinned; refreshTarget()">{{ pinned ? 'Fijada' : 'Fijar' }}</button>
+      </div>
+      <span v-if="target" class="muted follow">{{ pinned ? 'Fijada: el agente trabaja en esta pestaña' : 'Sigue la activa: cambia con la pestaña que abras' }}</span>
     </header>
 
-    <form v-if="panel === 'settings'" class="drawer settings" @submit.prevent="saveSettings()">
-      <label>Endpoint (OpenAI-compatible)<input v-model="settings.baseUrl" placeholder="https://…/v1"></label>
-      <label>API key<input v-model="settings.apiKey" type="password" autocomplete="off"></label>
-      <div class="row">
-        <label>Pasos máx.<input v-model.number="settings.maxSteps" type="number" min="1" max="100"></label>
-        <label class="check"><input v-model="settings.vision" type="checkbox"> Visión (capturas al modelo)</label>
-      </div>
-      <div v-if="allowed.length" class="allowed">
-        <span>Sitios con permiso permanente (modo Preguntar):</span>
-        <div v-for="o in allowed" :key="o" class="origin">{{ o }} <button type="button" class="icon" @click="forgetOrigin(o)">✕</button></div>
-      </div>
-      <button type="submit" :disabled="needsSetup">Guardar</button>
-    </form>
-
-    <div v-else-if="panel === 'history'" class="drawer history">
+    <div v-if="panel === 'history'" class="drawer history">
+      <p v-if="undoable" class="muted">Conversación borrada. <button type="button" class="link" @click="undoRemove">Deshacer</button></p>
       <p v-if="!chats.length" class="muted">No hay conversaciones guardadas.</p>
       <div v-for="c in chats" :key="c.id" class="chat-row" :class="{ current: c.id === chat.id }">
-        <button class="link" @click="openChat(c)">{{ c.title }}</button>
+        <button class="link title" @click="openChat(c)">{{ c.title }}</button>
         <span class="muted">{{ when(c.updatedAt) }}</span>
-        <button class="icon" title="Borrar" @click="removeChat(c)">🗑</button>
+        <button class="link del" :aria-label="`Borrar ${c.title}`" @click="removeChat(c)">Borrar</button>
       </div>
     </div>
 
@@ -466,6 +512,12 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           </div>
           <RequestCard v-else-if="block.item.kind === 'request' && block.item.request" :request="block.item.request"
             :answered="block.item.answered" @respond="(r, label) => respond(block.item, r, label)" />
+          <div v-else-if="block.item.kind === 'error' && explainError(block.item.text)" class="notice err" role="alert">
+            <strong>{{ explainError(block.item.text)!.title }}</strong>
+            <span>{{ explainError(block.item.text)!.why }}</span>
+            <button v-if="explainError(block.item.text)!.action === 'options'" type="button" @click="openOptions">Abrir Opciones</button>
+            <details><summary>Detalle técnico</summary><pre>{{ block.item.text }}</pre></details>
+          </div>
           <div v-else class="item" :class="block.item.kind">{{ block.item.text }}</div>
         </template>
       </template>
@@ -482,27 +534,46 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
     </section>
 
     <footer>
-      <textarea ref="textarea" v-model="input" rows="3"
-        placeholder="Escribe un prompt · Enter envía · Shift+Enter salto · Shift+Tab modo"
-        :disabled="needsSetup" @keydown="onKey" />
-      <div class="toolbar">
-        <div class="modes" role="radiogroup">
-          <button v-for="m in MODES" :key="m.id" type="button" class="mode" :class="[m.id, { on: settings.mode === m.id }]"
-            :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
+      <div v-if="needsSetup" class="notice" role="alert">
+        <strong>Falta configurar el copiloto</strong>
+        <span>{{ missingText }} Mientras tanto puedes ir escribiendo, pero no se envía.</span>
+        <button type="button" @click="openOptions">Abrir Opciones</button>
+      </div>
+      <div v-else-if="!controllable" class="notice" role="status">
+        <strong>Esta pestaña no se puede controlar</strong>
+        <span>El agente no puede actuar en páginas del navegador ni de extensiones. Abre una página web y elígela como objetivo.</span>
+      </div>
+      <div class="composer" :title="keysHelp">
+        <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
+          :placeholder="placeholder" @keydown="onKey" />
+        <div v-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
+        <div class="bar">
+          <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+            @update:model-value="onModelChange" @options="openOptions" />
+          <div class="send-group">
+            <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
+            <button type="button" class="send" :disabled="!input.trim() || !!blockedReason"
+              :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
+          </div>
         </div>
-        <select v-model="settings.model" class="model" :title="modelsError || 'Modelo'" @change="onModelChange">
-          <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
-        </select>
-        <button v-if="running" class="stop" @click="stop">Stop</button>
-        <button v-else class="send" :disabled="!input.trim() || needsSetup" @click="send">↑</button>
+      </div>
+      <div class="under">
+        <div class="modes" role="radiogroup" aria-label="Modo">
+          <button v-for="m in MODES" :key="m.id" type="button" class="mode" role="radio" :aria-checked="settings.mode === m.id"
+            :class="[m.id, { on: settings.mode === m.id }]" :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
+        </div>
+        <span class="keys" :title="keysHelp">
+          <kbd>Enter</kbd> envía · <kbd>Shift+Enter</kbd> salto · <kbd>Alt+J</kbd> abre el panel
+        </span>
       </div>
     </footer>
+    </template>
   </div>
 </template>
 
 <style>
 html, body { margin: 0; height: 100%; }
-body {
+html body {
   background: var(--bg-deepest);
   color: var(--text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
@@ -513,25 +584,28 @@ body {
 
 <style scoped>
 .panel { display: flex; flex-direction: column; height: 100%; }
+.grow { flex: 1; overflow-y: auto; }
 header {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 12px;
   border-bottom: 1px solid var(--border-default); background: var(--bg-deep);
 }
-.target { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
-.target .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.target .host { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
+.target { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.where { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.where .host { font-weight: 700; font-family: var(--font-mono, monospace); font-size: 12px; word-break: break-all; }
+.where .path { font-weight: 400; color: var(--text-secondary); }
+.where .title { color: var(--text-secondary); word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.follow { font-size: 11px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; margin-top: 5px; }
 .dot.pinned { background: var(--accent-warning); }
-.actions { display: flex; gap: 2px; }
-button {
-  background: var(--accent-primary-dim); color: var(--text-primary); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit;
-}
-button:disabled { opacity: 0.4; cursor: default; }
-button.icon { background: none; border: none; padding: 4px 6px; opacity: 0.6; }
-button.icon.on, button.icon:hover:not(:disabled) { opacity: 1; }
-button.link { background: none; border: none; padding: 0; text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-button.stop { background: var(--accent-danger-dim); border-color: var(--accent-danger); }
+button.pin { margin-left: auto; flex-shrink: 0; }
+button.pin.on { border-color: var(--accent-warning); }
+.warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.actions button.on { border-color: var(--accent-primary); }
+button.opts.warn { border-color: var(--accent-warning); }
+button.link.del { flex: none; color: var(--accent-danger); }
+button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; }
+button.link.title { color: var(--text-primary); }
 .muted { color: var(--text-secondary); }
 .drawer { padding: 10px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
 .settings { display: flex; flex-direction: column; gap: 8px; }
@@ -544,10 +618,6 @@ button.stop { background: var(--accent-danger-dim); border-color: var(--accent-d
 .chat-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; }
 .chat-row.current { background: var(--bg-elevated); }
 .chat-row .muted { font-size: 11px; white-space: nowrap; }
-input, textarea, select {
-  background: var(--bg-deep); color: var(--text-primary); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 6px 8px; font: inherit;
-}
 .log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .empty { text-align: center; margin-top: 30px; line-height: 1.6; padding: 0 10px; }
 .item { word-break: break-word; line-height: 1.5; }
@@ -582,14 +652,30 @@ input, textarea, select {
 .plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
-footer { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border-default); }
-footer textarea { resize: none; }
-.toolbar { display: flex; align-items: center; gap: 6px; }
-.modes { display: flex; border: 1px solid var(--border-default); border-radius: 6px; overflow: hidden; }
-.mode { border: none; border-radius: 0; background: none; padding: 4px 8px; color: var(--text-secondary); }
+footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border-default); }
+.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: 4px; }
+.notice span { color: var(--text-secondary); }
+.notice.err { margin: 0; border-left-color: var(--accent-danger); }
+.notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
+.notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
+.waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
+.send-group { display: flex; gap: 6px; flex-shrink: 0; margin-left: auto; }
+.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-deep); padding: 6px; gap: 6px; }
+.composer:focus-within { border-color: var(--accent-primary); }
+.composer textarea { resize: none; border: none; background: none; outline: none; padding: 4px; }
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
+.bar > :first-child { min-width: 0; }
+.send-group button { font-weight: 600; }
+.under { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.keys { color: var(--text-secondary); font-size: 11px; }
+.keys kbd { font-family: var(--font-mono, monospace); font-size: 10.5px; border: 1px solid var(--border-default); border-radius: 4px; padding: 0 4px; }
+@media (max-width: 379px) { .keys { display: none; } }
+.modes { display: flex; }
+.mode { border-radius: 0; background: none; padding: 4px 12px; margin-left: -1px; color: var(--text-secondary); }
+.mode:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.mode:last-child { border-radius: 0 6px 6px 0; }
+.mode.on { z-index: 1; border-color: var(--accent-primary); }
 .mode.on.ask { background: var(--accent-warning-dim); color: var(--text-primary); }
 .mode.on.auto { background: var(--accent-success-dim); color: var(--text-primary); }
 .mode.on.plan { background: var(--accent-secondary-dim); color: var(--text-primary); }
-.model { flex: 1; min-width: 0; padding: 4px 6px; }
-.send { font-weight: 700; }
 </style>
