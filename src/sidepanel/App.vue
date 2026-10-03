@@ -85,7 +85,7 @@ const blockedReason = computed(() => {
 const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
 const placeholder = computed(() => {
   if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
-  return running.value ? 'Esperando al agente · tu borrador se conserva' : 'Escribe qué quieres hacer en la pestaña';
+  return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
 /** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
@@ -417,7 +417,8 @@ onUnmounted(() => {
 
 function host(url: string): string {
   try {
-    return new URL(url).host || url;
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) ? u.host || url : url;
   } catch {
     return url;
   }
@@ -426,7 +427,7 @@ function host(url: string): string {
 function pathOf(url: string): string {
   try {
     const u = new URL(url);
-    return u.pathname === '/' ? '' : u.pathname;
+    return /^https?:$/.test(u.protocol) && u.pathname !== '/' ? u.pathname : '';
   } catch {
     return '';
   }
@@ -473,7 +474,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
       <p v-if="undoable" class="muted">Conversación borrada. <button type="button" class="link" @click="undoRemove">Deshacer</button></p>
       <p v-if="!chats.length" class="muted">No hay conversaciones guardadas.</p>
       <div v-for="c in chats" :key="c.id" class="chat-row" :class="{ current: c.id === chat.id }">
-        <button class="link" @click="openChat(c)">{{ c.title }}</button>
+        <button class="link title" @click="openChat(c)">{{ c.title }}</button>
         <span class="muted">{{ when(c.updatedAt) }}</span>
         <button class="link del" :aria-label="`Borrar ${c.title}`" @click="removeChat(c)">Borrar</button>
       </div>
@@ -545,14 +546,14 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
       <div class="composer" :title="keysHelp">
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
           :placeholder="placeholder" @keydown="onKey" />
-        <div v-if="running" class="waiting" role="status">Esperando al agente · puedes seguir escribiendo, se envía cuando termine</div>
+        <div v-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
         <div class="bar">
           <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
             @update:model-value="onModelChange" @options="openOptions" />
           <div class="send-group">
             <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
             <button type="button" class="send" :disabled="!input.trim() || !!blockedReason"
-              :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">{{ running ? 'Esperando al agente' : 'Enviar' }}</button>
+              :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
           </div>
         </div>
       </div>
@@ -602,8 +603,9 @@ button.pin.on { border-color: var(--accent-warning); }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .actions button.on { border-color: var(--accent-primary); }
 button.opts.warn { border-color: var(--accent-warning); }
-button.del { flex: none; color: var(--accent-danger); }
-button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; color: var(--text-primary); }
+button.link.del { flex: none; color: var(--accent-danger); }
+button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; }
+button.link.title { color: var(--text-primary); }
 .muted { color: var(--text-secondary); }
 .drawer { padding: 10px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
 .settings { display: flex; flex-direction: column; gap: 8px; }
@@ -657,11 +659,11 @@ footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
 .waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
-.send-group { display: flex; gap: 6px; flex-shrink: 0; }
+.send-group { display: flex; gap: 6px; flex-shrink: 0; margin-left: auto; }
 .composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-deep); padding: 6px; gap: 6px; }
 .composer:focus-within { border-color: var(--accent-primary); }
 .composer textarea { resize: none; border: none; background: none; outline: none; padding: 4px; }
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
 .send-group button { font-weight: 600; }
 .under { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }

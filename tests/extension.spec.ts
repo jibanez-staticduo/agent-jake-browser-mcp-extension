@@ -188,7 +188,7 @@ test('Opciones renders the MCP status and reads server config from background', 
 
     // With no MCP WebSocket server listening on 8765, the indicator must
     // report the real state from getStatus: OFFLINE.
-    await expect(panel.locator('.mcp-indicator .indicator-value')).toHaveText('DESCONECTADO', {
+    await expect(panel.locator('.mcp-indicator .indicator-value')).toHaveText('SIN CONEXIÓN', {
       timeout: 15000,
     });
   } finally {

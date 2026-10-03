@@ -22,7 +22,7 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
 <template>
   <div class="tab-selector">
     <div class="section-title">Pestaña de las sesiones MCP</div>
-    <p class="tab-help">No es la del copiloto: esa se elige en la barra del chat («Fijar»). Esta es la pestaña en la que actúan los comandos de las sesiones MCP.</p>
+    <p class="tab-help">No es la del copiloto: esa se elige en la barra del chat («Fijar»). Esta es la pestaña conectada que usan las sesiones MCP cuando no piden otra.</p>
 
     <div class="tab-list">
       <div v-if="status.sortedTabs.length === 0" class="empty-state">

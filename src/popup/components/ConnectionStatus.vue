@@ -29,7 +29,7 @@ const serverStatusText = computed(() => {
     case 'connecting': return 'CONECTANDO';
     case 'reconnecting': return 'REINTENTANDO';
     case 'failed': return 'ERROR DE CONEXIÓN';
-    default: return 'DESCONECTADO';
+    default: return 'SIN CONEXIÓN';
   }
 });
 </script>
@@ -292,9 +292,8 @@ button.indicator {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: color 0.2s ease;
 }
 
