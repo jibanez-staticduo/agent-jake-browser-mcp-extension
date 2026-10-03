@@ -67,6 +67,17 @@ let windowId: number | null = null;
 const items = computed(() => chat.value.items);
 const plan = computed(() => chat.value.plan);
 const needsSetup = computed(() => !isCopilotConfigured(settings.value));
+const placeholder = computed(() => {
+  if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
+  return running.value ? 'El agente está trabajando · puedes ir escribiendo' : 'Escribe qué quieres hacer en la pestaña';
+});
+/** Why the composer cannot send: one source for the notice, the placeholder and the Opciones dot. */
+const missingText = computed(() => {
+  const url = settings.value.baseUrl.trim();
+  if (!url) return 'Indica el endpoint del modelo en Opciones.';
+  if (!isCopilotConfigured(settings.value)) return 'El endpoint debe ser una URL https válida (o localhost) y el modelo no puede estar vacío.';
+  return '';
+});
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
 /** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
 type Block = { key: number; item: Item } | { key: number; steps: Item[] };
@@ -351,7 +362,6 @@ onMounted(async () => {
   windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
-  if (needsSetup.value) view.value = 'options';
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -489,18 +499,31 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
     </section>
 
     <footer>
-      <textarea ref="textarea" v-model="input" rows="3"
-        placeholder="Escribe un prompt · Enter envía · Shift+Enter salto · Shift+Tab modo"
-        :disabled="needsSetup" @keydown="onKey" />
-      <div class="toolbar">
-        <div class="modes" role="radiogroup">
-          <button v-for="m in MODES" :key="m.id" type="button" class="mode" :class="[m.id, { on: settings.mode === m.id }]"
-            :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
+      <div v-if="needsSetup" class="notice" role="alert">
+        <strong>Falta configurar el copiloto</strong>
+        <span>{{ missingText }} Mientras tanto puedes ir escribiendo, pero no se envía.</span>
+        <button type="button" @click="openOptions">Abrir Opciones</button>
+      </div>
+      <div class="composer">
+        <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
+          :placeholder="placeholder"
+          @keydown="onKey" />
+        <div class="bar">
+          <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+            @update:model-value="onModelChange" @options="openOptions" />
+          <button v-if="running" type="button" class="stop" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
+          <button v-else type="button" class="send" :disabled="!input.trim() || needsSetup"
+            :title="needsSetup ? 'Falta configurar el copiloto' : 'Enviar (Enter)'" @click="send">Enviar</button>
         </div>
-        <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
-          @update:model-value="onModelChange" @options="openOptions" />
-        <button v-if="running" class="stop" @click="stop">Stop</button>
-        <button v-else class="send" :disabled="!input.trim() || needsSetup" @click="send">↑</button>
+      </div>
+      <div class="under">
+        <div class="modes" role="radiogroup" aria-label="Modo">
+          <button v-for="m in MODES" :key="m.id" type="button" class="mode" role="radio" :aria-checked="settings.mode === m.id"
+            :class="[m.id, { on: settings.mode === m.id }]" :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
+        </div>
+        <span class="keys" title="Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel">
+          <kbd>Enter</kbd> envía · <kbd>Shift+Enter</kbd> salto · <kbd>Alt+J</kbd> abre el panel
+        </span>
       </div>
     </footer>
     </template>
@@ -599,13 +622,22 @@ input, textarea, select {
 .plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
-footer { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border-default); }
-footer textarea { resize: none; }
-.toolbar { display: flex; align-items: center; gap: 6px; }
+footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border-default); }
+.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: 4px; }
+.notice span { color: var(--text-secondary); }
+.notice button { min-height: 32px; }
+.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-deep); padding: 6px; gap: 6px; }
+.composer:focus-within { border-color: var(--accent-primary); }
+.composer textarea { resize: none; border: none; background: none; outline: none; padding: 4px; }
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.bar > button { min-height: 32px; flex-shrink: 0; font-weight: 600; }
+.under { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.keys { color: var(--text-secondary); font-size: 11px; }
+.keys kbd { font-family: var(--font-mono, monospace); font-size: 10.5px; border: 1px solid var(--border-default); border-radius: 4px; padding: 0 4px; }
+@media (max-width: 379px) { .keys { display: none; } }
 .modes { display: flex; border: 1px solid var(--border-default); border-radius: 6px; overflow: hidden; }
-.mode { border: none; border-radius: 0; background: none; padding: 4px 8px; color: var(--text-secondary); }
+.mode { border: none; border-radius: 0; background: none; padding: 4px 10px; min-height: 30px; color: var(--text-secondary); }
 .mode.on.ask { background: var(--accent-warning-dim); color: var(--text-primary); }
 .mode.on.auto { background: var(--accent-success-dim); color: var(--text-primary); }
 .mode.on.plan { background: var(--accent-secondary-dim); color: var(--text-primary); }
-.send { font-weight: 700; }
 </style>
