@@ -61,6 +61,10 @@ jobs:
       - name: Unit tests (vitest)
         run: npm run test:unit
 
+      # Cada PR prueba build neutra + firma + verificacion con una clave efimera (no sube nada).
+      - name: Publicar en seco (build neutra + firma)
+        run: bash scripts/publicar.sh --dry-run
+
   deltas:
     runs-on: arc-k8s
     timeout-minutes: 5
@@ -75,24 +79,42 @@ jobs:
       - name: Aserciones de deltas del fork (subset 2, 2b, 3-9)
         run: bash scripts/check-deltas.sh
 
-  # Tras cada merge a main, la extensión nueva se instala y se recarga en los Chrome del x86 y del
-  # Mac (agent-browser-sync de x86-host-runtime-pocharlies). Un navegador cerrado o dormido lo pone
-  # al día el vigilante del x86 cuando se abre.
-  desplegar:
-    name: Desplegar en los navegadores (x86 y Mac)
+  # Tras cada merge a main se publica la build neutra y firmada en el pod; cada extensión
+  # instalada en <Descargas>/agent-jake-browser se reescribe sola desde ella (self-update.ts).
+  publicar:
+    name: Publicar la build firmada en el pod
     needs: [build-test, deltas]
-    # Solo push a main. NUNCA pull_request: un runner self-hosted ejecutando código de un PR es
-    # entregar el host x86 a quien abra el PR.
+    # Solo push a main. NUNCA pull_request: el secreto de firma y el runner del host no se exponen a PRs.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # 2026-10-02 dani · NO puede ir a arc-k8s: escribe en ~/agent-browser-x86 del host x86, entra
-    # por ssh al Mac y recarga la extensión a través del pod. Los pods de arc-k8s no alcanzan ese
-    # disco ni el Mac. Vuelve a arc-k8s si la extensión deja de cargarse descomprimida del disco
-    # del host (p. ej. publicada en la Chrome Web Store).
+    # Runner del x86 solo porque tiene kubectl hacia el pod de agentjake-browser.
     runs-on: [self-hosted, x86, agent-browser]
-    timeout-minutes: 30
-    concurrency:
-      group: desplegar-navegadores
-      cancel-in-progress: false
+    timeout-minutes: 20
+    concurrency: { group: publicar-extension, cancel-in-progress: false }
+    permissions: { contents: read }
     steps:
-      - name: agent-browser-sync --force all
-        run: bash "$HOME/.local/libexec/x86-host-runtime/agent-browser-sync.sh" --force all
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with: { persist-credentials: false, fetch-depth: 0 }
+
+      # Mismo Node verificado que build-test, sin depender del node del host.
+      - name: Install verified Node.js 22.23.2
+        run: |
+          set -euo pipefail
+          version=v22.23.2
+          case "$(uname -m)" in
+            x86_64|amd64) arch=x64; expected=b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a ;;
+            *) echo "Unsupported Node runner architecture: $(uname -m)"; exit 1 ;;
+          esac
+          archive="$RUNNER_TEMP/node-${version}-${arch}.tar.gz"
+          curl --retry 3 --retry-all-errors -fsSL \
+            "https://nodejs.org/dist/${version}/node-${version}-linux-${arch}.tar.gz" \
+            -o "$archive"
+          echo "${expected}  ${archive}" | sha256sum --check --strict
+          tar xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-${version}-linux-${arch}/bin" >> "$GITHUB_PATH"
+
+      - name: npm ci
+        run: npm ci
+        env: { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1' }
+      - name: Publicar
+        run: bash scripts/publicar.sh
+        env: { AJB_UPDATE_SIGNING_KEY: '${{ secrets.AJB_UPDATE_SIGNING_KEY }}' }
