@@ -541,7 +541,8 @@ export class TabManager {
   async runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }> {
     const tabId = this.connectedTabId;
     if (!tabId) throw new Error('No tab connected');
-    const url = (await chrome.tabs.get(tabId)).url ?? '';
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab.url ?? '';
     if (!/^https:/.test(url)) throw new Error(`Passkeys need an https page, not ${url || 'an empty tab'}`);
     const host = new URL(url).hostname;
     const known = await passkeysForHost(host);
@@ -549,6 +550,13 @@ export class TabManager {
       throw new Error(`No agent passkey enrolled for ${host}: enroll one first (browser_passkey with mode: "enroll" on the site's "add a passkey" button, signed in)`);
     }
 
+    // Chrome checks focus in the BROWSER, not in the page: a WebAuthn request from a tab that is not the active one of
+    // its window fails with «the page does not have focus» even with focus emulation on (measured on webauthn.io,
+    // 05-10-2026). So the tab is the active one of its window for the ceremony only, and the previous one comes back.
+    const previous = tab.active ? undefined
+      : (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id;
+    // Before the guard comes off: if activating fails, the tab keeps its guard.
+    if (!tab.active) await chrome.tabs.update(tabId, { active: true });
     const target = { tabId };
     if (this.webauthnGuard?.tabId === tabId) {
       await chrome.debugger.sendCommand(target, 'WebAuthn.removeVirtualAuthenticator', {
@@ -589,6 +597,10 @@ export class TabManager {
           .catch((error) => log.warn('[Passkey] ceremony authenticator not removed:', error));
       }
       guardRestored = await this.restoreWebAuthnGuard(tabId);
+      if (previous !== undefined) {
+        await chrome.tabs.update(previous, { active: true })
+          .catch((error) => log.warn('[Passkey] previous tab not restored:', error));
+      }
     }
     return {
       result,

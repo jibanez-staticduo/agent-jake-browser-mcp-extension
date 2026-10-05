@@ -750,6 +750,55 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     ]);
   });
 
+  it('makes the tab the active one of its window for the ceremony and gives the previous one back', async () => {
+    // Chrome refuses WebAuthn with «the page does not have focus» from a tab that is not active in its window, focus
+    // emulation or not (webauthn.io, 05-10-2026).
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, active: false, windowId: 7, url: 'https://accounts.shopify.com/lookup' });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 55, active: true, windowId: 7 }]);
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn((creds) => creds.push({
+      credentialId: 'cred-f', isResidentCredential: true, rpId: 'accounts.shopify.com', privateKey: 'KF', signCount: 0,
+    }));
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.tabs.update.mockClear();
+
+    await manager.runPasskeyCeremony('enroll', click);
+
+    expect(mockChrome.tabs.query).toHaveBeenCalledWith({ active: true, windowId: 7 });
+    expect(mockChrome.tabs.update.mock.calls).toEqual([[101, { active: true }], [55, { active: true }]]);
+  });
+
+  it('if the tab cannot be activated, the guard is never taken off', async () => {
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, active: false, windowId: 7, url: 'https://accounts.shopify.com/lookup' });
+    mockChrome.tabs.query.mockResolvedValue([{ id: 55, active: true, windowId: 7 }]);
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn(() => undefined);
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.debugger.sendCommand.mockClear();
+    mockChrome.tabs.update.mockRejectedValueOnce(new Error('No tab with id: 101'));
+
+    await expect(manager.runPasskeyCeremony('enroll', click)).rejects.toThrow('No tab with id');
+    expect(click).not.toHaveBeenCalled();
+    expect(webauthnCalls()).toEqual([]);
+  });
+
+  it('an already active tab is left as it is', async () => {
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, active: true, windowId: 7, url: 'https://accounts.shopify.com/lookup' });
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn(() => undefined);
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.tabs.update.mockClear();
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony('enroll', click);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await running;
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+
   it('refuses a page that is not https', async () => {
     const manager = new TabManager();
     const { click } = fakeWebAuthn(() => undefined);
