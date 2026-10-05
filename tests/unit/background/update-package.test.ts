@@ -21,6 +21,7 @@ describe('mimeFor', () => {
 describe('parseUpdateFiles', () => {
   const ok = { version: '2.4.0.140', build: 140, sha: 'abc1234', files: [{ path: 'manifest.json', sha256: 'a'.repeat(64), size: 10 }] };
   it('accepts a well-formed list', () => expect(parseUpdateFiles(ok)).toEqual(ok));
+  it('rejects case-insensitive duplicate paths', () => expect(parseUpdateFiles({ ...ok, files: [...ok.files, { path: 'assets/A.js', sha256: 'a'.repeat(64), size: 1 }, { path: 'assets/a.js', sha256: 'a'.repeat(64), size: 1 }] })).toBeNull());
   it('requires manifest.json', () => expect(parseUpdateFiles({ ...ok, files: [{ path: 'a.js', sha256: 'a'.repeat(64), size: 1 }] })).toBeNull());
   it('rejects unsafe paths, bad hashes, duplicates and bad builds', () => {
     expect(parseUpdateFiles({ ...ok, files: [...ok.files, { path: '../x.js', sha256: 'a'.repeat(64), size: 1 }] })).toBeNull();

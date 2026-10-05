@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import { parseUpdateFiles, verifySignature } from '@/background/update-package';
 
@@ -18,7 +19,25 @@ const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
 const pem = privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
 
+// @ts-expect-error plain .mjs without types
+import { assertNoCaseDuplicates } from '../../../scripts/update-files.mjs';
+
+// The tmp FS may be case-insensitive (macOS default): then both names cannot coexist on disk.
+const caseSensitiveFs = (() => {
+  const d = mkdtempSync(join(tmpdir(), 'ajb-case-'));
+  writeFileSync(join(d, 'x'), '1');
+  return !existsSync(join(d, 'X'));
+})();
+
 describe('update-files.mjs', () => {
+  it('assertNoCaseDuplicates rejects assets/A.js + assets/a.js (listing-level, any FS)', () => {
+    expect(() => assertNoCaseDuplicates(['manifest.json', 'assets/A.js', 'assets/a.js'])).toThrow(/case-insensitive/);
+    expect(() => assertNoCaseDuplicates(['manifest.json', 'assets/a.js'])).not.toThrow();
+  });
+  it.skipIf(!caseSensitiveFs)('sign throws on a dist holding assets/A.js and assets/a.js (case-sensitive FS only)', () => {
+    const d = dist(); writeFileSync(join(d, 'assets', 'A.js'), 'x'); writeFileSync(join(d, 'assets', 'a.js'), 'y');
+    expect(() => execFileSync('node', ['scripts/update-files.mjs', 'sign', d, '--version', 'v', '--build', '1', '--sha', 's'], { env: { ...process.env, AJB_UPDATE_SIGNING_KEY: pem }, stdio: 'pipe' })).toThrow();
+  });
   it('signs every non-dot file and the extension accepts the result', async () => {
     const d = dist();
     execFileSync('node', ['scripts/update-files.mjs', 'sign', d, '--version', '2.4.0.140', '--build', '140', '--sha', 'abc1234'], { env: { ...process.env, AJB_UPDATE_SIGNING_KEY: pem } });

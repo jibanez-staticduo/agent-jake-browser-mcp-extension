@@ -22,13 +22,17 @@ export function listFiles(dir, base = dir) {
   }).filter((p) => !OWN.has(p)).sort();
 }
 
+export function assertNoCaseDuplicates(paths) {
+  if (new Set(paths.map((p) => p.toLowerCase())).size !== paths.length) throw new Error('case-insensitive duplicate paths in package');
+}
+
 export function buildUpdateFiles(dir, { version, build, sha }) {
   const files = listFiles(dir).map((path) => {
     if (!safe(path)) throw new Error(`unsupported file in package: ${path}`);
     const bytes = readFileSync(join(dir, path));
     return { path, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
   });
-  if (new Set(files.map((f) => f.path.toLowerCase())).size !== files.length) throw new Error('case-insensitive duplicate paths in package');
+  assertNoCaseDuplicates(files.map((f) => f.path));
   if (!files.some((f) => f.path === 'manifest.json')) throw new Error('manifest.json missing');
   return { version, build: Number(build), sha, files };
 }
