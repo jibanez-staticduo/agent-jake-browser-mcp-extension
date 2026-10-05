@@ -13,7 +13,9 @@
     "tabs",
     "webNavigation",
     "activeTab",
-    "notifications"
+    "notifications",
+    "downloads",
+    "downloads.ui"
   ],
   "host_permissions": [
     "<all_urls>"

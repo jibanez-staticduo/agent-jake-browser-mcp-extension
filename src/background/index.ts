@@ -35,6 +35,7 @@ import {
   latestUrlFor,
   type UpdateState,
 } from './update-check';
+import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate } from './self-update';
 import {
   buildDisplayUrl,
   getEffectiveConfig,
@@ -145,10 +146,15 @@ async function runUpdateCheck(): Promise<void> {
     const config = await getEffectiveConfig();
     const state = await checkForUpdate(latestUrlFor(config), chromeUpdateDeps());
     if (state?.available) log.info(`[Update] ${state.latest?.version} published; running ${state.current.version}`);
+    const result = await maybeSelfUpdate(state);
+    if (result) log.info(`[SelfUpdate] ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
   } catch (error) {
     log.warn('[Update] check failed:', error);
   }
 }
+
+// On every service-worker start: after a self-update reload, drop the files the new build no longer ships.
+void cleanupAfterUpdate(chromeSelfUpdateDeps()).catch((e) => log.warn('[SelfUpdate] cleanup failed:', e));
 
 async function ensureUpdateAlarm(): Promise<void> {
   if (!await chrome.alarms.get(UPDATE_ALARM)) {
