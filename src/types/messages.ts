@@ -42,7 +42,8 @@ export type ToolName =
   | 'browser_network_request'
   | 'browser_cdp'
   | 'browser_drop'
-  | 'browser_fill_form';
+  | 'browser_fill_form'
+  | 'browser_passkey';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {

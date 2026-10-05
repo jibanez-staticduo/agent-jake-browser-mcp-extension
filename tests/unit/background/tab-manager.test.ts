@@ -59,7 +59,7 @@ vi.mock('@/background/activity-log', () => ({
   logError: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { TabManager, WEBAUTHN_PIN_SCRIPT, pinWebAuthn } from '@/background/tab-manager';
+import { TabManager, WEBAUTHN_PIN_SCRIPT, PASSKEY_CEREMONY_TIMEOUT_MS, pinWebAuthn } from '@/background/tab-manager';
 import { runInNewContext } from 'node:vm';
 import { pageEvents } from '@/background/page-events';
 
@@ -560,5 +560,203 @@ describe('TabManager background-tab control', () => {
 
     expect(activated).toBeNull();
     expect(mockChrome.tabs.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('TabManager passkey ceremony (INFRA-585)', () => {
+  const stored: Record<string, unknown> = {};
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    for (const key of Object.keys(stored)) delete stored[key];
+    mockChrome.storage.local.get.mockImplementation(async (key: string) => ({ [key]: stored[key] }));
+    mockChrome.storage.local.set.mockImplementation(async (items: Record<string, unknown>) => {
+      Object.assign(stored, items);
+    });
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Login', url: 'https://accounts.shopify.com/lookup' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+  });
+
+  /** The tab's authenticators as CDP sees them; the site "creates" or "uses" a credential on click. */
+  function fakeWebAuthn(onClick: (credentials: Array<Record<string, unknown>>) => void) {
+    let next = 0;
+    const authenticators = new Map<string, Array<Record<string, unknown>>>();
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method, params) => {
+      const p = (params ?? {}) as Record<string, unknown>;
+      if (method === 'WebAuthn.addVirtualAuthenticator') {
+        const id = `va-${++next}`;
+        authenticators.set(id, []);
+        return { authenticatorId: id };
+      }
+      if (method === 'WebAuthn.removeVirtualAuthenticator') authenticators.delete(String(p.authenticatorId));
+      if (method === 'WebAuthn.addCredential') authenticators.get(String(p.authenticatorId))?.push({ ...(p.credential as object) });
+      if (method === 'WebAuthn.getCredentials') return { credentials: authenticators.get(String(p.authenticatorId)) ?? [] };
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 's1' };
+      return {};
+    });
+    const click = vi.fn(async () => {
+      const ceremony = [...authenticators.entries()].at(-1)!;
+      onClick(ceremony[1]);
+      return { clicked: 'e1' };
+    });
+    return { authenticators, click };
+  }
+
+  function webauthnCalls() {
+    return mockChrome.debugger.sendCommand.mock.calls
+      .filter(([, method]) => String(method).startsWith('WebAuthn.'))
+      .map(([, method, params]) => [method, params] as [string, Record<string, unknown>]);
+  }
+
+  it('enroll: lets the site create a passkey, keeps it in the extension and puts the guard back', async () => {
+    const manager = new TabManager();
+    const { authenticators, click } = fakeWebAuthn((creds) => creds.push({
+      credentialId: 'cred-1', isResidentCredential: true, rpId: 'accounts.shopify.com',
+      privateKey: 'PKCS8-KEY', userHandle: 'user-1', signCount: 0,
+    }));
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.debugger.sendCommand.mockClear();
+
+    const { result, passkey } = await manager.runPasskeyCeremony('enroll', click);
+
+    expect(result).toEqual({ clicked: 'e1' });
+    expect(passkey).toEqual({
+      mode: 'enroll', host: 'accounts.shopify.com', ceremony: 'completed',
+      passkeys: [{ rpId: 'accounts.shopify.com', enrolledAt: expect.any(String) }],
+    });
+    // The key is stored in the extension, and never in what the tool answers.
+    expect(JSON.stringify(stored)).toContain('PKCS8-KEY');
+    expect(JSON.stringify(passkey)).not.toContain('PKCS8-KEY');
+    expect(JSON.stringify(passkey)).not.toContain('user-1');
+    // Guard out, ceremony authenticator (user verified) in, then the reverse.
+    const calls = webauthnCalls();
+    expect(calls[0]).toEqual(['WebAuthn.removeVirtualAuthenticator', { authenticatorId: 'va-1' }]);
+    expect(calls[1]).toEqual(['WebAuthn.addVirtualAuthenticator', {
+      options: expect.objectContaining({ transport: 'internal', isUserVerified: true }),
+    }]);
+    expect(calls.slice(-3)).toEqual([
+      ['WebAuthn.removeVirtualAuthenticator', { authenticatorId: 'va-2' }],
+      ['WebAuthn.addVirtualAuthenticator', { options: expect.objectContaining({ isUserVerified: false }) }],
+      ['WebAuthn.setResponseOverrideBits', { authenticatorId: 'va-3', isBadUP: true }],
+    ]);
+    expect([...authenticators.keys()]).toEqual(['va-3']);
+  });
+
+  it('enroll keeps no credential whose rpId does not cover the tab host', async () => {
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn((creds) => creds.push({
+      credentialId: 'cred-x', isResidentCredential: true, rpId: 'evil.example', privateKey: 'KX', signCount: 0,
+    }));
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony('enroll', click);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      const { passkey } = await running;
+      expect(passkey.ceremony).toBe('timeout');
+      expect(stored.agent_jake_passkeys).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('use: offers only the passkeys of the tab host, records the new sign count and puts the guard back', async () => {
+    stored.agent_jake_passkeys = [
+      { credentialId: 'cred-1', rpId: 'accounts.shopify.com', privateKey: 'K1', signCount: 3, isResidentCredential: true, enrolledAt: 't0' },
+      { credentialId: 'cred-2', rpId: 'github.com', privateKey: 'K2', signCount: 1, isResidentCredential: true, enrolledAt: 't0' },
+    ];
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn((creds) => { creds[0].signCount = 4; });
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.debugger.sendCommand.mockClear();
+
+    const { passkey } = await manager.runPasskeyCeremony('use', click);
+
+    expect(passkey.ceremony).toBe('completed');
+    const added = webauthnCalls().filter(([method]) => method === 'WebAuthn.addCredential');
+    expect(added.map(([, p]) => (p.credential as { credentialId: string }).credentialId)).toEqual(['cred-1']);
+    const saved = stored.agent_jake_passkeys as Array<{ credentialId: string; signCount: number }>;
+    expect(saved.find((p) => p.credentialId === 'cred-1')?.signCount).toBe(4);
+    expect(webauthnCalls().at(-1)).toEqual(['WebAuthn.setResponseOverrideBits', { authenticatorId: 'va-3', isBadUP: true }]);
+  });
+
+  it('use without an enrolled passkey fails before touching the guard', async () => {
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn(() => undefined);
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.debugger.sendCommand.mockClear();
+
+    await expect(manager.runPasskeyCeremony('use', click)).rejects.toThrow('No agent passkey enrolled for accounts.shopify.com');
+    expect(click).not.toHaveBeenCalled();
+    expect(webauthnCalls()).toEqual([]);
+  });
+
+  it('a site that never asks times out and still gets the guard back', async () => {
+    vi.useFakeTimers();
+    try {
+      const manager = new TabManager();
+      const { click } = fakeWebAuthn(() => undefined);
+      await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+      mockChrome.debugger.sendCommand.mockClear();
+
+      const running = manager.runPasskeyCeremony('enroll', click);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      const { passkey } = await running;
+
+      expect(passkey.ceremony).toBe('timeout');
+      expect(stored.agent_jake_passkeys).toBeUndefined();
+      expect(webauthnCalls().at(-1)).toEqual(['WebAuthn.setResponseOverrideBits', { authenticatorId: 'va-3', isBadUP: true }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reinstalls the guard when putting it back fails, and says so if that fails too', async () => {
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn((creds) => creds.push({
+      credentialId: 'cred-9', isResidentCredential: true, rpId: 'accounts.shopify.com', privateKey: 'K9', signCount: 0,
+    }));
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    const base = mockChrome.debugger.sendCommand.getMockImplementation()!;
+    let guards = 0;
+    mockChrome.debugger.sendCommand.mockImplementation(async (debuggee, method, params) => {
+      const options = (params as { options?: { isUserVerified?: boolean } } | undefined)?.options;
+      if (method === 'WebAuthn.addVirtualAuthenticator' && options?.isUserVerified === false) {
+        guards += 1;
+        throw new Error('WebAuthn domain gone');
+      }
+      return base(debuggee, method, params);
+    });
+
+    const { passkey } = await manager.runPasskeyCeremony('enroll', click);
+
+    expect(guards).toBe(2); // the quick restore, then the full reinstall
+    expect(passkey).toEqual(expect.objectContaining({ ceremony: 'completed', guardRestored: false }));
+  });
+
+  it('puts the guard back when the click itself fails', async () => {
+    const manager = new TabManager();
+    fakeWebAuthn(() => undefined);
+    await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
+    mockChrome.debugger.sendCommand.mockClear();
+
+    await expect(manager.runPasskeyCeremony('enroll', async () => { throw new Error('element not found'); }))
+      .rejects.toThrow('element not found');
+    expect(webauthnCalls().slice(-3)).toEqual([
+      ['WebAuthn.removeVirtualAuthenticator', { authenticatorId: 'va-2' }],
+      ['WebAuthn.addVirtualAuthenticator', { options: expect.objectContaining({ isUserVerified: false }) }],
+      ['WebAuthn.setResponseOverrideBits', { authenticatorId: 'va-3', isBadUP: true }],
+    ]);
+  });
+
+  it('refuses a page that is not https', async () => {
+    const manager = new TabManager();
+    const { click } = fakeWebAuthn(() => undefined);
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Plain', url: 'http://example.com/' });
+    await manager.connectTab(101, 'http://example.com/');
+
+    await expect(manager.runPasskeyCeremony('enroll', click)).rejects.toThrow('Passkeys need an https page');
+    expect(click).not.toHaveBeenCalled();
   });
 });

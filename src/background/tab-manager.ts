@@ -8,6 +8,7 @@ import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 import { pageEvents } from './page-events';
+import { passkeysForHost, rpIdMatchesHost, savePasskeys, summarize, type PasskeySummary, type StoredPasskey } from './passkey-vault';
 
 /**
  * Runs in every document of a controlled tab (see installWebAuthnGuard). Pins
@@ -63,6 +64,51 @@ export function pinWebAuthn(): void {
 }
 
 export const WEBAUTHN_PIN_SCRIPT = `(${pinWebAuthn.toString()})();`;
+
+/** The guard: holds no credential, verifies no user, answers without user presence. */
+const GUARD_AUTHENTICATOR = {
+  protocol: 'ctap2',
+  transport: 'usb',
+  hasResidentKey: true,
+  hasUserVerification: true,
+  isUserVerified: false,
+  automaticPresenceSimulation: true,
+} as const;
+
+/** For one passkey ceremony only: a platform authenticator that verifies the user. */
+const CEREMONY_AUTHENTICATOR = {
+  protocol: 'ctap2',
+  transport: 'internal',
+  hasResidentKey: true,
+  hasUserVerification: true,
+  isUserVerified: true,
+  automaticPresenceSimulation: true,
+} as const;
+
+/** Under the server's 30 s request timeout, with room for the click itself. */
+export const PASSKEY_CEREMONY_TIMEOUT_MS = 20_000;
+const PASSKEY_POLL_MS = 250;
+
+export type PasskeyMode = 'enroll' | 'use';
+
+export interface PasskeyOutcome {
+  mode: PasskeyMode;
+  host: string;
+  /** completed: the site created (enroll) or used (use) a credential; timeout: it never asked. */
+  ceremony: 'completed' | 'timeout';
+  passkeys: PasskeySummary[];
+  /** Only when putting the guard back failed twice: the tab must not browse on. */
+  guardRestored?: false;
+}
+
+interface CdpCredential {
+  credentialId: string;
+  isResidentCredential: boolean;
+  rpId?: string;
+  privateKey: string;
+  userHandle?: string;
+  signCount: number;
+}
 
 export interface CdpStatus {
   connectedTabId: number | null;
@@ -132,6 +178,7 @@ export class TabManager {
   private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
   private fileChooserInProgress = false;
   private webauthnPinScript: { tabId: number; identifier: string } | null = null;
+  private webauthnGuard: { tabId: number; authenticatorId: string } | null = null;
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
   /**
@@ -442,17 +489,7 @@ export class TabManager {
       // Dropping the previous session's authenticator keeps a re-attach at exactly one.
       await chrome.debugger.sendCommand(target, 'WebAuthn.disable').catch(() => undefined);
       await chrome.debugger.sendCommand(target, 'WebAuthn.enable', { enableUI: false });
-      const { authenticatorId } = await chrome.debugger.sendCommand(target, 'WebAuthn.addVirtualAuthenticator', {
-        options: {
-          protocol: 'ctap2',
-          transport: 'usb',
-          hasResidentKey: true,
-          hasUserVerification: true,
-          isUserVerified: false,
-          automaticPresenceSimulation: true,
-        },
-      }) as { authenticatorId: string };
-      await chrome.debugger.sendCommand(target, 'WebAuthn.setResponseOverrideBits', { authenticatorId, isBadUP: true });
+      await this.addGuardAuthenticator(tabId);
 
       // One copy per session: a re-attach on the same session would otherwise stack them.
       if (this.webauthnPinScript?.tabId === tabId) {
@@ -479,6 +516,138 @@ export class TabManager {
       await this.pinWebAuthnInFrames(tabId);
     } catch (error) {
       log.warn('WebAuthn guard not installed, native security-key dialogs may appear:', error);
+    }
+  }
+
+  private async addGuardAuthenticator(tabId: number): Promise<void> {
+    const target = { tabId };
+    const { authenticatorId } = await chrome.debugger.sendCommand(target, 'WebAuthn.addVirtualAuthenticator', {
+      options: GUARD_AUTHENTICATOR,
+    }) as { authenticatorId: string };
+    await chrome.debugger.sendCommand(target, 'WebAuthn.setResponseOverrideBits', { authenticatorId, isBadUP: true });
+    this.webauthnGuard = { tabId, authenticatorId };
+  }
+
+  /**
+   * Lifts the WebAuthn guard for ONE ceremony that `action` (a click) starts, then puts it back
+   * (INFRA-585). The guard authenticator is swapped for one that verifies the user:
+   *  - enroll: it holds nothing and lets the site create a passkey, which is kept in the
+   *    extension (passkey-vault.ts);
+   *  - use: it holds only the agent's passkeys whose rpId covers the tab's host, and lets the
+   *    site sign in with one.
+   * It waits for the site to create or use a credential, up to PASSKEY_CEREMONY_TIMEOUT_MS.
+   * Whatever happens, the ceremony authenticator goes and the guard comes back.
+   */
+  async runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }> {
+    const tabId = this.connectedTabId;
+    if (!tabId) throw new Error('No tab connected');
+    const url = (await chrome.tabs.get(tabId)).url ?? '';
+    if (!/^https:/.test(url)) throw new Error(`Passkeys need an https page, not ${url || 'an empty tab'}`);
+    const host = new URL(url).hostname;
+    const known = await passkeysForHost(host);
+    if (mode === 'use' && !known.length) {
+      throw new Error(`No agent passkey enrolled for ${host}: enroll one first (browser_passkey with mode: "enroll" on the site's "add a passkey" button, signed in)`);
+    }
+
+    const target = { tabId };
+    if (this.webauthnGuard?.tabId === tabId) {
+      await chrome.debugger.sendCommand(target, 'WebAuthn.removeVirtualAuthenticator', {
+        authenticatorId: this.webauthnGuard.authenticatorId,
+      }).catch(() => undefined);
+      this.webauthnGuard = null;
+    }
+    let authenticatorId: string | undefined;
+    let guardRestored = true;
+    let result: T;
+    let done: StoredPasskey[];
+    try {
+      ({ authenticatorId } = await chrome.debugger.sendCommand(target, 'WebAuthn.addVirtualAuthenticator', {
+        options: CEREMONY_AUTHENTICATOR,
+      }) as { authenticatorId: string });
+      if (mode === 'use') {
+        for (const p of known) {
+          await chrome.debugger.sendCommand(target, 'WebAuthn.addCredential', {
+            authenticatorId,
+            credential: {
+              credentialId: p.credentialId,
+              isResidentCredential: p.isResidentCredential,
+              rpId: p.rpId,
+              privateKey: p.privateKey,
+              ...(p.userHandle ? { userHandle: p.userHandle } : {}),
+              signCount: p.signCount,
+            },
+          });
+        }
+      }
+      const deadline = Date.now() + PASSKEY_CEREMONY_TIMEOUT_MS;
+      result = await action();
+      done = await this.waitForPasskeyCeremony(target, authenticatorId, mode, known, host, deadline);
+      if (done.length) await savePasskeys(done);
+    } finally {
+      if (authenticatorId) {
+        await chrome.debugger.sendCommand(target, 'WebAuthn.removeVirtualAuthenticator', { authenticatorId })
+          .catch((error) => log.warn('[Passkey] ceremony authenticator not removed:', error));
+      }
+      guardRestored = await this.restoreWebAuthnGuard(tabId);
+    }
+    return {
+      result,
+      passkey: {
+        mode,
+        host,
+        ceremony: done.length ? 'completed' : 'timeout',
+        passkeys: summarize(done.length ? done : known),
+        ...(guardRestored ? {} : { guardRestored: false as const }),
+      },
+    };
+  }
+
+  /** Guard back after a ceremony; if that fails, the full install (WebAuthn reset + guard + pin). */
+  private async restoreWebAuthnGuard(tabId: number): Promise<boolean> {
+    try {
+      await this.addGuardAuthenticator(tabId);
+      return true;
+    } catch (error) {
+      log.warn('[Passkey] WebAuthn guard not restored, reinstalling it:', error);
+    }
+    await this.installWebAuthnGuard(tabId);
+    return this.webauthnGuard?.tabId === tabId;
+  }
+
+  /**
+   * Polls the ceremony authenticator until the site created a credential (enroll) or signed
+   * with one (use: its sign count went up). Returns those credentials, or [] at the deadline.
+   * Only credentials whose rpId covers the tab host count: one for any other site is never kept.
+   */
+  private async waitForPasskeyCeremony(
+    target: { tabId: number },
+    authenticatorId: string,
+    mode: PasskeyMode,
+    known: StoredPasskey[],
+    host: string,
+    deadline: number,
+  ): Promise<StoredPasskey[]> {
+    const before = new Map(known.map((p) => [p.credentialId, p.signCount]));
+    for (;;) {
+      const { credentials } = await chrome.debugger.sendCommand(target, 'WebAuthn.getCredentials', {
+        authenticatorId,
+      }) as { credentials: CdpCredential[] };
+      const changed = (credentials ?? []).filter((c) =>
+        mode === 'enroll' ? !before.has(c.credentialId) : c.signCount > (before.get(c.credentialId) ?? Infinity));
+      if (changed.length) {
+        const now = new Date().toISOString();
+        return changed.map((c) => ({
+          credentialId: c.credentialId,
+          rpId: c.rpId ?? known.find((p) => p.credentialId === c.credentialId)?.rpId ?? '',
+          privateKey: c.privateKey,
+          ...(c.userHandle ? { userHandle: c.userHandle } : {}),
+          signCount: c.signCount,
+          isResidentCredential: c.isResidentCredential,
+          enrolledAt: known.find((p) => p.credentialId === c.credentialId)?.enrolledAt ?? now,
+        })).filter((p) => p.rpId && rpIdMatchesHost(p.rpId, host)); // only the tab host's (security, INFRA-585)
+      }
+      if (Date.now() >= deadline) return [];
+      await new Promise((resolve) => setTimeout(resolve, PASSKEY_POLL_MS));
     }
   }
 
@@ -632,6 +801,7 @@ export class TabManager {
     // Always reset flag
     this.debuggerAttached = false;
     this.webauthnPinScript = null; // the session's scripts go with it
+    this.webauthnGuard = null; // and its authenticators
 
     try {
       chrome.debugger.onEvent.removeListener(this.handleDebuggerEvent);
@@ -668,6 +838,7 @@ export class TabManager {
     pageEvents.reset();
     this.debuggerAttached = false;
     this.webauthnPinScript = null;
+    this.webauthnGuard = null;
     this.lastCdpError = 'CDP_DEBUGGER_DETACHED: Debugger detached unexpectedly';
   }
 

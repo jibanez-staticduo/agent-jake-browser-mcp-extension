@@ -13,6 +13,62 @@ import type { HandlerContext, HandlerMap, Coordinates } from './types';
 export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
   const { sendToContent, sendToAllFrames, resolveTarget, waitForStableOrNavigation } = ctx;
 
+  async function clickElement(element: { ref?: string; selector?: string }) {
+    const ref = element.ref ?? element.selector;
+    const tabId = ctx.tabManager.getConnectedTabId();
+    if (!tabId) throw new Error('No tab connected');
+
+    const initialTab = await chrome.tabs.get(tabId);
+    const initialUrl = initialTab.url || '';
+
+    ctx.tabManager.startNewTabDetection();
+
+    try {
+      const { frameId, selector } = await resolveTarget(element);
+      await sendToContent('scrollIntoView', { selector }, frameId);
+
+      const coords = await sendToContent<Coordinates>('getElementCoordinates', {
+        selector,
+        clickable: true,
+      }, frameId);
+
+      let trusted = true;
+      if (coords.exact === false) {
+        // Cross-origin iframe: there is no way to know where it lands on the page.
+        await sendToContent('dispatchClick', { selector }, frameId);
+        trusted = false;
+      } else {
+        await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
+        await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
+        await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+      }
+
+      const result = await waitForStableOrNavigation(initialUrl, frameId);
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const newTab = ctx.tabManager.stopNewTabDetection();
+
+      if (result.navigated) {
+        return {
+          clicked: ref,
+          navigated: true,
+          newUrl: result.newUrl,
+          ...(trusted ? {} : { trusted: false }),
+          ...(newTab && { newTabOpened: newTab }),
+        };
+      }
+      return {
+        clicked: ref,
+        ...(trusted ? {} : { trusted: false }),
+        ...(newTab && { newTabOpened: newTab }),
+      };
+    } catch (error) {
+      ctx.tabManager.stopNewTabDetection();
+      throw error;
+    }
+  }
+
   return {
     browser_snapshot: async () => {
       const frames = await sendToAllFrames<string>('generateSnapshot');
@@ -25,61 +81,13 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       return { url, title, snapshot, frames: frames.length };
     },
 
-    browser_click: async (payload) => {
-      const element = schemas.browser_click.parse(payload);
-      const ref = element.ref ?? element.selector;
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
+    browser_click: async (payload) => clickElement(schemas.browser_click.parse(payload)),
 
-      const initialTab = await chrome.tabs.get(tabId);
-      const initialUrl = initialTab.url || '';
-
-      ctx.tabManager.startNewTabDetection();
-
-      try {
-        const { frameId, selector } = await resolveTarget(element);
-        await sendToContent('scrollIntoView', { selector }, frameId);
-
-        const coords = await sendToContent<Coordinates>('getElementCoordinates', {
-          selector,
-          clickable: true,
-        }, frameId);
-
-        let trusted = true;
-        if (coords.exact === false) {
-          // Cross-origin iframe: there is no way to know where it lands on the page.
-          await sendToContent('dispatchClick', { selector }, frameId);
-          trusted = false;
-        } else {
-          await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-          await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
-          await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
-        }
-
-        const result = await waitForStableOrNavigation(initialUrl, frameId);
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        const newTab = ctx.tabManager.stopNewTabDetection();
-
-        if (result.navigated) {
-          return {
-            clicked: ref,
-            navigated: true,
-            newUrl: result.newUrl,
-            ...(trusted ? {} : { trusted: false }),
-            ...(newTab && { newTabOpened: newTab }),
-          };
-        }
-        return {
-          clicked: ref,
-          ...(trusted ? {} : { trusted: false }),
-          ...(newTab && { newTabOpened: newTab }),
-        };
-      } catch (error) {
-        ctx.tabManager.stopNewTabDetection();
-        throw error;
-      }
+    // INFRA-585: the click starts a passkey ceremony; the WebAuthn guard is lifted for it only.
+    browser_passkey: async (payload) => {
+      const { mode, ...element } = schemas.browser_passkey.parse(payload);
+      const { result, passkey } = await ctx.tabManager.runPasskeyCeremony(mode, () => clickElement(element));
+      return { ...result, passkey };
     },
 
     browser_type: async (payload) => {

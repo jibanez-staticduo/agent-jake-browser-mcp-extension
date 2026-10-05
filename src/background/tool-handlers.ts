@@ -208,6 +208,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Drop on "${p?.ref || p?.selector}"`;
     case 'browser_fill_form':
       return `Fill form (${((p?.fields as unknown[]) ?? []).length} fields)`;
+    case 'browser_passkey':
+      return `Passkey ${p?.mode} on "${p?.ref || p?.selector}"`;
     case 'browser_select_option':
       return `Select option in "${p?.ref || p?.selector}"`;
     case 'browser_pdf':
