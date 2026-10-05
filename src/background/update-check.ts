@@ -5,7 +5,8 @@
  * (agent-browser-server published-extension). Every installed extension reads it when the
  * browser starts and every 30 minutes; when its `build` is ahead of the one baked into this
  * bundle, the action icon shows NEW, the popup a banner, and Chrome one notification per build.
- * Browsers the CI updates by itself (x86, Mac) are already on it by the time it is published.
+ * Installs that live in <Downloads>/agent-jake-browser then rewrite themselves from the signed
+ * package (self-update.ts); this module only detects and announces the new build.
  */
 import { CONFIG } from '@/types/config';
 import type { ParsedServerUrl } from '@/config/runtime';

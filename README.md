@@ -161,6 +161,28 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 6. The extension icon should appear in your toolbar
 
+### Instalación con autoactualización (Descargas/agent-jake-browser)
+
+La build que publica el CI (`scripts/publicar.sh`, tras cada merge a `main`) está firmada (Ed25519). Una extensión
+instalada en `~/Downloads/agent-jake-browser/` se reescribe sola desde ella y se recarga; no hace falta volver a
+cargarla ni desplegar nada por navegador. Detalle del mecanismo en `ARCHITECTURE.md` («Autoactualización»).
+
+Condiciones (si no se cumplen, avisa una vez y no toca nada):
+
+- La carpeta es exactamente `Descargas/agent-jake-browser` (la ruta de descargas por defecto de Chrome).
+- **Modo desarrollador** activado en `chrome://extensions` (sin él, tras recargar la extensión queda deshabilitada).
+- **«Preguntar dónde guardar cada archivo» desactivado** en los ajustes de Chrome (Descargas); con él activado Chrome cancela las descargas.
+
+Migración (una vez por navegador):
+
+1. Bajar el zip de `https://browser-mcp.lan.e-dani.com/download` y descomprimirlo en `~/Downloads/agent-jake-browser/`.
+2. Quitar la extensión vieja en `chrome://extensions` y «Cargar descomprimida» esa carpeta. No hay `key` en el manifest: el id lo fija la carpeta y no cambia entre actualizaciones.
+3. Token en Opciones (o pairing): lo pone el usuario, la build no lo lleva. El zip de `/download` ya trae un `config.json` con la URL del pod (lo inyecta el servidor), así que x86 y MacBook Air (`wss://browser-mcp.lan.e-dani.com/ws`) solo necesitan el token. Un navegador que habla con un servidor LOCAL (Mac de CloudBlue, `ws://127.0.0.1:8765`) debe borrar `config.json` de la carpeta tras descomprimir (los valores por defecto de la build son 127.0.0.1:8765) o fijar la URL en Opciones.
+4. Copiloto: endpoint y key en Opciones (la build neutra ya no los siembra).
+5. En el pod, actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
+
+Prueba manual con Chrome desechable: `node scripts/e2e-self-update.mjs` (y `--tamper`, `--prompt`).
+
 ## Usage
 
 1. **Login** - Click the extension icon and enter your credentials to authenticate with the Laravel backend

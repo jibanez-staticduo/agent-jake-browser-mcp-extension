@@ -1,7 +1,8 @@
 /**
  * Seeds the copilot endpoint and key into chrome.storage so a fresh install can send a prompt
- * without typing anything. The values come from the build (agent-browser-sync passes
- * VITE_COPILOT_BASE_URL / VITE_COPILOT_API_KEY from local host files; never from the repo).
+ * without typing anything. The values come from the build (only local/host builds, e.g. the
+ * agent-browser-sync host build until it is retired, pass VITE_COPILOT_BASE_URL / VITE_COPILOT_API_KEY from
+ * local host files; never from the repo). The published build (scripts/publicar.sh) is neutral and seeds nothing.
  *
  * Rule: a field is overwritten when the stored value is empty or still equals what we seeded
  * last time (so a rotated key reaches the browser); a value the user changed in Opciones is
