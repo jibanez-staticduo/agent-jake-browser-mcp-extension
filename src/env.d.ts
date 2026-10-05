@@ -18,6 +18,7 @@ interface ImportMetaEnv {
   readonly VITE_BUILD_NUMBER?: string;
   readonly VITE_BUILD_SHA?: string;
   readonly VITE_LATEST_URL?: string;
+  readonly VITE_UPDATE_PUBLIC_KEY?: string;
 }
 
 interface ImportMeta {
