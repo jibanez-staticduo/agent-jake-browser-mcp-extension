@@ -3,7 +3,7 @@
  * Tracks which tab is currently being automated.
  */
 
-import { log } from '@/utils/logger';
+import { log, isSecretLogging } from '@/utils/logger';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
@@ -508,7 +508,7 @@ export class TabManager {
   }
 
   private recordCdpError(error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = isSecretLogging() ? 'Secret operation CDP failure' : error instanceof Error ? error.message : String(error);
     this.lastCdpError = message;
   }
 

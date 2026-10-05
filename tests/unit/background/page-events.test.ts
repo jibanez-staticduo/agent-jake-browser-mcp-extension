@@ -1,11 +1,26 @@
 import { describe, it, expect } from 'vitest';
 import { PageEventLog, severityOf } from '@/background/page-events';
+import { withSecretLogging } from '@/utils/logger';
 
 const nav = (loaderId: string) => ['Page.frameNavigated', { frame: { id: 'top', loaderId } }] as const;
 const req = (requestId: string, url: string, type = 'XHR', extra: Record<string, unknown> = {}) =>
   ['Network.requestWillBeSent', { requestId, type, request: { method: 'GET', url, headers: { a: '1' } }, ...extra }] as const;
 
 describe('PageEventLog console', () => {
+  it('discards all console sinks and incremental input prefixes during secret typing', async () => {
+    const l = new PageEventLog();
+    const secret = 'FAKE-secret-event-73';
+    await withSecretLogging(async () => {
+      for (let length = 1; length <= secret.length; length++) {
+        l.handle('Runtime.consoleAPICalled', { type: 'warning', args: [{ value: secret.slice(0, length) }] });
+      }
+      l.handle('Runtime.exceptionThrown', { exceptionDetails: { exception: { description: secret }, url: secret } });
+      l.handle('Log.entryAdded', { entry: { level: 'error', text: secret, url: secret } });
+    });
+    expect(l.consoleMessages({ all: true })).toEqual([]);
+    l.handle('Runtime.consoleAPICalled', { type: 'log', args: [{ value: 'normal' }] });
+    expect(l.consoleMessages().map(m => m.text)).toEqual(['normal']);
+  });
   it('turns CDP console args into text and filters by severity', () => {
     const l = new PageEventLog();
     l.handle('Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: 'hi' }, { type: 'number', value: 2 }] });
@@ -36,6 +51,20 @@ describe('PageEventLog console', () => {
 });
 
 describe('PageEventLog network', () => {
+  it('discards request, redirect, response and failure content while preserving navigation bookkeeping', async () => {
+    const l = new PageEventLog();
+    l.handle(...req('before', 'https://fake.test/normal'));
+    await withSecretLogging(async () => {
+      l.handle('Network.requestWillBeSent', { requestId: 'secret', request: { url: 'FAKE-secret', headers: { secret: 'FAKE-secret' }, postData: 'FAKE-secret' } });
+      l.handle('Network.requestWillBeSent', { requestId: 'before', redirectResponse: { statusText: 'FAKE-secret', headers: { secret: 'FAKE-secret' } }, request: { url: 'FAKE-secret' } });
+      l.handle('Network.responseReceived', { requestId: 'before', response: { statusText: 'FAKE-secret', headers: { secret: 'FAKE-secret' } } });
+      l.handle('Network.loadingFailed', { requestId: 'before', errorText: 'FAKE-secret' });
+      l.handle(...nav('new-document'));
+    });
+    expect(l.networkRequests()).toEqual([]);
+    expect(l.networkRequests({ all: true })).toHaveLength(1);
+    expect(JSON.stringify(l.networkRequests({ all: true }))).not.toContain('FAKE-secret');
+  });
   it('tracks a request through response and failure, hiding static by default', () => {
     const l = new PageEventLog();
     l.handle(...req('1', 'https://x.test/api'));

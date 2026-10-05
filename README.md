@@ -304,6 +304,27 @@ The extension exposes 23 browser automation tools:
 | `highlight` | Highlight element visually |
 | ... | And more |
 
+## Secret Typing Privacy
+
+When `browser_type` receives `secret: true`, the extension returns operation
+metadata and optional field length verification, without the typed value or
+remote error text. Diagnostic logging is redacted and page console/network
+content capture is suspended while the operation runs, including its DOM
+stability wait. Debugger events needed for navigation, dialogs and file chooser
+waiters continue to work.
+
+This protection applies to events received during the secret operation. A page
+can emit delayed console messages or network events after the operation ends;
+those events can be captured normally. The page receives the secret, and other
+tools can intentionally inspect DOM values, screenshots, console or network
+data. Secret typing does not provide isolation from the page or prevent later
+reads by other tools.
+
+Run the focused real-Chromium test with `npm run build`,
+`npx playwright install chromium`, then
+`npx playwright test tests/secret-fill.spec.ts`. It uses a temporary profile,
+loopback HTTP/WebSocket fixtures and fake secrets, with no 1Password account.
+
 ## Related Projects
 
 - [agent-jake-browser-mcp-server](https://github.com/SnakeO/agent-jake-browser-mcp-server) - Node.js MCP server that exposes browser tools to AI agents

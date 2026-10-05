@@ -16,10 +16,12 @@ export const schemas = {
   }),
 
   browser_type: z.object({
-    ref: z.string(),
+    ref: z.string().min(1).optional(),
+    selector: z.string().min(1).optional(),
     text: z.string(),
     clear: z.boolean().optional().default(false),
-  }),
+    secret: z.boolean().optional().default(false),
+  }).refine((d) => d.ref || d.selector, { message: 'ref or selector is required' }),
 
   browser_hover: z.object({
     ref: z.string(),

@@ -69,6 +69,7 @@ export function createToolHandlers(tabManager: TabManager) {
   return async function handleMessage(message: IncomingMessage): Promise<OutgoingMessage> {
     const { id, type, payload } = message;
     const startTime = performance.now();
+    const secret = type === 'browser_type' && payload?.secret === true;
 
     log.debug(`[Tool] Received: ${type} (id: ${id})`);
 
@@ -89,8 +90,8 @@ export function createToolHandlers(tabManager: TabManager) {
       const result = await handler(payload);
       const durationMs = Math.round(performance.now() - startTime);
 
-      const description = getToolDescription(type, payload, result);
-      logTool(type, description, true, durationMs, { payload, result });
+      const description = secret ? 'Type secret' : getToolDescription(type, payload, result);
+      logTool(type, description, true, durationMs);
 
       log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
 
@@ -101,16 +102,17 @@ export function createToolHandlers(tabManager: TabManager) {
       };
     } catch (error) {
       const durationMs = Math.round(performance.now() - startTime);
-      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${(error as Error).message} in ${durationMs}ms`);
+      const errorMessage = secret ? 'Secret typing failed' : (error as Error).message;
+      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${errorMessage} in ${durationMs}ms`);
 
-      logTool(type, (error as Error).message, false, durationMs, { payload, error: (error as Error).message });
+      logTool(type, errorMessage, false, durationMs);
 
       return {
         id,
         success: false,
         error: {
-          code: (error as Error).name || 'EXECUTION_ERROR',
-          message: (error as Error).message,
+          code: secret ? 'EXECUTION_ERROR' : (error as Error).name || 'EXECUTION_ERROR',
+          message: errorMessage,
         },
       };
     }

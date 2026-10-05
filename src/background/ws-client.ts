@@ -198,7 +198,7 @@ export class WebSocketClient {
     }
 
     const data = JSON.stringify(message);
-    log.debug('Sending:', data);
+    log.debug('[WS] Sending response');
     this.socket.send(data);
   }
 
@@ -231,10 +231,12 @@ export class WebSocketClient {
    */
   private async handleMessage(data: string): Promise<void> {
     let messageId: string | undefined;
+    let secret = false;
 
     try {
       const message = JSON.parse(data) as IncomingMessage;
       messageId = message.id;
+      secret = message.type === 'browser_type' && message.payload?.secret === true;
       log.info('[WS] Received message:', message.type, message.id);
 
       if (!this.messageHandler) {
@@ -255,7 +257,7 @@ export class WebSocketClient {
       log.info('[WS] Message handler returned, sending response');
       this.send(response);
     } catch (error) {
-      log.error('[WS] Failed to handle message:', error);
+      log.error('[WS] Failed to handle message:', secret ? 'Secret typing failed' : error);
       // Send error response back to server so it doesn't timeout
       if (messageId) {
         this.send({
@@ -263,7 +265,7 @@ export class WebSocketClient {
           success: false,
           error: {
             code: 'HANDLER_ERROR',
-            message: error instanceof Error ? error.message : String(error),
+            message: secret ? 'Secret typing failed' : error instanceof Error ? error.message : String(error),
           },
         });
       }

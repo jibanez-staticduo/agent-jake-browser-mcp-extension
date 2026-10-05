@@ -45,7 +45,8 @@ const mockChrome = {
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
-vi.mock('@/utils/logger', () => ({
+vi.mock('@/utils/logger', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/utils/logger')>(),
   log: {
     info: vi.fn(),
     debug: vi.fn(),
