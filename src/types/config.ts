@@ -15,7 +15,8 @@ export const CONFIG = {
   // Shared secret with the server (compiled in via VITE_WS_TOKEN).
   WS_TOKEN: import.meta.env.VITE_WS_TOKEN ?? '',
 
-  // Copilot settings seeded by agent-browser-sync at build time (background/provision.ts).
+  // Copilot settings seeded at build time by host builds only (agent-browser-sync, until it is retired;
+  // background/provision.ts). The published build leaves them empty; the key is set in Options.
   // The key is never in the repo: the host's sync script reads it from a local file.
   COPILOT_BASE_URL: import.meta.env.VITE_COPILOT_BASE_URL ?? '',
   COPILOT_API_KEY: import.meta.env.VITE_COPILOT_API_KEY ?? '',

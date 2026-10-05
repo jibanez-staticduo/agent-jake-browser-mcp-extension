@@ -177,8 +177,7 @@ Migración (una vez por navegador):
 
 1. Bajar el zip de `https://browser-mcp.lan.e-dani.com/download` y descomprimirlo en `~/Downloads/agent-jake-browser/`.
 2. Quitar la extensión vieja en `chrome://extensions` y «Cargar descomprimida» esa carpeta. No hay `key` en el manifest: el id lo fija la carpeta y no cambia entre actualizaciones.
-3. En Opciones, URL y token del servidor (o pairing). Los pone el usuario: son credenciales y la build no las lleva.
-   Mac de CloudBlue: `ws://127.0.0.1:8765`; x86 y MacBook Air: `wss://browser-mcp.lan.e-dani.com/ws`.
+3. Token en Opciones (o pairing): lo pone el usuario, la build no lo lleva. El zip de `/download` ya trae un `config.json` con la URL del pod (lo inyecta el servidor), así que x86 y MacBook Air (`wss://browser-mcp.lan.e-dani.com/ws`) solo necesitan el token. Un navegador que habla con un servidor LOCAL (Mac de CloudBlue, `ws://127.0.0.1:8765`) debe borrar `config.json` de la carpeta tras descomprimir (los valores por defecto de la build son 127.0.0.1:8765) o fijar la URL en Opciones.
 4. Copiloto: endpoint y key en Opciones (la build neutra ya no los siembra).
 5. En el pod, actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
 

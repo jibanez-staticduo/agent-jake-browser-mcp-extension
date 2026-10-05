@@ -15,6 +15,10 @@ esac
 
 fail() { echo "publicar: $*" >&2; exit 1; }
 
+# Capture the signing key and drop it from the environment at once: vite, kubectl and curl must never inherit it.
+signing_key="${AJB_UPDATE_SIGNING_KEY:-}"
+unset AJB_UPDATE_SIGNING_KEY
+
 repo="$(git rev-parse --show-toplevel)"
 cd "$repo"
 
@@ -41,7 +45,7 @@ git archive HEAD | tar -x -C "$tmp/src"
 ln -s "$repo/node_modules" "$tmp/src/node_modules"
 
 ( cd "$tmp/src" && env -u VITE_WS_HOST -u VITE_WS_PORT -u VITE_WS_PATH -u VITE_WS_SECURE -u VITE_WS_TOKEN \
-    -u VITE_COPILOT_BASE_URL -u VITE_COPILOT_API_KEY -u VITE_UPDATE_PUBLIC_KEY \
+    -u VITE_COPILOT_BASE_URL -u VITE_COPILOT_API_KEY -u VITE_UPDATE_PUBLIC_KEY -u AJB_UPDATE_SIGNING_KEY \
     VITE_BUILD_NUMBER="$build" VITE_BUILD_SHA="$sha" \
     VITE_LATEST_URL="$PUBLIC_LATEST" \
     npx vite build --outDir "$tmp/dist" --emptyOutDir ) >"$tmp/build.log" 2>&1 \
@@ -84,8 +88,8 @@ process.stdout.write(JSON.stringify({
   verify_pub="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).pub)' "$eph")"
   unset eph
 else
-  [[ -n "${AJB_UPDATE_SIGNING_KEY:-}" ]] || fail "AJB_UPDATE_SIGNING_KEY vacia"
-  sign_key="$AJB_UPDATE_SIGNING_KEY"
+  [[ -n "$signing_key" ]] || fail "AJB_UPDATE_SIGNING_KEY vacia"
+  sign_key="$signing_key"
   verify_pub="$PINNED"
 fi
 AJB_UPDATE_SIGNING_KEY="$sign_key" node scripts/update-files.mjs sign "$tmp/dist" --version "$version" --build "$build" --sha "$sha"
@@ -117,6 +121,14 @@ if [[ $dry -eq 1 ]]; then
   exit 0
 fi
 
+# Never lower the announced build (equal = re-publish). Unreachable = warn and go on.
+announced="$(curl -fsS -m 15 "$PUBLIC_LATEST" 2>/dev/null | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>{try{process.stdout.write(String(JSON.parse(s).build))}catch{}})' || true)"
+if [[ "$announced" =~ ^[0-9]+$ ]]; then
+  (( build >= announced )) || fail "$PUBLIC_LATEST anuncia la build $announced, mayor que la $build: no se baja"
+else
+  echo "publicar: aviso: no se pudo leer la build anunciada en $PUBLIC_LATEST; se continua" >&2
+fi
+
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 # One that is not terminating: during a rollout items[0] may be the outgoing pod.
 pod="$(kubectl get pods -n "$NS" -l app.kubernetes.io/name="$NS" --field-selector=status.phase=Running -o json \
@@ -137,4 +149,19 @@ kubectl exec -n "$NS" "$pod" -- mkdir -p "$PUB_DIR" \
 got="$(curl -fsS -m 15 "$PUBLIC_LATEST" | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).build)))')" \
   || fail "$PUBLIC_LATEST no responde"
 [[ "$got" == "$build" ]] || fail "$PUBLIC_LATEST anuncia la build $got, no la $build"
+# What the public URL serves must verify against the pinned key, or browsers would reject it.
+PUBLIC_ZIP="${PUBLIC_LATEST%/latest.json}"
+curl -fsS -m 60 "$PUBLIC_ZIP" -o "$tmp/public.zip" || fail "$PUBLIC_ZIP no responde"
+node --input-type=module -e '
+import { unzipSync } from "fflate";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+const [zip, out] = process.argv.slice(1);
+for (const [p, b] of Object.entries(unzipSync(new Uint8Array(readFileSync(zip))))) {
+  if (p.endsWith("/")) continue;
+  mkdirSync(dirname(join(out, p)), { recursive: true });
+  writeFileSync(join(out, p), b);
+}
+' "$tmp/public.zip" "$tmp/public" || fail "no se pudo abrir el zip publicado"
+node scripts/update-files.mjs verify "$tmp/public" --pub "$PINNED" || fail "el zip publicado NO verifica con la clave pinneada"
 echo "publicada $version ($sha) en $PUBLIC_LATEST"
