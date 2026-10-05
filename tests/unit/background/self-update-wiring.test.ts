@@ -15,7 +15,7 @@ function fakeDeps() {
     unzip: () => ({}), writeFile: vi.fn(async () => 1), removeFile: async () => {}, erase: async () => {},
     setDownloadUi: async () => {}, readOwnFile: async () => null, lastToolActivityAt: async () => null,
     storage: { get: async () => undefined, set: async () => {}, remove: async () => {} },
-    reload: () => {}, notify: async () => {}, now: () => 1_000_000_000, randomId: () => 'r1',
+    reload: () => {}, keepAlive: () => () => {}, supportsEd25519: async () => true, notify: async () => {}, now: () => 1_000_000_000, randomId: () => 'r1',
   } as unknown as SelfUpdateDeps;
   return { deps, fetchBytes };
 }

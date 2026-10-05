@@ -32,6 +32,13 @@ describe('update-files.mjs', () => {
     const d = dist(); writeFileSync(join(d, 'tool.exe'), 'x');
     expect(() => execFileSync('node', ['scripts/update-files.mjs', 'sign', d, '--version', 'v', '--build', '1', '--sha', 's'], { env: { ...process.env, AJB_UPDATE_SIGNING_KEY: pem }, stdio: 'pipe' })).toThrow();
   });
+  it.each(['assets/con.js', 'lpt1.css', 'dir./x.js'])('fails on a path the extension would refuse (%s)', (rel) => {
+    const d = dist();
+    const parts = rel.split('/');
+    if (parts.length > 1) mkdirSync(join(d, parts[0]), { recursive: true });
+    writeFileSync(join(d, ...parts), 'x');
+    expect(() => execFileSync('node', ['scripts/update-files.mjs', 'sign', d, '--version', 'v', '--build', '1', '--sha', 's'], { env: { ...process.env, AJB_UPDATE_SIGNING_KEY: pem }, stdio: 'pipe' })).toThrow();
+  });
   it('fails without the key and never prints it', () => {
     const d = dist();
     expect(() => execFileSync('node', ['scripts/update-files.mjs', 'sign', d, '--version', 'v', '--build', '1', '--sha', 's'], { env: { ...process.env, AJB_UPDATE_SIGNING_KEY: '' }, stdio: 'pipe' })).toThrow();

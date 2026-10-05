@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { zipSync, strToU8, unzipSync } from 'fflate';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { applyUpdate, cleanupAfterUpdate, DownloadStalledError, FILES_KEY, LOCK_KEY, PENDING_KEY, type SelfUpdateDeps } from '@/background/self-update';
+import { applyUpdate, cleanupAfterUpdate, restoreDownloadUi, DownloadStalledError, FILES_KEY, LOCK_KEY, PENDING_KEY, ATTEMPTS_KEY, UI_DISABLED_KEY, type SelfUpdateDeps } from '@/background/self-update';
 
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PUB = publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
@@ -20,8 +20,10 @@ const FILES = { 'manifest.json': '{"version":"2.4.0.141"}', 'assets/a-2.js': 'a2
 function deps(over: Partial<SelfUpdateDeps> = {}, zip = pkg(FILES)) {
   const disk = new Map<string, string>(); const store = new Map<string, unknown>(); const ids = new Map<number, string>();
   let next = 1; const writes: string[] = []; const notes: string[] = [];
-  const d: SelfUpdateDeps & { disk: typeof disk; store: typeof store; writes: string[]; notes: string[]; reloaded: number; ui: boolean[] } = {
-    disk, store, writes, notes, reloaded: 0, ui: [],
+  const d: SelfUpdateDeps & { disk: typeof disk; store: typeof store; writes: string[]; notes: string[]; reloaded: number; ui: boolean[]; alive: number; stopped: number } = {
+    disk, store, writes, notes, reloaded: 0, ui: [], alive: 0, stopped: 0,
+      keepAlive: () => { d.alive++; return () => { d.stopped++; }; },
+      supportsEd25519: async () => true,
     currentBuild: 140, publicKey: PUB,
     fetchBytes: async () => zip,
     unzip: unzipSync,
@@ -46,7 +48,7 @@ type D = ReturnType<typeof deps>;
 const pkgWrites = (d: D) => d.writes.filter((p) => !p.startsWith('agent-jake-probe-'));
 
 describe('applyUpdate', () => {
-  it('1. applies in order, reloads once, leaves pendingCleanup + files, toggles the UI, releases the lock', async () => {
+  it('1. applies in order, reloads once, leaves pendingCleanup + files, toggles the UI, keeps the lock until the reload', async () => {
     const d = deps();
     const r = await run(d);
     expect(r.status).toBe('applied');
@@ -56,7 +58,7 @@ describe('applyUpdate', () => {
     expect(d.store.has(PENDING_KEY)).toBe(true);
     expect(Object.keys(d.store.get(FILES_KEY) as object).sort()).toEqual(['assets/a-2.js', 'manifest.json', 'service-worker-loader.js']);
     expect(d.ui).toEqual([false, true]);
-    expect(d.store.has(LOCK_KEY)).toBe(false);
+    expect(d.store.has(LOCK_KEY)).toBe(true);
   });
 
   it('2. already on the published build: up-to-date, no writes, no fetch', async () => {
@@ -180,5 +182,110 @@ describe('cleanupAfterUpdate', () => {
     await cleanupAfterUpdate(d);
     expect(removeFile).not.toHaveBeenCalled();
     expect(d.store.has(PENDING_KEY)).toBe(true);
+  });
+});
+
+describe('review round 1', () => {
+  it('F1 persists the UI-disabled flag during writes and clears it after re-enabling', async () => {
+    const d = deps();
+    let flagDuringDisable: unknown;
+    const orig = d.setDownloadUi;
+    d.setDownloadUi = async (on) => { if (!on) flagDuringDisable = d.store.get(UI_DISABLED_KEY); await orig(on); };
+    await run(d);
+    expect(flagDuringDisable).toBe(true);
+    expect(d.store.has(UI_DISABLED_KEY)).toBe(false);
+  });
+
+  it('F1 restoreDownloadUi re-enables the UI when the flag survived a dead worker, and clears it', async () => {
+    const d = deps();
+    d.store.set(UI_DISABLED_KEY, true);
+    await restoreDownloadUi(d);
+    expect(d.ui).toEqual([true]);
+    expect(d.store.has(UI_DISABLED_KEY)).toBe(false);
+    await restoreDownloadUi(d);
+    expect(d.ui).toEqual([true]);
+  });
+
+  it('F1/F11a setDownloadUi(true) throwing still saves state and reloads, flag kept for the next start', async () => {
+    const d = deps();
+    d.setDownloadUi = async (on) => { if (on) throw new Error('ui boom'); };
+    expect((await run(d)).status).toBe('applied');
+    expect(d.reloaded).toBe(1);
+    expect(d.store.has(PENDING_KEY)).toBe(true);
+    expect(d.store.get(UI_DISABLED_KEY)).toBe(true);
+  });
+
+  it('F2 an unexpected probe error is reported as probe-failed, not not-in-downloads', async () => {
+    const d = deps({ writeFile: async () => { throw new Error('Invalid filename'); } });
+    expect(await run(d)).toEqual({ status: 'not-eligible', reason: 'probe-failed' });
+    expect(d.notes).toEqual(['probe-failed']);
+  });
+
+  it('F3 a mid-way failure erases the history of files already written, but keeps the files', async () => {
+    const base = deps();
+    let calls = 0;
+    const d = deps({ writeFile: async (p, u) => { if (++calls === 3) throw new Error('boom'); return base.writeFile(p, u); }, readOwnFile: base.readOwnFile, removeFile: base.removeFile, erase: base.erase });
+    const erase = vi.spyOn(d, 'erase');
+    const removeFile = vi.spyOn(d, 'removeFile');
+    await run(d);
+    expect(erase.mock.calls.map((c) => c[0])).toContain(2);
+    expect(removeFile.mock.calls.map((c) => c[0])).not.toContain(2);
+    expect(base.disk.has('assets/a-2.js')).toBe(true);
+  });
+
+  it('F4 after two attempts for the same build that never took, it stops: failed/not-applied, notified once', async () => {
+    const d = deps();
+    expect((await run(d)).status).toBe('applied');
+    expect(d.store.get(ATTEMPTS_KEY)).toEqual({ build: 141, count: 1 });
+    d.store.delete(LOCK_KEY);
+    expect((await run(d)).status).toBe('applied');
+    expect(d.store.get(ATTEMPTS_KEY)).toEqual({ build: 141, count: 2 });
+    d.store.delete(LOCK_KEY);
+    const before = d.writes.length;
+    expect(await run(d)).toEqual({ status: 'failed', reason: 'not-applied' });
+    expect(d.writes.length).toBe(before);
+    expect(d.notes).toEqual(['not-applied']);
+    expect(d.store.has(LOCK_KEY)).toBe(false);
+  });
+
+  it('F5 concurrent calls: the second returns locked and only one write set happens', async () => {
+    const d = deps();
+    const [a, b] = await Promise.all([run(d), run(d)]);
+    expect([a.status, b.status].sort()).toEqual(['applied', 'locked']);
+    expect(pkgWrites(d)).toEqual(['assets/a-2.js', 'manifest.json', 'service-worker-loader.js']);
+  });
+
+  it('F5 the storage lock stays after success and goes away on every other path', async () => {
+    const ok = deps();
+    await run(ok);
+    expect(ok.store.has(LOCK_KEY)).toBe(true);
+    const busy = deps({ lastToolActivityAt: async () => 1_000_000_000 });
+    await run(busy);
+    expect(busy.store.has(LOCK_KEY)).toBe(false);
+  });
+
+  it('F6 keep-alive starts after the lock and is stopped on success and on failure', async () => {
+    const ok = deps();
+    await run(ok);
+    expect([ok.alive, ok.stopped]).toEqual([1, 1]);
+    const bad = deps({ readOwnFile: async () => null });
+    await run(bad);
+    expect([bad.alive, bad.stopped]).toEqual([1, 1]);
+  });
+
+  it('F7 browser without Ed25519: not-eligible/unsupported-browser, notified, no fetch', async () => {
+    const fetchBytes = vi.fn();
+    const d = deps({ supportsEd25519: async () => false, fetchBytes });
+    expect(await run(d)).toEqual({ status: 'not-eligible', reason: 'unsupported-browser' });
+    expect(d.notes).toEqual(['unsupported-browser']);
+    expect(fetchBytes).not.toHaveBeenCalled();
+  });
+
+  it('F11b a zip over 20 MB is rejected as bad-package before unzipping', async () => {
+    const unzip = vi.fn();
+    const d = deps({ fetchBytes: async () => new Uint8Array(20 * 1024 * 1024 + 1), unzip });
+    expect((await run(d)).status).toBe('rejected');
+    expect(unzip).not.toHaveBeenCalled();
+    expect(d.notes).toEqual(['bad-package']);
   });
 });

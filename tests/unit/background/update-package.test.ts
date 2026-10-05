@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { isSafePath, mimeFor, parseUpdateFiles, sha256Hex, verifySignature, writeOrder, toDataUrl } from '@/background/update-package';
+import { supportsEd25519, isSafePath, mimeFor, parseUpdateFiles, sha256Hex, verifySignature, writeOrder, toDataUrl } from '@/background/update-package';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
 describe('isSafePath', () => {
   it.each(['manifest.json', 'assets/index.ts-loader-BAV7mLrc.js', 'src/sidepanel/index.html', 'icons/icon16.png'])('accepts %s', (p) => expect(isSafePath(p)).toBe(true));
-  it.each(['', '/etc/x.js', '../x.js', 'a/../b.js', '.vite/manifest.json', 'assets/.hidden.js', 'a\\b.js', 'x.exe', 'a//b.js', 'config.json '])('rejects %j', (p) => expect(isSafePath(p)).toBe(false));
+  it.each(['', '/etc/x.js', '../x.js', 'a/../b.js', '.vite/manifest.json', 'assets/.hidden.js', 'a\\b.js', 'x.exe', 'a//b.js', 'config.json ', 'dir./x.js', 'con.js', 'assets/NUL.js', 'a/lpt1.css', 'COM9.json', 'aux.min.js'])('rejects %j', (p) => expect(isSafePath(p)).toBe(false));
 });
 
 describe('mimeFor', () => {
@@ -52,4 +52,8 @@ describe('writeOrder', () => {
 it('sha256Hex and toDataUrl', async () => {
   expect(await sha256Hex(enc('abc'))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
   expect(toDataUrl(enc('hi'), 'text/plain')).toBe('data:text/plain;base64,aGk=');
+});
+
+it('supportsEd25519 is true where WebCrypto has Ed25519', async () => {
+  expect(await supportsEd25519()).toBe(true);
 });

@@ -7,20 +7,27 @@ import { unzipSync } from 'fflate';
 import { CONFIG } from '@/types/config';
 import { UPDATE_PUBLIC_KEY } from '@/config/update-key';
 import { activityLog } from './activity-log';
+import { log } from '@/utils/logger';
 import type { PublishedBuild, UpdateState } from './update-check';
-import { FILES_NAME, INSTALL_DIR, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
+import { FILES_NAME, INSTALL_DIR, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
 
-export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed';
+export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed' | 'probe-failed' | 'not-applied' | 'unsupported-browser';
 export type SelfUpdateStatus = 'applied' | 'up-to-date' | 'locked' | 'busy' | 'not-eligible' | 'rejected' | 'failed';
 export interface SelfUpdateResult { status: SelfUpdateStatus; reason?: string }
-export class DownloadStalledError extends Error {}
+/** A failed download; `id` is set when Chrome had already created the download item. */
+export class DownloadError extends Error {
+  constructor(message: string, public id?: number) { super(message); }
+}
+/** The download never progressed: still in progress after 15 s, or canceled by the "ask where to save" prompt. */
+export class DownloadStalledError extends DownloadError {}
 export interface SelfUpdateDeps {
   currentBuild: number;
   publicKey: string;
   fetchBytes(url: string): Promise<Uint8Array>;
   unzip(bytes: Uint8Array): Record<string, Uint8Array>;
   /** Writes INSTALL_DIR/<path>; resolves the download id once complete with that exact name.
-   *  Rejects with DownloadStalledError if still in progress after 15 s (it cancels it first). */
+   *  Rejects with DownloadStalledError if stalled (15 s, or canceled by the save prompt), with a
+   *  DownloadError otherwise. On rename/interruption/stall it has already removed the file and erased the entry. */
   writeFile(path: string, dataUrl: string): Promise<number>;
   removeFile(id: number): Promise<void>;
   erase(id: number): Promise<void>;
@@ -32,15 +39,25 @@ export interface SelfUpdateDeps {
   notify(problem: SelfUpdateProblem, build: number): Promise<void>;
   now(): number;
   randomId(): string;
+  /** Keeps the service worker alive while an update runs; returns the stop function. */
+  keepAlive(): () => void;
+  supportsEd25519(): Promise<boolean>;
 }
 
 export const LOCK_KEY = 'ajb.selfUpdate.lock';
 export const FILES_KEY = 'ajb.selfUpdate.files';
 export const PENDING_KEY = 'ajb.selfUpdate.pendingCleanup';
 export const NOTIFIED_KEY = 'ajb.selfUpdate.notified';
+export const UI_DISABLED_KEY = 'ajb.selfUpdate.uiDisabled';
+export const ATTEMPTS_KEY = 'ajb.selfUpdate.attempts';
 const LOCK_MS = 10 * 60_000;
 const IDLE_MS = 5 * 60_000;
 const STALL_MS = 15_000;
+const MAX_ZIP_BYTES = 20 * 1024 * 1024;
+const MAX_ATTEMPTS = 2;
+
+// Same-worker guard: the storage lock below is read-then-write, so two overlapping calls could both pass it.
+let inFlight = false;
 
 type FileMap = Record<string, number>;
 interface Pending { build: number; previous: FileMap; written: FileMap }
@@ -60,7 +77,9 @@ async function probe(deps: SelfUpdateDeps): Promise<'ok' | SelfUpdateProblem> {
     id = await deps.writeFile(name, toDataUrl(new TextEncoder().encode(token), 'text/plain'));
     return (await deps.readOwnFile(name)) === token ? 'ok' : 'not-in-downloads';
   } catch (e) {
-    return e instanceof DownloadStalledError ? 'download-prompt' : 'not-in-downloads';
+    if (e instanceof DownloadStalledError) return 'download-prompt';
+    log.warn('[SelfUpdate] probe failed:', e);
+    return 'probe-failed';
   } finally {
     if (id !== undefined) { await deps.removeFile(id).catch(() => {}); await deps.erase(id).catch(() => {}); }
   }
@@ -82,40 +101,83 @@ async function verifiedPackage(zip: Record<string, Uint8Array>, latest: Publishe
 
 export async function applyUpdate(latest: PublishedBuild, zipUrl: string, deps: SelfUpdateDeps): Promise<SelfUpdateResult> {
   if (latest.build <= deps.currentBuild) return { status: 'up-to-date' };
-  const held = await deps.storage.get(LOCK_KEY);
-  if (typeof held === 'number' && deps.now() - held < LOCK_MS) return { status: 'locked' };
-  await deps.storage.set(LOCK_KEY, deps.now());
+  if (inFlight) return { status: 'locked' };
+  inFlight = true;
   try {
-    const last = await deps.lastToolActivityAt();
-    if (last !== null && deps.now() - last < IDLE_MS) return { status: 'busy' };
-
-    const eligible = await probe(deps);
-    if (eligible !== 'ok') { await warnOnce(deps, eligible, latest.build); return { status: 'not-eligible', reason: eligible }; }
-
-    let files: UpdateFiles | null = null; let zip: Record<string, Uint8Array> = {};
-    try { zip = deps.unzip(await deps.fetchBytes(zipUrl)); files = await verifiedPackage(zip, latest, deps); } catch { files = null; }
-    if (!files) { await warnOnce(deps, 'bad-package', latest.build); return { status: 'rejected' }; }
-
-    const previous = ((await deps.storage.get(FILES_KEY)) as FileMap | undefined) ?? {};
-    const written: FileMap = {};
-    await deps.setDownloadUi(false);
+    const held = await deps.storage.get(LOCK_KEY);
+    if (typeof held === 'number' && deps.now() - held < LOCK_MS) return { status: 'locked' };
+    await deps.storage.set(LOCK_KEY, deps.now());
+    const stopKeepAlive = deps.keepAlive();
+    // On success the lock stays: the reload kills this worker, and if the reload does not take, the expiry frees it.
+    let keepLock = false;
     try {
-      for (const f of writeOrder(files.files)) written[f.path] = await deps.writeFile(f.path, toDataUrl(zip[f.path], mimeFor(f.path)!));
-    } catch (e) {
-      await warnOnce(deps, 'write-failed', latest.build);
-      return { status: 'failed', reason: String((e as Error)?.message ?? e) };
+      const attempts = (await deps.storage.get(ATTEMPTS_KEY)) as { build: number; count: number } | undefined;
+      if (attempts?.build === latest.build && attempts.count >= MAX_ATTEMPTS) {
+        await warnOnce(deps, 'not-applied', latest.build);
+        return { status: 'failed', reason: 'not-applied' };
+      }
+
+      const last = await deps.lastToolActivityAt();
+      if (last !== null && deps.now() - last < IDLE_MS) return { status: 'busy' };
+
+      if (!await deps.supportsEd25519()) {
+        await warnOnce(deps, 'unsupported-browser', latest.build);
+        return { status: 'not-eligible', reason: 'unsupported-browser' };
+      }
+
+      const eligible = await probe(deps);
+      if (eligible !== 'ok') { await warnOnce(deps, eligible, latest.build); return { status: 'not-eligible', reason: eligible }; }
+
+      let files: UpdateFiles | null = null; let zip: Record<string, Uint8Array> = {};
+      try {
+        const bytes = await deps.fetchBytes(zipUrl);
+        if (bytes.length > MAX_ZIP_BYTES) throw new Error('package too large');
+        zip = deps.unzip(bytes);
+        files = await verifiedPackage(zip, latest, deps);
+      } catch { files = null; }
+      if (!files) { await warnOnce(deps, 'bad-package', latest.build); return { status: 'rejected' }; }
+
+      const previous = ((await deps.storage.get(FILES_KEY)) as FileMap | undefined) ?? {};
+      const written: FileMap = {};
+      // Persisted so a worker that dies mid-write still gets the downloads UI back on its next start.
+      await deps.storage.set(UI_DISABLED_KEY, true);
+      try {
+        await deps.setDownloadUi(false);
+        for (const f of writeOrder(files.files)) written[f.path] = await deps.writeFile(f.path, toDataUrl(zip[f.path], mimeFor(f.path)!));
+      } catch (e) {
+        // Keep the files (the retry overwrites them) but drop their history entries.
+        for (const id of Object.values(written)) await deps.erase(id).catch(() => {});
+        await warnOnce(deps, 'write-failed', latest.build);
+        return { status: 'failed', reason: String((e as Error)?.message ?? e) };
+      } finally {
+        try {
+          await deps.setDownloadUi(true);
+          await deps.storage.remove(UI_DISABLED_KEY);
+        } catch (e) {
+          log.warn('[SelfUpdate] could not re-enable the downloads UI (flag kept for the next start):', e);
+        }
+      }
+      const pending: Pending = { build: files.build, previous, written };
+      await deps.storage.set(PENDING_KEY, pending);
+      await deps.storage.set(FILES_KEY, written);
+      await deps.storage.set(ATTEMPTS_KEY, { build: files.build, count: attempts?.build === files.build ? attempts.count + 1 : 1 });
+      keepLock = true;
+      deps.reload();
+      return { status: 'applied' };
     } finally {
-      await deps.setDownloadUi(true);
+      stopKeepAlive();
+      if (!keepLock) await deps.storage.remove(LOCK_KEY);
     }
-    const pending: Pending = { build: files.build, previous, written };
-    await deps.storage.set(PENDING_KEY, pending);
-    await deps.storage.set(FILES_KEY, written);
-    await deps.storage.remove(LOCK_KEY);
-    deps.reload();
-    return { status: 'applied' };
   } finally {
-    await deps.storage.remove(LOCK_KEY);
+    inFlight = false;
   }
+}
+
+/** Run at every worker start: undo a downloads-UI disable left behind by a worker that died mid-update. */
+export async function restoreDownloadUi(deps: SelfUpdateDeps): Promise<void> {
+  if ((await deps.storage.get(UI_DISABLED_KEY)) !== true) return;
+  await deps.setDownloadUi(true);
+  await deps.storage.remove(UI_DISABLED_KEY);
 }
 
 export async function cleanupAfterUpdate(deps: SelfUpdateDeps): Promise<void> {
@@ -138,38 +200,59 @@ const NOTICE_TEXT: Record<SelfUpdateProblem, string> = {
   'download-prompt': 'Agent Jake no puede actualizarse sola: desactiva "Preguntar dónde guardar cada archivo" en los ajustes de Chrome',
   'bad-package': 'Actualización de Agent Jake rechazada: paquete o firma no válidos',
   'write-failed': 'La actualización de Agent Jake falló a mitad; se reintenta en 30 min',
+  'probe-failed': 'Agent Jake no pudo comprobar su carpeta de instalación; se reintenta en 30 min',
+  'not-applied': 'Agent Jake no arrancó la versión nueva tras actualizarse; revisa el modo desarrollador en chrome://extensions',
+  'unsupported-browser': 'Este Chrome no soporta Ed25519: actualiza Chrome para que Agent Jake se actualice sola',
 };
 
-/** Resolves with the finished download id; throws if interrupted, renamed, or stalled past STALL_MS. */
-function waitForDownload(id: number, path: string): Promise<number> {
+const quietly = async (f: () => unknown) => { try { await f(); } catch { /* best effort */ } };
+const discard = async (id: number) => {
+  await quietly(() => chrome.downloads.removeFile(id));
+  await quietly(() => chrome.downloads.erase({ id }));
+};
+
+/**
+ * Resolves with the finished download id. Rejects (after removing the file and erasing the entry) if the
+ * download was interrupted, finished under another name, or stalled past STALL_MS. USER_CANCELED is what the
+ * "ask where to save each file" prompt produces when headless, so it counts as a stall.
+ */
+export function waitForDownload(id: number, path: string): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let settled = false;
-    const finish = (fn: () => void) => {
-      if (settled) return;
+    const settle = (fn: () => void) => {
+      if (settled) return false;
       settled = true;
       clearTimeout(timer);
       chrome.downloads.onChanged.removeListener(onChanged);
       fn();
+      return true;
+    };
+    const fail = async (err: DownloadError, cancel = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      if (cancel) await quietly(() => chrome.downloads.cancel(id));
+      await discard(id);
+      reject(err);
     };
     const check = async () => {
       const [item] = await chrome.downloads.search({ id });
-      if (!item) return;
+      if (!item || settled) return;
       if (item.state === 'complete') {
-        if (item.filename.replace(/\\/g, '/').endsWith(`/${INSTALL_DIR}/${path}`)) finish(() => resolve(id));
-        else finish(() => reject(new Error('renamed: ' + item.filename.split(/[\\/]/).pop())));
+        if (item.filename.replace(/\\/g, '/').endsWith(`/${INSTALL_DIR}/${path}`)) settle(() => resolve(id));
+        else await fail(new DownloadError('renamed: ' + item.filename.split(/[\\/]/).pop(), id));
       } else if (item.state === 'interrupted') {
-        finish(() => reject(new Error(`download interrupted: ${path} (${item.error ?? 'unknown'})`)));
+        const msg = `download interrupted: ${path} (${item.error ?? 'unknown'})`;
+        await fail(item.error === 'USER_CANCELED' ? new DownloadStalledError(msg, id) : new DownloadError(msg, id));
       }
     };
     const onChanged = (delta: chrome.downloads.DownloadDelta) => {
-      if (delta.id === id && (delta.state || delta.error)) void check().catch((e) => finish(() => reject(e)));
+      if (delta.id === id && (delta.state || delta.error)) void check().catch((e) => fail(new DownloadError(String(e), id)));
     };
-    const timer = setTimeout(() => {
-      void chrome.downloads.cancel(id).catch(() => {});
-      finish(() => reject(new DownloadStalledError(path)));
-    }, STALL_MS);
+    const timer = setTimeout(() => void fail(new DownloadStalledError(path, id), true), STALL_MS);
     chrome.downloads.onChanged.addListener(onChanged);
-    void check().catch((e) => finish(() => reject(e)));
+    void check().catch((e) => fail(new DownloadError(String(e), id)));
   });
 }
 
@@ -218,6 +301,11 @@ export function chromeSelfUpdateDeps(): SelfUpdateDeps {
         contextMessage: `Build ${build}`,
       });
     },
+    keepAlive() {
+      const t = setInterval(() => { void chrome.runtime.getPlatformInfo(); }, 20_000);
+      return () => clearInterval(t);
+    },
+    supportsEd25519,
     now: Date.now,
     randomId: () => crypto.randomUUID().slice(0, 8),
   };

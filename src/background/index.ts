@@ -35,7 +35,7 @@ import {
   latestUrlFor,
   type UpdateState,
 } from './update-check';
-import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate } from './self-update';
+import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, restoreDownloadUi } from './self-update';
 import {
   buildDisplayUrl,
   getEffectiveConfig,
@@ -155,6 +155,7 @@ async function runUpdateCheck(): Promise<void> {
 
 // On every service-worker start: after a self-update reload, drop the files the new build no longer ships.
 void cleanupAfterUpdate(chromeSelfUpdateDeps()).catch((e) => log.warn('[SelfUpdate] cleanup failed:', e));
+void restoreDownloadUi(chromeSelfUpdateDeps()).catch((e) => log.warn('[SelfUpdate] could not restore the downloads UI:', e));
 
 async function ensureUpdateAlarm(): Promise<void> {
   if (!await chrome.alarms.get(UPDATE_ALARM)) {

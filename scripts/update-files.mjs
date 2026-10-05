@@ -9,7 +9,9 @@ import { fileURLToPath } from 'node:url';
 const MIME = JSON.parse(readFileSync(new URL('../src/config/update-mime.json', import.meta.url), 'utf8'));
 const SAFE = /^[A-Za-z0-9._\/-]+$/;
 const OWN = new Set(['update-files.json', 'update-files.json.sig']);
-const safe = (p) => p.length <= 200 && SAFE.test(p) && !p.split('/').some((s) => !s || s === '..' || s.startsWith('.'))
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i; // Windows device names, any extension
+const safe = (p) => p.length <= 200 && SAFE.test(p)
+  && !p.split('/').some((s) => !s || s === '..' || s.startsWith('.') || s.endsWith('.') || RESERVED.test(s.split('.')[0]))
   && Object.hasOwn(MIME, p.slice(p.lastIndexOf('.') + 1).toLowerCase());
 
 export function listFiles(dir, base = dir) {
@@ -26,6 +28,7 @@ export function buildUpdateFiles(dir, { version, build, sha }) {
     const bytes = readFileSync(join(dir, path));
     return { path, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
   });
+  if (new Set(files.map((f) => f.path.toLowerCase())).size !== files.length) throw new Error('case-insensitive duplicate paths in package');
   if (!files.some((f) => f.path === 'manifest.json')) throw new Error('manifest.json missing');
   return { version, build: Number(build), sha, files };
 }
