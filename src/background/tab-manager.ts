@@ -146,6 +146,7 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
   if (!frameIds.length) return 0;
   const results = await chrome.scripting.executeScript({
     target: { tabId, frameIds },
+    injectImmediately: true, // see setLiveConnectionCloseGuard
     args: [chrome.runtime.id],
     func: (ownId: string) => {
       let removed = 0;
@@ -1216,6 +1217,9 @@ export class TabManager {
       await chrome.scripting.executeScript({
         target: { tabId },
         world: 'MAIN',
+        // Without it executeScript waits for document_idle, and a page that never finishes loading never
+        // gets there: connecting, switching, closing or leaving that tab would hang (INFRA-699).
+        injectImmediately: true,
         func: () => {
           const host = window as unknown as Record<string, unknown>;
           const keys = {

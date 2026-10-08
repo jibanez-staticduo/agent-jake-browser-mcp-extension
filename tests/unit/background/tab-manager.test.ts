@@ -46,6 +46,10 @@ const mockChrome = {
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
   },
+  runtime: {
+    id: 'own-extension-id',
+    getManifest: vi.fn(() => ({ content_scripts: [{ js: ['content.js'] }] })),
+  },
   webNavigation: {
     getAllFrames: vi.fn().mockResolvedValue([]),
     onCommitted: {
@@ -68,12 +72,14 @@ vi.mock('@/background/activity-log', () => ({
   logError: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { TabManager, WEBAUTHN_PIN_SCRIPT, PASSKEY_CEREMONY_TIMEOUT_MS, pinWebAuthn } from '@/background/tab-manager';
+import { TabManager, WEBAUTHN_PIN_SCRIPT, PASSKEY_CEREMONY_TIMEOUT_MS, pinWebAuthn, purgeForeignExtensionFrames } from '@/background/tab-manager';
 import { runInNewContext } from 'node:vm';
 import { pageEvents } from '@/background/page-events';
 import { TIMEOUTS } from '@/constants/timeouts';
 import { createNavigationHandlers } from '@/background/tools/handlers/navigation';
 import type { HandlerContext } from '@/background/tools/handlers/types';
+import { createStateHandlers } from '@/background/tools/handlers/state';
+import { createToolContext } from '@/background/tools/utils';
 
 describe('TabManager CDP readiness', () => {
   beforeEach(() => {
@@ -902,6 +908,10 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    mockChrome.tabs.sendMessage.mockReset().mockResolvedValue(undefined);
+    mockChrome.webNavigation.getAllFrames.mockReset().mockResolvedValue([]);
+    mockChrome.debugger.detach.mockReset();
   });
 
   // Criterion 1
@@ -1153,6 +1163,111 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
 
       expect(answer.error).toBe(refused);
       expect(events.leaked()).toBe(0);
+    });
+  });
+
+  // INFRA-699, second round: qa found in a real Chrome that new_tab on a page that never loads answered,
+  // and then state, switch_tab, close_tab and even new_tab to another page never did. In Chrome,
+  // chrome.scripting.executeScript waits for document_idle unless injectImmediately is set, and a
+  // document that never finishes parsing never gets there (measured: scripts/e2e-slow-page.mjs).
+  describe('commands that follow a page that never loads', () => {
+    const HANG_TAB = 7;
+    const OTHER_TAB = 20;
+    let tabs: Record<number, 'loading' | 'complete'>;
+    let contentScriptIn: Set<number>;
+
+    /** Chrome as measured: executeScript answers on a loading tab only when it injects immediately. */
+    function chromeWhereScriptsWaitForTheDocument() {
+      contentScriptIn = new Set();
+      mockChrome.tabs.get.mockImplementation(async (id: number) => {
+        if (!(id in tabs)) throw new Error(`No tab with id: ${id}`);
+        return { id, status: tabs[id], url: id === HANG_TAB ? URL_THAT_HANGS : 'about:blank', title: '', active: false };
+      });
+      mockChrome.scripting.executeScript.mockImplementation(async (injection: { target: { tabId: number }; files?: string[]; injectImmediately?: boolean }) => {
+        if (!injection.injectImmediately && tabs[injection.target.tabId] === 'loading') return new Promise(() => undefined);
+        if (injection.files) contentScriptIn.add(injection.target.tabId);
+        return [{ result: 0 }];
+      });
+      mockChrome.tabs.sendMessage.mockImplementation(async (id: number) => {
+        if (!contentScriptIn.has(id)) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return { success: true, data: 'page state' };
+      });
+      mockChrome.webNavigation.getAllFrames.mockResolvedValue([{ frameId: 0, url: URL_THAT_HANGS }]);
+      mockChrome.debugger.attach.mockResolvedValue(undefined);
+      mockChrome.debugger.detach.mockResolvedValue(undefined);
+      mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+        method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+      mockChrome.tabs.remove.mockResolvedValue(undefined);
+    }
+
+    /** The session as qa had it: a tab connected while blank, then sent to the page that never finishes. */
+    async function managerOnTheHangingTab() {
+      tabs = { [HANG_TAB]: 'complete' };
+      chromeWhereScriptsWaitForTheDocument();
+      const manager = new TabManager();
+      await manager.connectTab(HANG_TAB);
+      tabs[HANG_TAB] = 'loading';
+      return manager;
+    }
+
+    it('browser_state answers from the half-loaded page', async () => {
+      const manager = await managerOnTheHangingTab();
+      const handlers = createStateHandlers(createToolContext(manager) as unknown as HandlerContext);
+
+      const answer = track(handlers.browser_state({}));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { state: 'page state' } });
+    });
+
+    it('switch_tab to it answers', async () => {
+      const manager = await managerOnTheHangingTab();
+
+      const answer = track(manager.switchTab(HANG_TAB));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer.state).toBe('resolved');
+    });
+
+    it('close_tab closes it', async () => {
+      const manager = await managerOnTheHangingTab();
+
+      const answer = track(manager.closeTab(HANG_TAB));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: HANG_TAB });
+      expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
+    });
+
+    it('another tab can be connected: leaving the loading one does not wait for it', async () => {
+      const manager = await managerOnTheHangingTab();
+      tabs[OTHER_TAB] = 'complete';
+
+      const answer = track(manager.connectTab(OTHER_TAB));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer.state).toBe('resolved');
+      expect(manager.getConnectedTabId()).toBe(OTHER_TAB);
+    });
+
+    it('new_tab to another page answers while the loading tab is the connected one', async () => {
+      const manager = await managerOnTheHangingTab();
+      mockChrome.tabs.create.mockImplementation(async () => { tabs[OTHER_TAB] = 'complete'; return { id: OTHER_TAB, url: 'about:blank', status: 'complete' }; });
+      mockChrome.tabs.update.mockImplementation(async (id: number) => { events.complete(id); return {}; });
+
+      const answer = track(manager.createTab('https://other.example/ok'));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { tab: { id: OTHER_TAB, connected: true }, loaded: true } });
+    });
+
+    it('lifting a foreign extension frame does not wait for the page either', async () => {
+      await managerOnTheHangingTab();
+
+      const answer = track(purgeForeignExtensionFrames(HANG_TAB));
+      await vi.advanceTimersByTimeAsync(PROBE_MS);
+
+      expect(answer.state).toBe('resolved');
     });
   });
 

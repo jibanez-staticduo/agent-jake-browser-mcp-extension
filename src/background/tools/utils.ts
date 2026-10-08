@@ -140,7 +140,9 @@ export function createToolContext(tabManager: TabManager): ToolContext {
       if (!files?.length) {
         throw new Error('No content script declared in the manifest');
       }
-      await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files });
+      // injectImmediately: by default executeScript waits for document_idle, which a page that never
+      // finishes loading never reaches, and the command would hang until the server's cut (INFRA-699).
+      await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files, injectImmediately: true });
       let injected: unknown;
       let lastErr: Error | null = null;
       for (let i = 0; i < 20; i++) {
