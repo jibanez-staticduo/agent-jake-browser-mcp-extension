@@ -39,4 +39,6 @@ chk "16 el botón abre el side panel, sin popup"         bash -c 'grep -q "openP
 chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
+# INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
+chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
 exit $fail

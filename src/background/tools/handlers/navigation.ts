@@ -1,23 +1,30 @@
 /**
  * Navigation tool handlers: navigate, go_back, go_forward, reload.
  */
+import { TIMEOUTS } from '@/constants/timeouts';
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
 
 export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_navigate: async (payload) => {
-      const { url } = schemas.browser_navigate.parse(payload);
+      const { url, waitUntil } = schemas.browser_navigate.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();
 
       if (!tabId) {
         throw new Error('No tab connected');
       }
 
-      await chrome.tabs.update(tabId, { url });
-      await ctx.tabManager.waitForTabLoad(tabId);
+      // networkidle = load: the extension does not measure network idleness.
+      const loaded = await ctx.tabManager.waitForNextTabLoad(
+        tabId,
+        () => chrome.tabs.update(tabId, { url }),
+        TIMEOUTS.TAB_LOAD_WAIT,
+        waitUntil === 'domcontentloaded' ? 'domcontentloaded' : 'load',
+      );
 
-      return { navigated: url };
+      // loaded:false = the page was still loading when the wait ran out; the tab is fine.
+      return { navigated: url, loaded };
     },
 
     browser_go_back: async () => {
@@ -41,11 +48,8 @@ export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
 
     browser_reload: async () => {
       const tabId = ctx.tabManager.getConnectedTabId();
-      if (tabId) {
-        await chrome.tabs.reload(tabId);
-        await ctx.tabManager.waitForTabLoad(tabId);
-      }
-      return { success: true };
+      const loaded = tabId ? await ctx.tabManager.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)) : false;
+      return { success: true, loaded };
     },
   };
 }

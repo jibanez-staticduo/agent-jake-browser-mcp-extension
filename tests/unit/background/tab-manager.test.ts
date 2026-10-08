@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 const mockChrome = {
   storage: {
@@ -11,11 +11,16 @@ const mockChrome = {
   tabs: {
     get: vi.fn(),
     update: vi.fn().mockResolvedValue(undefined),
+    reload: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
     query: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     remove: vi.fn(),
     onUpdated: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    onRemoved: {
       addListener: vi.fn(),
       removeListener: vi.fn(),
     },
@@ -47,6 +52,10 @@ const mockChrome = {
       addListener: vi.fn(),
       removeListener: vi.fn(),
     },
+    onDOMContentLoaded: {
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    },
   },
 };
 
@@ -62,6 +71,9 @@ vi.mock('@/background/activity-log', () => ({
 import { TabManager, WEBAUTHN_PIN_SCRIPT, PASSKEY_CEREMONY_TIMEOUT_MS, pinWebAuthn } from '@/background/tab-manager';
 import { runInNewContext } from 'node:vm';
 import { pageEvents } from '@/background/page-events';
+import { TIMEOUTS } from '@/constants/timeouts';
+import { createNavigationHandlers } from '@/background/tools/handlers/navigation';
+import type { HandlerContext } from '@/background/tools/handlers/types';
 
 describe('TabManager CDP readiness', () => {
   beforeEach(() => {
@@ -487,7 +499,7 @@ describe('TabManager background-tab control', () => {
     const info = await manager.createTab('https://example.com/');
 
     expect(order).toEqual(['create about:blank', 'attach', 'pin script', 'navigate https://example.com/']);
-    expect(info).toMatchObject({ id: 7, url: 'https://example.com/', title: 'Example', connected: true });
+    expect(info).toMatchObject({ tab: { id: 7, url: 'https://example.com/', title: 'Example', connected: true }, loaded: true });
   });
 
   it('createTab closes the blank tab when it cannot load the URL', async () => {
@@ -807,5 +819,367 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
 
     await expect(manager.runPasskeyCeremony('enroll', click)).rejects.toThrow('Passkeys need an https page');
     expect(click).not.toHaveBeenCalled();
+  });
+});
+
+// INFRA-699: a page that never finishes loading must not hang new_tab, navigate or reload.
+describe('TabManager bounded load waits (INFRA-699)', () => {
+  type Listener = (...args: unknown[]) => void;
+  type ChromeEvent = { addListener: Mock; removeListener: Mock };
+  type Tracked<T> = { state: 'pending' | 'resolved' | 'rejected'; value?: T; error?: unknown };
+  /** The bound the spec fixes (criteria 1 and 4), written out so a changed constant is caught. */
+  const GIVE_UP_MS = 20_000;
+  /** Hang probe, in fake ms: a wait still pending after this long is hung. */
+  const PROBE_MS = 25_000;
+  const URL_THAT_HANGS = 'https://slow.example/hang';
+
+  /** Follow a promise without awaiting it: a hang is a failed assertion, never a stuck runner. */
+  function track<T>(promise: Promise<T>): Tracked<T> {
+    const out: Tracked<T> = { state: 'pending' };
+    promise.then(
+      (value) => { out.state = 'resolved'; out.value = value; },
+      (error) => { out.state = 'rejected'; out.error = error; },
+    );
+    return out;
+  }
+
+  /** A wait that never sees its page load: pending up to the bound, answered by the hang probe. */
+  async function advanceThroughTheBound(answer: Tracked<unknown>) {
+    await vi.advanceTimersByTimeAsync(GIVE_UP_MS - 1);
+    expect(answer.state).toBe('pending');
+    await vi.advanceTimersByTimeAsync(PROBE_MS - GIVE_UP_MS + 1);
+  }
+
+  /** The chrome events a load wait listens to, keeping who is still subscribed. */
+  function wireLoadEvents() {
+    const live = { updated: new Set<Listener>(), removed: new Set<Listener>(), dcl: new Set<Listener>() };
+    const wire = (event: ChromeEvent, set: Set<Listener>) => {
+      event.addListener.mockImplementation((fn: Listener) => { set.add(fn); });
+      event.removeListener.mockImplementation((fn: Listener) => { set.delete(fn); });
+    };
+    wire(mockChrome.tabs.onUpdated, live.updated);
+    wire(mockChrome.tabs.onRemoved, live.removed);
+    wire(mockChrome.webNavigation.onDOMContentLoaded, live.dcl);
+    const fire = (set: Set<Listener>, ...args: unknown[]) => [...set].forEach((fn) => fn(...args));
+    return {
+      leaked: () => live.updated.size + live.removed.size + live.dcl.size,
+      complete: (tabId: number) => fire(live.updated, tabId, { status: 'complete' }),
+      closed: (tabId: number) => fire(live.removed, tabId, {}),
+      domContentLoaded: (details: { tabId: number; frameId: number }) => fire(live.dcl, details),
+    };
+  }
+
+  /** A tab that is complete until something navigates it, and then never finishes loading. */
+  function tabThatNeverCompletes(id: number) {
+    let status = 'complete';
+    mockChrome.tabs.get.mockImplementation(async () => ({
+      id, status, title: '', active: false, url: status === 'complete' ? 'about:blank' : URL_THAT_HANGS,
+    }));
+    const startLoading = async () => { status = 'loading'; return {}; };
+    mockChrome.tabs.update.mockImplementation(startLoading);
+    mockChrome.tabs.reload.mockImplementation(startLoading);
+    mockChrome.tabs.create.mockResolvedValue({ id, url: 'about:blank', status: 'complete' });
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockImplementation(async (_d, method) =>
+      method === 'WebAuthn.addVirtualAuthenticator' ? { authenticatorId: 'va-1' } : { identifier: 's1' });
+  }
+
+  function connectedManager(tabId: number) {
+    const manager = new TabManager();
+    (manager as unknown as { connectedTabId: number }).connectedTabId = tabId;
+    return { manager, handlers: createNavigationHandlers({ tabManager: manager } as unknown as HandlerContext) };
+  }
+
+  let events: ReturnType<typeof wireLoadEvents>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    for (const fn of [mockChrome.tabs.get, mockChrome.tabs.update, mockChrome.tabs.reload, mockChrome.tabs.create,
+      mockChrome.tabs.remove, mockChrome.debugger.attach, mockChrome.debugger.sendCommand]) fn.mockReset();
+    events = wireLoadEvents();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Criterion 1
+  it('createTab answers connected and loaded:false when the URL never completes', async () => {
+    tabThatNeverCompletes(9);
+    const manager = new TabManager();
+
+    const answer = track(manager.createTab(URL_THAT_HANGS));
+    await advanceThroughTheBound(answer);
+
+    expect(answer.state).toBe('resolved');
+    expect(answer.value).toMatchObject({ tab: { id: 9, connected: true }, loaded: false });
+    expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
+    expect(mockChrome.debugger.attach).toHaveBeenCalled();
+    expect(mockChrome.tabs.onUpdated.removeListener.mock.calls).toEqual(mockChrome.tabs.onUpdated.addListener.mock.calls);
+    expect(mockChrome.tabs.onRemoved.removeListener.mock.calls).toEqual(mockChrome.tabs.onRemoved.addListener.mock.calls);
+    expect(events.leaked()).toBe(0);
+  });
+
+  // Criterion 2
+  describe('waitForTabLoad', () => {
+    it('answers at once when the tab is already complete and no event ever comes', async () => {
+      mockChrome.tabs.get.mockResolvedValue({ id: 7, status: 'complete' });
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForTabLoad(7));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: true });
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('answers when a loading tab completes', async () => {
+      mockChrome.tabs.get.mockResolvedValue({ id: 7, status: 'loading' });
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForTabLoad(7));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answer.state).toBe('pending');
+      events.complete(8); // another tab's load is not ours
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answer.state).toBe('pending');
+      events.complete(7);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: true });
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('rejects when the tab is closed while loading', async () => {
+      mockChrome.tabs.get.mockResolvedValue({ id: 7, status: 'loading' });
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForTabLoad(7));
+      await vi.advanceTimersByTimeAsync(0);
+      events.closed(7);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer.state).toBe('rejected');
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('rejects when the tab does not exist', async () => {
+      const gone = new Error('No tab with id: 7');
+      mockChrome.tabs.get.mockRejectedValue(gone);
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForTabLoad(7));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer.error).toBe(gone);
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('gives up quietly with loaded:false when the tab stays loading', async () => {
+      mockChrome.tabs.get.mockResolvedValue({ id: 7, status: 'loading' });
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForTabLoad(7));
+      await advanceThroughTheBound(answer);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: false });
+      expect(events.leaked()).toBe(0);
+    });
+  });
+
+  // Criteria 5 and 6, at the manager
+  describe('waitForNextTabLoad', () => {
+    it('listens before the trigger runs, so a load that ends inside the trigger is not lost', async () => {
+      const manager = new TabManager();
+      const trigger = vi.fn(async () => { events.complete(7); });
+
+      const answer = track(manager.waitForNextTabLoad(7, trigger));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(trigger).toHaveBeenCalledOnce();
+      expect(answer).toMatchObject({ state: 'resolved', value: true });
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('does not take a tab that is already complete for the load it is waiting for', async () => {
+      mockChrome.tabs.get.mockResolvedValue({ id: 7, status: 'complete' });
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForNextTabLoad(7, async () => undefined));
+      await advanceThroughTheBound(answer); // pending all the way: the complete tab is not the load it waits for
+
+      expect(answer).toMatchObject({ state: 'resolved', value: false });
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('rejects with the trigger\'s own error and leaves no listeners', async () => {
+      const refused = new Error('Cannot navigate');
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForNextTabLoad(7, async () => { throw refused; }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer.error).toBe(refused);
+      expect(events.leaked()).toBe(0);
+    });
+
+    it('stops at DOMContentLoaded of the top frame of that tab when asked to', async () => {
+      const manager = new TabManager();
+
+      const answer = track(manager.waitForNextTabLoad(7, async () => undefined, TIMEOUTS.TAB_LOAD_WAIT, 'domcontentloaded'));
+      await vi.advanceTimersByTimeAsync(0);
+      events.domContentLoaded({ tabId: 7, frameId: 3 });
+      events.domContentLoaded({ tabId: 8, frameId: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answer.state).toBe('pending');
+      events.domContentLoaded({ tabId: 7, frameId: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: true });
+      expect(events.leaked()).toBe(0);
+    });
+  });
+
+  // Criteria 3 to 6, at the handlers
+  describe('browser_navigate', () => {
+    const url = 'http://127.0.0.1:18999/dcl';
+
+    // Criterion 3
+    it('with waitUntil domcontentloaded answers at DOMContentLoaded, without waiting for complete', async () => {
+      const { handlers } = connectedManager(7);
+      mockChrome.tabs.update.mockResolvedValue({});
+
+      const answer = track(handlers.browser_navigate({ url, waitUntil: 'domcontentloaded' }));
+      await vi.advanceTimersByTimeAsync(0);
+      events.domContentLoaded({ tabId: 7, frameId: 2 });
+      events.domContentLoaded({ tabId: 9, frameId: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answer.state).toBe('pending');
+      events.domContentLoaded({ tabId: 7, frameId: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { navigated: url, loaded: true } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    it.each(['load', 'networkidle', undefined] as const)('with waitUntil %s waits for complete, not for DOMContentLoaded', async (waitUntil) => {
+      const { handlers } = connectedManager(7);
+      mockChrome.tabs.update.mockResolvedValue({});
+
+      const answer = track(handlers.browser_navigate({ url, waitUntil }));
+      await vi.advanceTimersByTimeAsync(0);
+      events.domContentLoaded({ tabId: 7, frameId: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answer.state).toBe('pending');
+      events.complete(7);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { navigated: url, loaded: true } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    // Criterion 4
+    it('answers loaded:false when the page never completes', async () => {
+      tabThatNeverCompletes(7);
+      const { handlers } = connectedManager(7);
+
+      const answer = track(handlers.browser_navigate({ url: URL_THAT_HANGS }));
+      await advanceThroughTheBound(answer);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { navigated: URL_THAT_HANGS, loaded: false } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    // Criterion 5
+    it('does not lose a load that completes while chrome.tabs.update is still running', async () => {
+      const { handlers } = connectedManager(7);
+      mockChrome.tabs.update.mockImplementation(async () => { events.complete(7); return {}; });
+
+      const answer = track(handlers.browser_navigate({ url }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { navigated: url, loaded: true } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    // Criterion 6
+    it('rejects with the very error chrome.tabs.update raised and leaves no listeners', async () => {
+      const { handlers } = connectedManager(7);
+      const refused = new Error('Cannot navigate');
+      mockChrome.tabs.update.mockRejectedValue(refused);
+
+      const answer = track(handlers.browser_navigate({ url }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer.error).toBe(refused);
+      expect(events.leaked()).toBe(0);
+    });
+  });
+
+  describe('browser_reload', () => {
+    // Criterion 4
+    it('answers loaded:false when the page never completes', async () => {
+      tabThatNeverCompletes(7);
+      const { handlers } = connectedManager(7);
+
+      const answer = track(handlers.browser_reload({}));
+      await advanceThroughTheBound(answer);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { success: true, loaded: false } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    // Criterion 5
+    it('does not lose a load that completes while chrome.tabs.reload is still running', async () => {
+      const { handlers } = connectedManager(7);
+      mockChrome.tabs.reload.mockImplementation(async () => { events.complete(7); });
+
+      const answer = track(handlers.browser_reload({}));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { success: true, loaded: true } });
+      expect(events.leaked()).toBe(0);
+    });
+
+    // Criterion 6
+    it('rejects with the very error chrome.tabs.reload raised and leaves no listeners', async () => {
+      const { handlers } = connectedManager(7);
+      const refused = new Error('Cannot reload');
+      mockChrome.tabs.reload.mockRejectedValue(refused);
+
+      const answer = track(handlers.browser_reload({}));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(answer.error).toBe(refused);
+      expect(events.leaked()).toBe(0);
+    });
+  });
+
+  // Criterion 7
+  describe('the bound', () => {
+    it('is shorter than the server\'s own cut, so the extension always answers first', () => {
+      expect(Number.isFinite(TIMEOUTS.TAB_LOAD_WAIT)).toBe(true);
+      expect(TIMEOUTS.TAB_LOAD_WAIT).toBeLessThan(TIMEOUTS.REQUEST_TIMEOUT);
+    });
+
+    it.each(['createTab', 'browser_navigate', 'browser_reload'] as const)('%s gives up at TAB_LOAD_WAIT: not before, not after', async (which) => {
+      expect(Number.isFinite(TIMEOUTS.TAB_LOAD_WAIT)).toBe(true); // a mutated bound must fail here, not hang the fake clock
+      tabThatNeverCompletes(7);
+      const { manager, handlers } = connectedManager(7);
+      const start = {
+        createTab: () => manager.createTab(URL_THAT_HANGS),
+        browser_navigate: () => handlers.browser_navigate({ url: URL_THAT_HANGS }),
+        browser_reload: () => handlers.browser_reload({}),
+      }[which];
+
+      const answer = track(start());
+      await vi.advanceTimersByTimeAsync(TIMEOUTS.TAB_LOAD_WAIT - 1);
+      expect(answer.state).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(answer.state).toBe('resolved');
+      expect(events.leaked()).toBe(0);
+    });
   });
 });

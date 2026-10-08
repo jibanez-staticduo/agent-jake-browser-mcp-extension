@@ -19,6 +19,8 @@ const targetRequired = { message: 'Either ref or selector must be provided' };
 export const schemas = {
   browser_navigate: z.object({
     url: z.string().url(),
+    // networkidle is accepted and treated as load: the extension does not measure network idleness.
+    waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).default('load'),
   }),
 
   browser_click: z.object({ ...target }).refine(hasTarget, targetRequired),

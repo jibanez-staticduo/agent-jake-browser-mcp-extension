@@ -47,3 +47,16 @@ describe('browser_list_tabs', () => {
     expect(answer.tabs.map((t) => t.id)).toEqual([7]);
   });
 });
+
+describe('browser_new_tab', () => {
+  it('answers with the tab and whether its page finished loading', async () => {
+    const tab = { id: 9, url: 'https://slow.example/hang', title: '', active: false, connected: true };
+    const createTab = vi.fn(async () => ({ tab, loaded: false }));
+    const handlers = createTabHandlers({ tabManager: { createTab } } as unknown as HandlerContext);
+
+    const answer = await handlers.browser_new_tab({ url: 'https://slow.example/hang' });
+
+    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, false);
+    expect(answer).toEqual({ tab, loaded: false });
+  });
+});

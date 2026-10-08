@@ -24,6 +24,13 @@ export const TIMEOUTS = {
 
   /** Request timeout for MCP messages (ms) */
   REQUEST_TIMEOUT: 30000,
+
+  /**
+   * Longest a command waits for a page to load (ms). Kept 10 s under REQUEST_TIMEOUT, the
+   * server's own cut, so the extension still has time to answer: connect, attach the
+   * debugger and install the WebAuthn guard run after it.
+   */
+  TAB_LOAD_WAIT: 20000,
 } as const;
 
 export type TimeoutKey = keyof typeof TIMEOUTS;

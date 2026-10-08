@@ -6,7 +6,7 @@
 import { log } from '@/utils/logger';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
-import { DEBUGGER } from '@/constants';
+import { DEBUGGER, TIMEOUTS } from '@/constants';
 import { pageEvents } from './page-events';
 import { passkeysForHost, rpIdMatchesHost, savePasskeys, summarize, type PasskeySummary, type StoredPasskey } from './passkey-vault';
 
@@ -268,8 +268,7 @@ export class TabManager {
     // If tab is chrome://newtab/, navigate to about:blank first
     // (Chrome blocks extensions from accessing chrome:// URLs)
     if (tabUrl === 'chrome://newtab/') {
-      await chrome.tabs.update(tabId, { url: 'about:blank' });
-      await this.waitForTabLoad(tabId);
+      await this.waitForNextTabLoad(tabId, () => chrome.tabs.update(tabId, { url: 'about:blank' }));
     }
 
     // Disconnect previous tab if any
@@ -977,62 +976,44 @@ export class TabManager {
    * `active: false` would jump the window to the new tab and steal the user's
    * view. Pass `active: true` only when the user is meant to see it.
    */
-  async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
+  async createTab(url: string, connect = true, active = false): Promise<{ tab: TabInfo; loaded: boolean }> {
     // The WebAuthn guard's page script only beats a password manager's content script in
     // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
     // drive opens blank, we attach, and only then does it load the URL.
     const guardFirst = connect && /^https?:/i.test(url);
     const tab = await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
+    // Not waited for unless we connect; and a page that outlasts TAB_LOAD_WAIT is still a tab we
+    // opened and drive: it stays connected and the answer says loaded:false (it is not an error).
+    let loaded = tab.status === 'complete';
 
     if (connect && tab.id) {
       if (guardFirst) {
-        await this.whenTabComplete(tab.id, false);
+        await this.waitForTabLoad(tab.id);
         await this.connectTab(tab.id);
-        const loaded = this.whenTabComplete(tab.id, true);
         try {
-          await chrome.tabs.update(tab.id, { url });
+          loaded = await this.waitForNextTabLoad(tab.id, () => chrome.tabs.update(tab.id!, { url }));
         } catch (error) {
           // Do not leave a connected about:blank behind.
           await chrome.tabs.remove(tab.id).catch(() => undefined);
           throw error;
         }
-        await loaded;
       } else {
-        // Wait for tab to finish loading
-        await this.waitForTabLoad(tab.id);
+        loaded = await this.waitForTabLoad(tab.id);
         await this.connectTab(tab.id);
       }
     }
 
     const current = guardFirst && tab.id ? await chrome.tabs.get(tab.id).catch(() => tab) : tab;
     return {
-      id: tab.id!,
-      url: current.url || url,
-      title: current.title || '',
-      active: current.active,
-      connected: connect && tab.id === this.connectedTabId,
+      tab: {
+        id: tab.id!,
+        url: current.url || url,
+        title: current.title || '',
+        active: current.active,
+        connected: connect && tab.id === this.connectedTabId,
+      },
+      loaded,
     };
-  }
-
-  /**
-   * Resolve when the tab's load is complete. With nextLoad, only a load that completes after
-   * this call counts (the tab is already complete and is about to navigate); otherwise an
-   * already-complete tab resolves at once. The listener goes in first, so no event is lost.
-   */
-  private whenTabComplete(tabId: number, nextLoad: boolean): Promise<void> {
-    return new Promise((resolve) => {
-      const done = () => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      };
-      const listener = (updatedTabId: number, changeInfo: { status?: string }) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') done();
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-      if (!nextLoad) {
-        chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') done(); }, () => undefined);
-      }
-    });
   }
 
   /**
@@ -1156,10 +1137,74 @@ export class TabManager {
   }
 
   /**
-   * Wait for a tab to finish loading.
+   * Wait for the tab's current load: resolves at once when it is already complete.
+   * See `tabLoadWait` for the answer and the failures.
    */
-  public waitForTabLoad(tabId: number): Promise<void> {
-    return this.whenTabComplete(tabId, true);
+  public waitForTabLoad(tabId: number, timeout: number = TIMEOUTS.TAB_LOAD_WAIT): Promise<boolean> {
+    return this.tabLoadWait(tabId, timeout, 'load');
+  }
+
+  /**
+   * Run `trigger` (a navigation or a reload) and wait for the load it starts. The listeners are
+   * armed first, so a load that ends while the trigger is still running is not lost, and a load
+   * that was complete before the trigger does not count. If the trigger fails, its own error is
+   * the answer. `until` is 'domcontentloaded' to stop at the top frame's DOMContentLoaded;
+   * anything else waits for the tab's `complete`.
+   */
+  public waitForNextTabLoad(
+    tabId: number,
+    trigger: () => Promise<unknown>,
+    timeout: number = TIMEOUTS.TAB_LOAD_WAIT,
+    until: 'load' | 'domcontentloaded' = 'load',
+  ): Promise<boolean> {
+    return this.tabLoadWait(tabId, timeout, until, trigger);
+  }
+
+  /**
+   * The one bounded wait for a page load. Resolves true at the milestone and false when
+   * `timeout` runs out: a page that never finishes loading is not an error, the tab is still
+   * ours. Rejects only if the tab is closed or does not exist, or the trigger fails. Every exit
+   * removes the listeners and the timer.
+   */
+  private tabLoadWait(
+    tabId: number,
+    timeout: number,
+    until: 'load' | 'domcontentloaded',
+    trigger?: () => Promise<unknown>,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      const watchDcl = until === 'domcontentloaded';
+      let finished = false;
+      const finish = (settle: () => void) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        chrome.tabs.onRemoved.removeListener(onRemoved);
+        if (watchDcl) chrome.webNavigation.onDOMContentLoaded.removeListener(onDomContentLoaded);
+        settle();
+      };
+      const loaded = () => finish(() => resolve(true));
+      const fail = (error: unknown) => finish(() => reject(error));
+      const onUpdated = (id: number, changeInfo: { status?: string }) => {
+        if (id === tabId && changeInfo.status === 'complete') loaded();
+      };
+      const onRemoved = (id: number) => {
+        if (id === tabId) fail(new Error(`Tab ${tabId} was closed while loading`));
+      };
+      const onDomContentLoaded = (details: { tabId: number; frameId: number }) => {
+        if (details.tabId === tabId && details.frameId === 0) loaded();
+      };
+      const timer = setTimeout(() => finish(() => resolve(false)), timeout);
+
+      chrome.tabs.onUpdated.addListener(onUpdated);
+      chrome.tabs.onRemoved.addListener(onRemoved);
+      if (watchDcl) chrome.webNavigation.onDOMContentLoaded.addListener(onDomContentLoaded);
+
+      // Run after the listeners are armed. Without a trigger the tab's current state answers.
+      const start = trigger ?? (async () => { if ((await chrome.tabs.get(tabId)).status === 'complete') loaded(); });
+      new Promise((run) => run(start())).catch(fail); // called now; a synchronous throw is a rejection too
+    });
   }
 
   /**

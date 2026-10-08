@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
+import { schemas as extensionSchemas } from '@/background/tools/schemas';
 
 // Mirror schemas from tool-handlers.ts for testing
 // (We test the schema shapes, not the actual exports, to catch drift)
@@ -206,6 +207,26 @@ describe('browser_navigate schema', () => {
   it('rejects missing URL', () => {
     const result = schema.safeParse({});
     expect(result.success).toBe(false);
+  });
+});
+
+// The mirror above cannot catch a field the real schema drops; zod strips unknown keys, which is how
+// waitUntil was lost on its way from the server (INFRA-699).
+describe('browser_navigate waitUntil (the schema the extension runs)', () => {
+  const schema = extensionSchemas.browser_navigate;
+  const url = 'https://example.com';
+
+  it('keeps waitUntil when it is given', () => {
+    expect(schema.parse({ url, waitUntil: 'domcontentloaded' }).waitUntil).toBe('domcontentloaded');
+    expect(schema.parse({ url, waitUntil: 'networkidle' }).waitUntil).toBe('networkidle');
+  });
+
+  it('waits for load when it is not given', () => {
+    expect(schema.parse({ url }).waitUntil).toBe('load');
+  });
+
+  it('rejects a waitUntil it does not know', () => {
+    expect(schema.safeParse({ url, waitUntil: 'x' }).success).toBe(false);
   });
 });
 
