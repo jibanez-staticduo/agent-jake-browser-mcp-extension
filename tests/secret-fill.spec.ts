@@ -114,6 +114,12 @@ test('secret typing keeps values out of replies, diagnostics and storage', async
     expect(diagnostics).not.toContain(fakeSecret);
     const storage = await worker.evaluate(async () => JSON.stringify(await chrome.storage.local.get(null)));
     expect(storage).not.toContain(fakeSecret);
+
+    const newTab = await request('browser_new_tab', { url: fixtureUrl, switchTo: true });
+    expect(newTab.success).toBe(true);
+    expect(newTab.result.tab).toMatchObject({ url: fixtureUrl, connected: true });
+    expect(Number.isSafeInteger(newTab.result.tab.id)).toBe(true);
+    expect(await worker.evaluate(async tabId => (await chrome.tabs.get(tabId)).url, newTab.result.tab.id)).toBe(fixtureUrl);
   } finally {
     await context.close();
     for (const client of wss.clients) client.terminate();

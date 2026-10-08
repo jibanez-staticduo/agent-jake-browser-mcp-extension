@@ -507,9 +507,10 @@ export class TabManager {
     }
   }
 
-  private recordCdpError(error: unknown): void {
+  private recordCdpError(error: unknown): string {
     const message = isSecretLogging() ? 'Secret operation CDP failure' : error instanceof Error ? error.message : String(error);
     this.lastCdpError = message;
+    return message;
   }
 
   private async probeCdp(tabId: number): Promise<{ ok: true; error: null } | { ok: false; error: string }> {
@@ -522,8 +523,7 @@ export class TabManager {
       this.lastCdpError = null;
       return { ok: true, error: null };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.recordCdpError(error);
+      const message = this.recordCdpError(error);
       return { ok: false, error: message };
     }
   }
