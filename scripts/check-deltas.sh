@@ -39,4 +39,8 @@ chk "16 el botón abre el side panel, sin popup"         bash -c 'grep -q "openP
 chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
+# SC-2102: browser_read_secret devuelve un valor de la página al servidor y a nadie más.
+not "18 ws-client no registra el cuerpo de las respuestas" grep -qF "log.debug('Sending:'" src/background/ws-client.ts
+chk "19 execTool del copiloto solo ejecuta el catálogo del modelo" grep -q "COPILOT_TOOL_NAMES.has(name)" src/background/agent/bridge.ts
+chk "20 handler browser_read_secret registrado" grep -q "browser_read_secret:" src/background/tools/handlers/queries.ts
 exit $fail

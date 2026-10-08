@@ -7,7 +7,7 @@ import type { TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
-import { redactPayload } from './redact';
+import { redactPayload, redactResult } from './redact';
 import { getKeyDefinition } from '@/constants/keys';
 import { createToolContext } from './tools/utils';
 import type { HandlerContext } from './tools/handlers';
@@ -126,7 +126,7 @@ export function createToolHandlers(tabManager: TabManager) {
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = getToolDescription(type, payload, result);
-      logTool(type, description, true, durationMs, { payload: redactPayload(payload), result });
+      logTool(type, description, true, durationMs, { payload: redactPayload(payload), result: redactResult(type, result) });
 
       log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
 
@@ -210,6 +210,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Fill form (${((p?.fields as unknown[]) ?? []).length} fields)`;
     case 'browser_passkey':
       return `Passkey ${p?.mode} on "${p?.ref || p?.selector}"`;
+    case 'browser_read_secret':
+      return `Read secret from "${p?.ref || p?.selector || 'page text'}"`;
     case 'browser_select_option':
       return `Select option in "${p?.ref || p?.selector}"`;
     case 'browser_pdf':

@@ -5,6 +5,7 @@
  */
 import type { TabManager } from '../tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName } from '@/types/messages';
+import { agentTools } from './tools-catalog';
 import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
@@ -22,6 +23,12 @@ import { AgentStopped, runAgent, type ToolOutcome } from './loop';
 import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage) => Promise<OutgoingMessage>;
+
+/**
+ * The only tools the model may run. handleMessage also serves tools the model was never offered
+ * (browser_read_secret returns a page value, and in auto mode its result goes straight back to the LLM).
+ */
+const COPILOT_TOOL_NAMES = new Set(agentTools(true).map((t) => t.function.name));
 
 export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: HandleMessage) {
   let copilotActive = false;
@@ -121,6 +128,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       });
 
     const execTool = async (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+      if (!COPILOT_TOOL_NAMES.has(name)) return { ok: false, error: `Unknown tool: ${name}` };
       const { handleMessage } = await getDeps();
       if (!handleMessage) return { ok: false, error: 'Extension not initialized yet' };
       const res = await handleMessage({ id: `copilot-${++seq}`, type: name as ToolName, payload: args });

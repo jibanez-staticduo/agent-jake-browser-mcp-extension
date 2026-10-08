@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { activityLog, logTool } from '@/background/activity-log';
+import { CANARY, DECOY, secretFlow } from '../helpers/secret-flow';
 
 const key = 'agent_jake_activity_log';
 const stored: Record<string, unknown> = {};
@@ -74,5 +75,23 @@ describe('durable activity history', () => {
     const { activityLog: freshLog } = await import('@/background/activity-log');
 
     await expect(freshLog.getAll()).rejects.toThrow('storage unavailable');
+  });
+});
+
+describe('browser_read_secret in the activity history', () => {
+  // The decoy is the page text: it is planted in the answer and in the failure of the content script.
+  it.each([
+    ['success', { ok: true, value: CANARY, page: DECOY }, true],
+    ['failure', { ok: false, code: 'SECRET_EMPTY', page: `${DECOY} ${CANARY}` }, false],
+  ])('keeps the action and the outcome of a %s, not the value nor the page text', async (_name, answer, success) => {
+    const { readSecret } = secretFlow(answer);
+    await readSecret({ selector: '#semilla' });
+    await vi.waitFor(async () => expect((await activityLog.getAll()).total).toBe(1));
+
+    const [entry] = (await activityLog.getAll()).activities;
+    expect(entry).toMatchObject({ type: 'tool', action: 'browser_read_secret', success });
+    const saved = JSON.stringify(stored[key]);
+    expect(saved).not.toContain(CANARY);
+    expect(saved).not.toContain(DECOY);
   });
 });
