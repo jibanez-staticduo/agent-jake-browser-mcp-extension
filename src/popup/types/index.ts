@@ -76,6 +76,7 @@ export interface ServerConfigInfo {
   source?: 'manual' | 'config.json' | 'build';
   storedServerUrl: string;
   storedToken: string;
+  label?: string;
   hasToken: boolean;
   connectionId: string;
   connected: boolean;

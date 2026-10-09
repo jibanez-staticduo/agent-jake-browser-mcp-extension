@@ -266,6 +266,43 @@ describe('ensureConnectionId', () => {
   });
 });
 
+describe('manual connection label', () => {
+  it('normalizes and persists across runtime reloads without changing token defaults', async () => {
+    const { setLabel, STORAGE_KEYS } = await loadRuntime();
+    await setLabel('  Fedora\u0000 / Chrome\n  ');
+    expect(store[STORAGE_KEYS.label]).toBe('Fedora / Chrome');
+    const { getEffectiveConfig } = await loadRuntime();
+    const cfg = await getEffectiveConfig();
+    expect(cfg.label).toBe('Fedora / Chrome');
+    expect(cfg.token).toBe('buildtok');
+    expect(cfg.source).toBe('build');
+  });
+
+  it('bounds names and clears empty or control-only values', async () => {
+    const { setLabel, normalizeLabel, getEffectiveConfig, STORAGE_KEYS } = await loadRuntime();
+    await setLabel('x'.repeat(200));
+    expect(store[STORAGE_KEYS.label]).toBe('x'.repeat(128));
+    await setLabel(' \u007f\u0085 ');
+    expect(store).not.toHaveProperty(STORAGE_KEYS.label);
+    expect((await getEffectiveConfig()).label).toBe('');
+    expect(normalizeLabel(42)).toBe('');
+    store[STORAGE_KEYS.label] = '  old\tname  ';
+    expect((await getEffectiveConfig()).label).toBe('oldname');
+  });
+
+  it('encodes the name as one query value and omits empty and legacy labels', async () => {
+    const { getEffectiveConfig, buildWsUrl, setLabel } = await loadRuntime();
+    await setLabel('Portátil & Chrome + work');
+    const cfg = await getEffectiveConfig();
+    const url = new URL(buildWsUrl(cfg));
+    expect(url.searchParams.get('label')).toBe('Portátil & Chrome + work');
+    expect(url.searchParams.size).toBe(3);
+    expect(new URL(buildWsUrl({ ...cfg, label: '  \n  ' })).searchParams.has('label')).toBe(false);
+    const { label: _label, ...legacy } = cfg;
+    expect(new URL(buildWsUrl(legacy)).searchParams.has('label')).toBe(false);
+  });
+});
+
 describe('buildWsUrl / httpOrigin', () => {
   it('adds token and connectionId query params, URL-encoded', async () => {
     const { getEffectiveConfig, buildWsUrl, STORAGE_KEYS } = await loadRuntime();

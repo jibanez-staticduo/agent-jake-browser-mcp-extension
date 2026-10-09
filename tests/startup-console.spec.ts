@@ -19,6 +19,7 @@ test('fresh authenticated install pairs and reconnects without console errors', 
   let approved = false;
   let unauthorizedUpgrades = 0;
   let authorizedUpgrades = 0;
+  const labels: string[] = [];
   const server = http.createServer((req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'content-type');
@@ -48,6 +49,7 @@ test('fresh authenticated install pairs and reconnects without console errors', 
       return;
     }
     authorizedUpgrades++;
+    labels.push(new URL(req.url!, 'http://localhost').searchParams.get('label') || '');
     sockets.handleUpgrade(req, socket, head, ws => sockets.emit('connection', ws, req));
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -79,13 +81,20 @@ test('fresh authenticated install pairs and reconnects without console errors', 
     approved = true;
     await expect.poll(() => authorizedUpgrades).toBe(1);
     await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+    const deviceName = 'Fedora QA & Chrome <personal>';
+    await popup.getByLabel('Nombre del equipo / navegador').fill(deviceName);
+    await popup.getByRole('button', { name: 'Guardar', exact: true }).click();
+    await expect.poll(() => labels.at(-1)).toBe(deviceName);
     await popup.reload();
     await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+    await expect(popup.getByLabel('Nombre del equipo / navegador')).toHaveValue(deviceName);
+    const countBeforeReload = authorizedUpgrades;
     const reload = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'saveServerConfig', payload: {} }));
     expect(reload.success).toBe(true);
-    await expect.poll(() => authorizedUpgrades).toBe(2);
+    await expect.poll(() => authorizedUpgrades).toBe(countBeforeReload + 1);
     sockets.clients.forEach(socket => socket.close(1001, 'fixture restart'));
-    await expect.poll(() => authorizedUpgrades, { timeout: 15000 }).toBe(3);
+    await expect.poll(() => authorizedUpgrades, { timeout: 15000 }).toBe(countBeforeReload + 2);
+    expect(labels.at(-1)).toBe(deviceName);
     await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
     expect(unauthorizedUpgrades).toBe(0);
     expect(errors).toEqual([]);

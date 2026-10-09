@@ -30,6 +30,7 @@ import {
   parseWsUrl,
   setServerUrl,
   setToken,
+  setLabel,
   STORAGE_KEYS,
 } from '@/config/runtime';
 
@@ -262,6 +263,7 @@ async function handlePopupMessage(message: {
           : '',
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
+        label: cfg.label ?? '',
         connected: wsClient?.isConnected() || false,
         awaitingToken: wsClient?.isAwaitingToken() || false,
         pairing: getPairingInfo(),
@@ -269,7 +271,7 @@ async function handlePopupMessage(message: {
     }
 
     case 'saveServerConfig': {
-      const { serverUrl, token } = (payload || {}) as { serverUrl?: string; token?: string };
+      const { serverUrl, token, label } = (payload || {}) as { serverUrl?: string; token?: string; label?: string };
       if (typeof serverUrl === 'string') {
         const trimmed = serverUrl.trim();
         if (trimmed && parseWsUrl(trimmed) === null) {
@@ -280,6 +282,9 @@ async function handlePopupMessage(message: {
       if (typeof token === 'string') {
         await setToken(token.trim());
       }
+      if (typeof label === 'string') {
+        await setLabel(label);
+      }
       // Reconnect immediately so the new URL/token take effect.
       cancelPairing();
       wsClient?.disconnect();
@@ -289,6 +294,7 @@ async function handlePopupMessage(message: {
         success: true,
         connected: wsClient?.isConnected() || false,
         effectiveUrl: buildDisplayUrl(cfg),
+        label: cfg.label ?? '',
       };
     }
 
