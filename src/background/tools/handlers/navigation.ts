@@ -11,8 +11,13 @@ export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
       const { url, waitUntil } = schemas.browser_navigate.parse(payload);
       const tabId = ctx.tabManager.getConnectedTabId();
 
-      if (!tabId) {
-        throw new Error('No tab connected');
+      // The agent never drives the tab the user is looking at: with nothing connected, or with the
+      // user's own tab bound by auto-attach, the URL opens in a NEW background tab (same path as
+      // browser_new_tab, WebAuthn guard first) that becomes the connected one. A tab the agent
+      // opened or chose itself keeps navigating in place.
+      if (!tabId || ctx.tabManager.isAutoAttached()) {
+        const { tab, loaded } = await ctx.tabManager.createTab(url, true, false);
+        return { navigated: url, loaded, tabId: tab.id, openedNewTab: true };
       }
 
       // networkidle = load: the extension does not measure network idleness.

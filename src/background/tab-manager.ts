@@ -170,6 +170,8 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
 
 export class TabManager {
   private connectedTabId: number | null = null;
+  /** Set when the connected tab is the user's own, reached through auto-attach and not opened or chosen by the agent. */
+  private autoAttachedTabId: number | null = null;
   private debuggerAttached = false;
   private captureEvents = false;
   private connectionGeneration = 0;
@@ -194,20 +196,35 @@ export class TabManager {
       this.connectedTabId = addedTabId;
       this.debuggerAttached = false;
       void chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: addedTabId });
+      if (this.autoAttachedTabId === removedTabId) {
+        this.autoAttachedTabId = addedTabId;
+        void chrome.storage.local.set({ [DEBUGGER.AUTO_ATTACHED_KEY]: addedTabId });
+      }
     });
 
-    const stored = await chrome.storage.local.get(DEBUGGER.STORAGE_KEY);
+    const stored = await chrome.storage.local.get([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
     if (stored[DEBUGGER.STORAGE_KEY]) {
       const tabId = stored[DEBUGGER.STORAGE_KEY] as number;
       // Verify tab still exists
       if (await this.tabExists(tabId)) {
         this.connectedTabId = tabId;
+        // A service-worker restart must not turn the user's tab into one the agent owns.
+        this.autoAttachedTabId = stored[DEBUGGER.AUTO_ATTACHED_KEY] === tabId ? tabId : null;
         await this.setLiveConnectionCloseGuard(tabId, true);
         log.info(`Restored connected tab: ${tabId}`);
       } else {
-        await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
+        await chrome.storage.local.remove([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
       }
     }
+  }
+
+  /**
+   * True when the connected tab is the user's own, bound by auto-attach (see requireTabId) rather
+   * than opened (browser_new_tab) or chosen (browser_switch_tab, the popup) by the agent. Whatever
+   * navigates must not drive such a tab: it opens a background one instead.
+   */
+  isAutoAttached(): boolean {
+    return this.connectedTabId !== null && this.autoAttachedTabId === this.connectedTabId;
   }
 
   /**
@@ -265,7 +282,7 @@ export class TabManager {
    * Connect to a specific tab for automation.
    * If tabUrl is chrome://newtab/, navigates to about:blank first.
    */
-  async connectTab(tabId: number, tabUrl?: string): Promise<void> {
+  async connectTab(tabId: number, tabUrl?: string, options: { autoAttached?: boolean } = {}): Promise<void> {
     // If tab is chrome://newtab/, navigate to about:blank first
     // (Chrome blocks extensions from accessing chrome:// URLs)
     if (tabUrl === 'chrome://newtab/') {
@@ -290,7 +307,10 @@ export class TabManager {
 
       this.connectedTabId = tabId;
       this.captureEvents = true;
+      this.autoAttachedTabId = options.autoAttached ? tabId : null;
       await chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: tabId });
+      if (options.autoAttached) await chrome.storage.local.set({ [DEBUGGER.AUTO_ATTACHED_KEY]: tabId });
+      else await chrome.storage.local.remove(DEBUGGER.AUTO_ATTACHED_KEY);
 
       // Get tab info for logging
       const tab = await chrome.tabs.get(tabId);
@@ -327,10 +347,11 @@ export class TabManager {
     } finally {
       await this.detachDebugger();
       this.connectedTabId = null;
+      this.autoAttachedTabId = null;
       this.cancelEventWaiters();
       pageEvents.reset();
       this.disconnecting = false;
-      await chrome.storage.local.remove(DEBUGGER.STORAGE_KEY);
+      await chrome.storage.local.remove([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
     }
 
     log.info(`Disconnected from tab: ${tabId}`);

@@ -69,7 +69,9 @@ export function createToolContext(tabManager: TabManager): ToolContext {
   /**
    * Connected tab, or the active tab of the focused window when the popup has not
    * connected one. Auto-attach keeps the MCP usable from a headless session: there
-   * is no UI to bind a tab by hand, so the first command binds the active tab.
+   * is no UI to bind a tab by hand, so the first command binds the active tab. That tab is the
+   * USER's own: it is flagged (TabManager.isAutoAttached) so read-only tools may look at it but
+   * browser_navigate never drives it.
    */
   async function requireTabId(): Promise<number> {
     let tabId = tabManager.getConnectedTabId();
@@ -78,7 +80,7 @@ export function createToolContext(tabManager: TabManager): ToolContext {
       if (!active?.id) {
         throw new Error('No active tab to attach to');
       }
-      await tabManager.connectTab(active.id, active.url);
+      await tabManager.connectTab(active.id, active.url, { autoAttached: true });
       tabId = tabManager.getConnectedTabId();
       if (!tabId) {
         throw new Error(`Could not attach to the active tab (${active.url ?? 'no url'})`);

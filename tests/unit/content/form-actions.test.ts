@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { findElement } from '@/content/selector';
-import { handleClearField, handleFieldLength, handleFillField } from '@/content/form-actions';
+import { handleClearField, handleFieldLength, handleFillField, handleSetFieldText } from '@/content/form-actions';
 
 vi.mock('@/content/selector', () => ({ findElement: vi.fn() }));
 
@@ -64,5 +64,53 @@ describe('clearField / fieldLength', () => {
     await expect(handleFieldLength({ selector: '#otp' })).resolves.toEqual({ length: 4 });
     await expect(handleClearField({ selector: '#otp' })).resolves.toEqual({ length: 0 });
     expect(field.events).toEqual(['input', 'change']);
+  });
+});
+
+describe('setFieldText (browser_type fallback)', () => {
+  class Input {
+    _value = '';
+    maxLength = -1;
+    events: string[] = [];
+    get value() { return this._value; }
+    set value(v: string) { this._value = v; }
+    dispatchEvent(e: Event) { this.events.push(e.type); return true; }
+  }
+
+  function field(initial: string, maxLength = -1) {
+    vi.stubGlobal('HTMLInputElement', Input);
+    vi.stubGlobal('HTMLTextAreaElement', class {});
+    const el = new Input();
+    el._value = initial;
+    el.maxLength = maxLength;
+    vi.mocked(findElement).mockResolvedValue(el as unknown as Element);
+    return el;
+  }
+
+  it('keeps the leading characters, appends the text, fires input + change and answers lengths only', async () => {
+    const el = field('abXY');
+
+    const answer = await handleSetFieldText({ selector: '#f', text: 'cd', kept: 2 });
+
+    expect(el.value).toBe('abcd');
+    expect(el.events).toEqual(['input', 'change']);
+    expect(answer).toEqual({ applied: true, length: 4 });
+  });
+
+  it('counts code points, not UTF-16 units', async () => {
+    const el = field('😀😀x');
+
+    await handleSetFieldText({ selector: '#f', text: 'y', kept: 1 });
+
+    expect(el.value).toBe('😀y');
+  });
+
+  it('refuses when the result would exceed maxlength, and touches nothing', async () => {
+    const el = field('', 3);
+
+    const answer = await handleSetFieldText({ selector: '#f', text: 'abcd', kept: 0 });
+
+    expect(answer).toEqual({ applied: false, length: 0 });
+    expect(el.events).toEqual([]);
   });
 });

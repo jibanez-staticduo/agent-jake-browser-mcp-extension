@@ -92,6 +92,8 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
 
     browser_type: async (payload) => {
       const { text, clear, ...element } = schemas.browser_type.parse(payload);
+      // browser_fill_secret arrives flagged `secret`: the answer (and the activity log that keeps it) never echoes the text.
+      const shown = (payload as { secret?: unknown } | undefined)?.secret ? '[secret]' : text;
       const tabId = ctx.tabManager.getConnectedTabId();
       if (!tabId) throw new Error('No tab connected');
 
@@ -134,6 +136,12 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
         if (length > 0) await sendToContent('clearField', { selector }, frameId);
       }
 
+      // How much of the field survives the typing: nothing after clear, else what is there now.
+      // Lengths only, from here on: the text may be a secret (browser_fill_secret goes through here).
+      const typedLength = [...text].length;
+      const kept = clear ? 0 : await sendToContent<{ length: number }>('fieldLength', { selector }, frameId)
+        .then((r) => r.length, () => undefined);
+
       for (const char of text) {
         await ctx.dispatchKeyEventTyped('keyDown', char);
         await ctx.dispatchKeyEventTyped('char', char, char);
@@ -142,16 +150,33 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
 
       const result = await waitForStableOrNavigation(initialUrl, frameId);
       if (result.navigated) {
-        return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
+        return { typed: shown, cleared: clear, navigated: true, newUrl: result.newUrl };
       }
-      // Lengths only: the text may be a secret (browser_fill_secret goes through here).
-      const typedLength = [...text].length;
-      const fieldLength = await sendToContent<{ length: number }>('fieldLength', { selector }, frameId)
+      const measure = () => sendToContent<{ length: number }>('fieldLength', { selector }, frameId)
         .then((r) => r.length, () => undefined);
-      if (clear && fieldLength !== undefined && fieldLength !== typedLength) {
-        return { typed: text, cleared: clear, fieldLength, warning: `the field holds ${fieldLength} characters after typing ${typedLength}` };
+      let fieldLength = await measure();
+      const expected = kept === undefined ? undefined : kept + typedLength;
+
+      // The keys do not always land (the tab is hidden and the page never took the input, a
+      // focus that moved): the tool must not answer "typed" over an empty field. Set the value
+      // from inside the page, with the events a framework listens to, and measure again. This
+      // never activates the tab.
+      // Only a SHORTFALL is repaired: a longer value is a mask or a page that rewrote it, not lost keys.
+      if (expected !== undefined && fieldLength !== undefined && fieldLength < expected) {
+        const set = await sendToContent<{ applied: boolean; length: number }>(
+          'setFieldText', { selector, text, kept }, frameId,
+        ).catch(() => undefined);
+        if (set?.applied) {
+          fieldLength = (await measure()) ?? set.length;
+          return fieldLength === expected
+            ? { typed: shown, cleared: clear, fallback: 'native-setter', fieldLength }
+            : { typed: shown, cleared: clear, fallback: 'native-setter', fieldLength, warning: `the field holds ${fieldLength} characters after typing ${typedLength}` };
+        }
       }
-      return { typed: text, cleared: clear };
+      if (expected !== undefined && fieldLength !== undefined && fieldLength !== expected) {
+        return { typed: shown, cleared: clear, fieldLength, warning: `the field holds ${fieldLength} characters after typing ${typedLength}` };
+      }
+      return { typed: shown, cleared: clear };
     },
 
     browser_hover: async (payload) => {

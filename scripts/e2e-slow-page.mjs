@@ -6,86 +6,30 @@
 // commands the agent-browser-server sends, one at a time as its per-browser queue does, and cuts each at 30 s
 // as it does. Pages come from tests/fixtures/slow-page-server.mjs. Own profile (mkdtemp), own ports, own
 // children, nothing of the user's. Ports: PAGES_PORT and WS_PORT in the environment (default 28999, 28765).
-import { spawn, execFileSync } from 'node:child_process';
-import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from '@playwright/test';
+import { createServerSide, launchExtension, SERVER_CUT_MS } from './lib/e2e-server-socket.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const PAGES = Number(process.env.PAGES_PORT ?? 28999);
 const WS = Number(process.env.WS_PORT ?? 28765);
-const SERVER_CUT_MS = 30_000;
 const say = (m) => console.log(`[e2e-slow-page] ${m}`);
 let failures = 0;
 const check = (ok, msg) => { say(`${ok ? 'PASS' : 'FAIL'} ${msg}`); if (!ok) failures++; };
 
-// ---- the server's side of the socket ------------------------------------------------------------
-let socket = null;
-const waiting = new Map();
-function frame(text) {
-  const body = Buffer.from(text);
-  const head = body.length < 126 ? Buffer.from([0x81, body.length])
-    : Buffer.concat([Buffer.from([0x81, 126]), Buffer.from([body.length >> 8, body.length & 255])]);
-  return Buffer.concat([head, body]);
-}
-function onData(buf) { // client frames are masked; the extension's replies and heartbeats are text
-  while (buf.length >= 2) {
-    let len = buf[1] & 127, at = 2;
-    if (len === 126) { len = buf.readUInt16BE(2); at = 4; } else if (len === 127) { len = Number(buf.readBigUInt64BE(2)); at = 10; }
-    const mask = buf.subarray(at, at + 4);
-    const payload = Buffer.from(buf.subarray(at + 4, at + 4 + len)).map((b, i) => b ^ mask[i % 4]);
-    buf = buf.subarray(at + 4 + len);
-    if ((payload.length === 0) || !(payload[0] === 0x7b)) continue;
-    const msg = JSON.parse(payload.toString());
-    waiting.get(msg.id)?.(msg);
-  }
-}
-const wsServer = createServer().on('upgrade', (req, sock) => {
-  const accept = createHash('sha1').update(req.headers['sec-websocket-key'] + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-  sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-  sock.on('data', onData).on('error', () => undefined);
-  socket = sock;
-});
-
-let n = 0;
-/** One command, then its answer or the server's cut. */
-async function command(type, payload = {}) {
-  const id = `e2e-${++n}`;
-  const t0 = Date.now();
-  const answer = await new Promise((resolve) => {
-    const cut = setTimeout(() => { waiting.delete(id); resolve({ timedOut: true }); }, SERVER_CUT_MS);
-    waiting.set(id, (msg) => { clearTimeout(cut); waiting.delete(id); resolve(msg); });
-    socket.write(frame(JSON.stringify({ id, type, payload })));
-  });
-  const ms = Date.now() - t0;
-  say(`${type} ${JSON.stringify(payload)} -> ${answer.timedOut ? 'NO ANSWER (server cut)' : answer.success ? 'ok' : `error ${answer.error?.message}`} in ${ms} ms`);
-  return { ...answer, ms };
-}
-const answered = (r) => !r.timedOut && r.success;
+// ---- the server's side of the socket (scripts/lib/e2e-server-socket.mjs) ---------------------------
+const server = createServerSide(say);
+const { command, answered } = server;
 
 // ---- run ----------------------------------------------------------------------------------------
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ajb-slow-')));
 const pages = spawn('node', [join(repo, 'tests/fixtures/slow-page-server.mjs'), String(PAGES)], { stdio: 'ignore' });
 let context = null;
 try {
-  say('building the extension');
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith('VITE_')) delete env[k];
-  env.VITE_WS_PORT = String(WS);
-  execFileSync('npx', ['vite', 'build', '--outDir', join(root, 'ext'), '--emptyOutDir'], { cwd: repo, env, stdio: 'pipe' });
-
-  await new Promise((r) => wsServer.listen(WS, '127.0.0.1', r));
-  context = await chromium.launchPersistentContext(join(root, 'profile'), {
-    headless: false,
-    args: [`--disable-extensions-except=${join(root, 'ext')}`, `--load-extension=${join(root, 'ext')}`, '--no-sandbox'],
-  });
-  for (let i = 0; i < 100 && !socket; i++) await new Promise((r) => setTimeout(r, 100));
-  if (!socket) throw new Error(`the extension never connected to 127.0.0.1:${WS}`);
-  say('extension connected');
+  context = await launchExtension({ repo, root, wsPort: WS, server, say });
 
   const hang = `http://127.0.0.1:${PAGES}/hang`;
   const ok = `http://127.0.0.1:${PAGES}/ok`;
@@ -130,7 +74,7 @@ try {
 } finally {
   await context?.close().catch(() => undefined);
   pages.kill();
-  wsServer.close();
+  server.close();
   rmSync(root, { recursive: true, force: true });
 }
 say(failures ? `${failures} FAILED` : 'ALL PASSED');

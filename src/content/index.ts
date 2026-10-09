@@ -21,7 +21,7 @@ import type { ContentScriptRequest, ContentScriptResponse, Coordinates } from '@
 import { TIMEOUTS, getHighlightCSS } from '@/constants';
 import { CONFIG } from '@/types/config';
 import { generateCompactState, formatCompactState, findCompact } from './compact-state';
-import { handleClearField, handleDispatchDrop, handleFieldLength, handleFillField } from './form-actions';
+import { handleClearField, handleDispatchDrop, handleFieldLength, handleFillField, handleSetFieldText } from './form-actions';
 
 // Visual highlight overlay
 let highlightOverlay: HTMLDivElement | null = null;
@@ -116,6 +116,9 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
     case 'fieldLength':
       return handleFieldLength(payload as { selector: string });
+
+    case 'setFieldText':
+      return handleSetFieldText(payload as { selector: string; text: string; kept: number });
 
     case 'clearField':
       return handleClearField(payload as { selector: string });

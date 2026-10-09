@@ -8,6 +8,8 @@ export const DEBUGGER = {
 
   /** Storage key for persisting connected tab ID */
   STORAGE_KEY: 'connectedTabId',
+  /** Tab id the connected tab got through auto-attach (the user's own tab), not through the agent. Survives a service-worker restart. */
+  AUTO_ATTACHED_KEY: 'autoAttachedTabId',
 
   /** Domains to enable after attaching debugger */
   DOMAINS: ['Page', 'DOM', 'Runtime'] as const,

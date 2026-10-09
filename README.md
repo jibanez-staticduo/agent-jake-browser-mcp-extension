@@ -193,6 +193,14 @@ Prueba manual con Chrome desechable: `node scripts/e2e-self-update.mjs` (y `--ta
 
 4. **Monitor Status** - Opciones shows connection state and activity log
 
+### Agent tabs stay in the background
+
+- `browser_new_tab` opens in the background, and the agent works in it (click, type, snapshot) without bringing it forward: **no `browser_switch_tab` is needed to type**. `browser_switch_tab` does bring the tab to the front.
+- `browser_navigate` never drives the tab you are looking at. With no tab connected, or when the only connected tab is the one auto-attached from your active tab, it opens a **new background tab**, connects to it and returns its `tabId`. A tab the agent opened or switched to navigates in place.
+- If CDP keys do not reach a field, `browser_type` sets the value from inside the page (native setter + `input`/`change`) and answers `fallback: "native-setter"`; it never echoes a `secret` text.
+- Exception: a passkey ceremony (`browser_passkey`) activates the tab on purpose, because Chrome requires focus for WebAuthn.
+- Real-Chrome check: `node scripts/e2e-background-tab.mjs` (Playwright's Chromium, own profile and ports).
+
 ### Network inspection
 
 `browser_network_requests` and `browser_network_request` show only the URL origin.

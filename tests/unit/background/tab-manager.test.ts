@@ -581,6 +581,68 @@ describe('TabManager background-tab control', () => {
   });
 });
 
+describe('TabManager auto-attach flag', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://a.example/', title: 'a', windowId: 1 });
+    mockChrome.debugger.getTargets.mockResolvedValue([]);
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockResolvedValue({});
+  });
+
+  it('a tab bound by auto-attach is flagged, and persisted so a service-worker restart keeps the flag', async () => {
+    const manager = new TabManager();
+
+    await manager.connectTab(7, 'https://a.example/', { autoAttached: true });
+
+    expect(manager.isAutoAttached()).toBe(true);
+    expect(mockChrome.storage.local.set).toHaveBeenCalledWith({ autoAttachedTabId: 7 });
+  });
+
+  it('connecting the same tab on purpose (switch_tab, popup) clears the flag', async () => {
+    const manager = new TabManager();
+    await manager.connectTab(7, 'https://a.example/', { autoAttached: true });
+
+    await manager.connectTab(7);
+
+    expect(manager.isAutoAttached()).toBe(false);
+    expect(mockChrome.storage.local.remove).toHaveBeenCalledWith('autoAttachedTabId');
+  });
+
+  it('a plain connect (new_tab) is not flagged', async () => {
+    const manager = new TabManager();
+
+    await manager.connectTab(7);
+
+    expect(manager.isAutoAttached()).toBe(false);
+  });
+
+  it('initialize restores the flag only for the tab it was set on', async () => {
+    mockChrome.storage.local.get.mockResolvedValueOnce({ connectedTabId: 7, autoAttachedTabId: 7 });
+    mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://a.example/' });
+    const restored = new TabManager();
+    await restored.initialize();
+    expect(restored.isAutoAttached()).toBe(true);
+
+    mockChrome.storage.local.get.mockResolvedValueOnce({ connectedTabId: 8, autoAttachedTabId: 7 });
+    mockChrome.tabs.get.mockResolvedValue({ id: 8, url: 'https://b.example/' });
+    const other = new TabManager();
+    await other.initialize();
+    expect(other.isAutoAttached()).toBe(false);
+  });
+
+  it('requireTabId (read-only tools) auto-attaches the active tab with the flag set', async () => {
+    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 7, url: 'https://a.example/' }]);
+    const manager = new TabManager();
+    const ctx = createToolContext(manager);
+
+    await ctx.sendToContent('getPageInfo').catch(() => undefined);
+
+    expect(manager.getConnectedTabId()).toBe(7);
+    expect(manager.isAutoAttached()).toBe(true);
+  });
+});
+
 describe('TabManager passkey ceremony (INFRA-585)', () => {
   const stored: Record<string, unknown> = {};
 

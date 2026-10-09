@@ -139,3 +139,31 @@ export async function handleClearField(payload: { selector: string }): Promise<{
   }
   return { length: 0 };
 }
+
+/**
+ * Last resort of browser_type when the keys CDP sent did not land (the field holds another number
+ * of characters than it should): set `kept` leading characters of the current value + `text`
+ * through the native setter, with the input/change events a framework listens to. Answers with
+ * lengths only: `text` may be a secret. Refuses (applied:false) when the field has a maxlength the
+ * result would exceed, or when it is not an editable field: it never guesses around a mask.
+ */
+export async function handleSetFieldText(payload: {
+  selector: string;
+  text: string;
+  kept: number;
+}): Promise<{ applied: boolean; length: number }> {
+  const el = await findElement(payload.selector);
+  const keep = (value: string) => [...value].slice(0, payload.kept).join('');
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    const next = keep(el.value) + payload.text;
+    if (el.maxLength >= 0 && [...next].length > el.maxLength) return { applied: false, length: [...el.value].length };
+    setNativeValue(el, next);
+    return { applied: true, length: [...el.value].length };
+  }
+  if (el instanceof HTMLElement && el.isContentEditable) {
+    el.textContent = keep(el.textContent ?? '') + payload.text;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true }));
+    return { applied: true, length: [...(el.textContent ?? '')].length };
+  }
+  return { applied: false, length: 0 };
+}
