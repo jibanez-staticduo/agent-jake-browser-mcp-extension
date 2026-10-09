@@ -345,7 +345,11 @@ async function handlePopupMessage(message: {
       wsClient?.resetReconnectAttempts();
       await wsClient?.connect();
       await updateKeepAliveAlarm();
-      return { success: true, connected: true };
+      return {
+        success: true,
+        connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
+      };
     }
 
     case 'disconnectTab': {
