@@ -146,17 +146,18 @@ async function tryConnect(): Promise<void> {
   // first command that needs it (see ensureTabId in tools/utils.ts).
   void tabId;
 
-  // Skip if ws-client already has a reconnect scheduled
-  if (wsClient.isReconnecting()) {
-    log.debug('[Loop] Reconnect already scheduled, skipping');
+  // Wait for credentials without repeating the capability probe on each alarm.
+  if (wsClient.isReconnecting() || wsClient.isAwaitingToken()) {
+    log.debug('[Loop] Connection in progress or waiting for credentials, skipping');
     return;
   }
 
   if (!wsConnected) {
     log.info('[Loop] Not connected, attempting WebSocket connect...');
     try {
-      await wsClient.connect();
-      log.info('[Loop] Connected to browser-mcp');
+      if (await wsClient.connect()) {
+        log.info('[Loop] Connected to browser-mcp');
+      }
     } catch (error) {
       log.warn(`[Loop] Connect failed: ${(error as Error).message}`);
     }
@@ -227,6 +228,7 @@ async function handlePopupMessage(message: {
       const tabs = tabManager ? await tabManager.listTabs() : [];
       return {
         connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
         tabId: tabManager?.getConnectedTabId() || null,
         tabs,
       };
@@ -261,6 +263,7 @@ async function handlePopupMessage(message: {
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
         connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
         pairing: getPairingInfo(),
       };
     }
@@ -317,7 +320,11 @@ async function handlePopupMessage(message: {
       wsClient?.resetReconnectAttempts();
       await wsClient?.connect();
       await updateKeepAliveAlarm();
-      return { success: true };
+      return {
+        success: true,
+        connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
+      };
     }
 
     case 'disconnectMcp': {

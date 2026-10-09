@@ -263,6 +263,29 @@ export function httpOrigin(cfg: RuntimeServerConfig): string {
   return `${scheme}://${cfg.hostname}${portSuffix}`;
 }
 
+/** Public server capability check; never send a token in the URL. */
+export async function serverRequiresToken(cfg: RuntimeServerConfig): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${httpOrigin(cfg)}/connections`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Server capability check failed: HTTP ${response.status}`);
+    const body = await response.json() as { authEnabled?: unknown };
+    if (typeof body?.authEnabled !== 'boolean') {
+      throw new Error('Server capability check returned no authentication status');
+    }
+    return body.authEnabled;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Server capability check')) throw error;
+    throw new Error('Server capability check failed: server unavailable or invalid response');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /** Whether the server URL currently comes from the user-editable override. */
 export async function hasStoredServerUrl(): Promise<boolean> {
   const stored = await storageGet([STORAGE_KEYS.serverUrl]);
