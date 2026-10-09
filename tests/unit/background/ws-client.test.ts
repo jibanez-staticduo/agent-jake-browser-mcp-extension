@@ -79,6 +79,18 @@ describe('WebSocket authentication startup', () => {
     expect(await connecting).toBe(true);
   });
 
+  it('preserves the bare loopback build default whose dedicated WS port has no HTTP endpoint', async () => {
+    mocks.config.mockResolvedValue({ ...cfg, source: 'build', secure: false,
+      scheme: 'ws', hostname: '127.0.0.1', port: 8765, path: '' });
+    const connecting = client.connect();
+    await settle();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(FakeSocket.instances[0].url).toBe('ws://127.0.0.1:8765?connectionId=browser-id');
+    FakeSocket.instances[0].open();
+    expect(await connecting).toBe(true);
+  });
+
   it('reports a configured token failure without discarding it or logging its URL', async () => {
     mocks.config.mockResolvedValue({ ...cfg, token: 'stale-secret' });
     const connecting = client.connect();
