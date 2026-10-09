@@ -20,6 +20,8 @@ export default defineConfig({
     headless: false, // Extensions don't work in headless mode
     viewport: { width: 1280, height: 720 },
     actionTimeout: 10000,
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
 
   projects: [

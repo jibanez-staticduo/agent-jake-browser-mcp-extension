@@ -12,7 +12,12 @@ test('secret typing keeps values out of replies, diagnostics and storage', async
   const pending = new Map<string, (value: any) => void>();
   let socket: WebSocket | undefined;
   let sequence = 0;
-  const server = http.createServer((_req, res) => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/connections') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ authEnabled: false, connections: [] }));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end('<!doctype html><title>Secret fixture</title><label>Password<input id="password" type="password" value="old" oninput="console.warn(this.value)"></label><label>Name<input id="name"></label>');
   });

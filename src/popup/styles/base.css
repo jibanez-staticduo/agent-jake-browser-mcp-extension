@@ -2,7 +2,42 @@
  * Base CSS styles - Reset and typography.
  */
 
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+/* Bundle typography so opening the popup never depends on external font servers. */
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(../fonts/dm-sans-400.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(../fonts/dm-sans-500.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(../fonts/dm-sans-600.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(../fonts/jetbrains-mono-400.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(../fonts/jetbrains-mono-500.ttf) format('truetype');
+}
 
 body {
   font-family: var(--font-sans);

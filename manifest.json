@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "Agent Jake Browser MCP",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "permissions": [
     "alarms",
