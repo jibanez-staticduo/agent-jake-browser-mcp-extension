@@ -7,6 +7,7 @@
  * keys:
  *   ajb.serverUrl     full ws(s)://host[:port][/path] entered by the user (S2)
  *   ajb.token         token obtained via pairing or typed by the user
+ *   ajb.label         manual name for this device/browser
  *   ajb.connectionId  persistent UUID that identifies this browser install
  *   ajb.pairCode      OTP of an in-flight pairing flow (survives SW restarts)
  *
@@ -23,6 +24,7 @@ import { CONFIG } from '@/types/config';
 export const STORAGE_KEYS = {
   serverUrl: 'ajb.serverUrl',
   token: 'ajb.token',
+  label: 'ajb.label',
   connectionId: 'ajb.connectionId',
   pairCode: 'ajb.pairCode',
 } as const;
@@ -39,6 +41,8 @@ export interface RuntimeServerConfig extends ParsedServerUrl {
   scheme: 'ws' | 'wss';
   /** Effective auth token (storage value wins, build default is fallback). */
   token: string;
+  /** Manual device/browser name; optional for older runtime fixtures. */
+  label?: string;
   /** Persistent per-install UUID (always present). */
   connectionId: string;
   /** Where host/port/path came from. */
@@ -164,7 +168,7 @@ export async function ensureConnectionId(): Promise<string> {
  * (an explicitly stored empty string clears the token for open-LAN setups).
  */
 export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
-  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
+  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.label]);
   const rawUrl = typeof stored[STORAGE_KEYS.serverUrl] === 'string'
     ? (stored[STORAGE_KEYS.serverUrl] as string)
     : '';
@@ -201,6 +205,7 @@ export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
     ...base,
     scheme: base.secure ? 'wss' : 'ws',
     token,
+    label: normalizeLabel(stored[STORAGE_KEYS.label]),
     connectionId,
     source,
     fromStorage: source === 'manual',
@@ -232,9 +237,25 @@ export async function setToken(token: string | null): Promise<void> {
   await storageSet({ [STORAGE_KEYS.token]: token });
 }
 
+/** Remove control characters and bound the manual connection name. */
+export function normalizeLabel(label: unknown): string {
+  return typeof label === 'string'
+    ? label.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 128)
+    : '';
+}
+
+export async function setLabel(label: string | null): Promise<void> {
+  const normalized = normalizeLabel(label);
+  if (!normalized) {
+    await storageRemove([STORAGE_KEYS.label]);
+    return;
+  }
+  await storageSet({ [STORAGE_KEYS.label]: normalized });
+}
+
 /**
  * WebSocket endpoint for a config: scheme://host[:port]/path with the
- * handshake query `token` (when set) and `connectionId`, URL-encoded.
+ * handshake query `token` / `label` (when set) and `connectionId`, URL-encoded.
  */
 export function buildWsUrl(cfg: RuntimeServerConfig): string {
   const defaultPort = cfg.secure ? 443 : 80;
@@ -242,6 +263,8 @@ export function buildWsUrl(cfg: RuntimeServerConfig): string {
   const params = new URLSearchParams();
   if (cfg.token) params.set('token', cfg.token);
   params.set('connectionId', cfg.connectionId);
+  const label = normalizeLabel(cfg.label);
+  if (label) params.set('label', label);
   return `${cfg.scheme}://${cfg.hostname}${portSuffix}${cfg.path}?${params.toString()}`;
 }
 
@@ -261,6 +284,32 @@ export function httpOrigin(cfg: RuntimeServerConfig): string {
   const defaultPort = cfg.secure ? 443 : 80;
   const portSuffix = cfg.port === defaultPort ? '' : `:${cfg.port}`;
   return `${scheme}://${cfg.hostname}${portSuffix}`;
+}
+
+/** Public capability check; null means a WS-only listener has no auth metadata. */
+export async function serverRequiresToken(cfg: RuntimeServerConfig): Promise<boolean | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${httpOrigin(cfg)}/connections`, {
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+    // Dedicated WS listeners answer plain HTTP with 426. Let their handshake
+    // enforce authentication; network failures and other HTTP errors still fail.
+    if (response.status === 426) return null;
+    if (!response.ok) throw new Error(`Server capability check failed: HTTP ${response.status}`);
+    const body = await response.json() as { authEnabled?: unknown };
+    if (typeof body?.authEnabled !== 'boolean') {
+      throw new Error('Server capability check returned no authentication status');
+    }
+    return body.authEnabled;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Server capability check')) throw error;
+    throw new Error('Server capability check failed: server unavailable or invalid response');
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** Whether the server URL currently comes from the user-editable override. */

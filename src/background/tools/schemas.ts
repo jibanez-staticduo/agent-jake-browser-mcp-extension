@@ -16,10 +16,12 @@ export const schemas = {
   }),
 
   browser_type: z.object({
-    ref: z.string(),
+    ref: z.string().min(1).optional(),
+    selector: z.string().min(1).optional(),
     text: z.string(),
     clear: z.boolean().optional().default(false),
-  }),
+    secret: z.boolean().optional().default(false),
+  }).refine((d) => d.ref || d.selector, { message: 'ref or selector is required' }),
 
   browser_hover: z.object({
     ref: z.string(),
@@ -63,6 +65,10 @@ export const schemas = {
 
   browser_send_to_back: z.object({
     tabId: z.number().optional(),
+  }),
+
+  browser_close_tab: z.object({
+    tabId: z.number().int().positive().optional(),
   }),
 
   browser_get_text: z.object({

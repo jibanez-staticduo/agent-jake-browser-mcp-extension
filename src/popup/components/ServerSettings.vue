@@ -74,6 +74,24 @@ const sourceLabel = computed(() => {
       </span>
     </div>
 
+    <div class="field">
+      <label class="field-label" for="server-label">Nombre del equipo / navegador</label>
+      <input
+        id="server-label"
+        v-model="server.labelInput"
+        class="field-input"
+        type="text"
+        maxlength="128"
+        spellcheck="false"
+        placeholder="Portátil / Chrome"
+        aria-describedby="server-label-hint"
+        @input="server.markDraftTouched()"
+      >
+      <span id="server-label-hint" class="field-hint">
+        Identificación manual para distinguir conexiones. Chrome no puede leer el nombre real del equipo.
+      </span>
+    </div>
+
     <div v-if="server.error" class="panel-error">{{ server.error }}</div>
 
     <div class="actions">

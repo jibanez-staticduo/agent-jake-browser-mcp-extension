@@ -304,6 +304,44 @@ The extension exposes 23 browser automation tools:
 | `highlight` | Highlight element visually |
 | ... | And more |
 
+### Closing Tabs By ID
+
+`browser_list_tabs` advertises `closeById: true`. `browser_close_tab` accepts an
+optional positive integer `tabId` and returns `{ closed: true, tabId }` with the
+ID actually closed. An invalid explicit ID is rejected before any tab is closed;
+only an omitted ID selects the connected tab. Closing another tab preserves the
+connected tab. This contract lets the server clean up its agent-created tabs.
+
+Run `npx playwright test tests/tab-close.spec.ts` after building to exercise
+this contract through WebSocket and real Chromium with disposable tabs.
+
+Manual and packaged URLs can target a dedicated WebSocket listener. An HTTP
+capability probe returning `426 Upgrade Required` means authentication metadata
+is unavailable, so the WebSocket handshake decides access. A server advertising
+`authEnabled: true` still waits for a token or pairing, and other probe errors
+remain errors.
+
+## Secret Typing Privacy
+
+When `browser_type` receives `secret: true`, the extension returns operation
+metadata and optional field length verification, without the typed value or
+remote error text. Diagnostic logging is redacted and page console/network
+content capture is suspended while the operation runs, including its DOM
+stability wait. Debugger events needed for navigation, dialogs and file chooser
+waiters continue to work.
+
+This protection applies to events received during the secret operation. A page
+can emit delayed console messages or network events after the operation ends;
+those events can be captured normally. The page receives the secret, and other
+tools can intentionally inspect DOM values, screenshots, console or network
+data. Secret typing does not provide isolation from the page or prevent later
+reads by other tools.
+
+Run the focused real-Chromium test with `npm run build`,
+`npx playwright install chromium`, then
+`npx playwright test tests/secret-fill.spec.ts`. It uses a temporary profile,
+loopback HTTP/WebSocket fixtures and fake secrets, with no 1Password account.
+
 ## Related Projects
 
 - [agent-jake-browser-mcp-server](https://github.com/SnakeO/agent-jake-browser-mcp-server) - Node.js MCP server that exposes browser tools to AI agents

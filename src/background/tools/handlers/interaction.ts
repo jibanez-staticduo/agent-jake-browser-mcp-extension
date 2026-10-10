@@ -7,6 +7,7 @@
  * cross-origin iframe that translation does not exist, and rather than firing at the
  * wrong point of the page it falls back to a programmatic click inside the frame.
  */
+import { withSecretLogging } from '@/utils/logger';
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap, Coordinates } from './types';
 
@@ -82,55 +83,74 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_type: async (payload) => {
-      const { ref, text, clear } = schemas.browser_type.parse(payload);
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
+      const sensitive = (payload as { secret?: unknown } | null)?.secret === true;
+      const typeText = async () => {
+        const { ref, selector: targetSelector, text, clear, secret } = schemas.browser_type.parse(payload);
+        const tabId = ctx.tabManager.getConnectedTabId();
+        if (!tabId) throw new Error('No tab connected');
 
-      const initialTab = await chrome.tabs.get(tabId);
-      const initialUrl = initialTab.url || '';
+        const initialTab = await chrome.tabs.get(tabId);
+        const initialUrl = initialTab.url || '';
 
-      const { frameId, selector } = await resolveRef(ref);
-      await sendToContent('scrollIntoView', { selector }, frameId);
+        const { frameId, selector } = targetSelector ? { frameId: 0, selector: targetSelector } : await resolveRef(ref!);
+        await sendToContent('scrollIntoView', { selector }, frameId);
 
-      const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector }, frameId);
+        const coords = await sendToContent<Coordinates>('getElementCoordinates', { selector }, frameId);
 
-      if (coords.exact === false) {
-        // With no reliable coordinates, focus is set from inside the frame. The focus
-        // itself IS real, so the keys CDP sends next still reach this input.
-        await sendToContent('focusElement', { selector }, frameId);
-      } else {
-        // Click to focus
-        await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
-        await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
-        await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
-      }
+        if (coords.exact === false) {
+          // With no reliable coordinates, focus is set from inside the frame. The focus
+          // itself IS real, so the keys CDP sends next still reach this input.
+          await sendToContent('focusElement', { selector }, frameId);
+        } else {
+          // Click to focus
+          await ctx.dispatchMouseEventTyped('mouseMoved', coords.x, coords.y);
+          await ctx.dispatchMouseEventTyped('mousePressed', coords.x, coords.y, 'left', 1);
+          await ctx.dispatchMouseEventTyped('mouseReleased', coords.x, coords.y, 'left', 1);
+        }
 
-      if (clear) {
-        // A bare Control keyDown does not modify the next key over CDP: without
-        // `modifiers` the "a" just types, and Backspace then eats one char
-        // ("Dani" + clear + "Luis" = "DanLuis"). The editing command selects all
-        // on every platform.
-        await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
-          type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2, commands: ['selectAll'],
-        });
-        await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
-          type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
-        });
-        await ctx.dispatchKeyEventTyped('keyDown', 'Backspace');
-        await ctx.dispatchKeyEventTyped('keyUp', 'Backspace');
-      }
+        if (clear) {
+          // A bare Control keyDown does not modify the next key over CDP: without
+          // `modifiers` the "a" just types, and Backspace then eats one char
+          // ("Dani" + clear + "Luis" = "DanLuis"). The editing command selects all
+          // on every platform.
+          await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+            type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2, commands: ['selectAll'],
+          });
+          await ctx.tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+            type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2,
+          });
+          await ctx.dispatchKeyEventTyped('keyDown', 'Backspace');
+          await ctx.dispatchKeyEventTyped('keyUp', 'Backspace');
+        }
 
-      for (const char of text) {
-        await ctx.dispatchKeyEventTyped('keyDown', char);
-        await ctx.dispatchKeyEventTyped('char', char, char);
-        await ctx.dispatchKeyEventTyped('keyUp', char);
-      }
+        for (const char of text) {
+          await ctx.dispatchKeyEventTyped('keyDown', char);
+          await ctx.dispatchKeyEventTyped('char', char, char);
+          await ctx.dispatchKeyEventTyped('keyUp', char);
+        }
 
-      const result = await waitForStableOrNavigation(initialUrl, frameId);
-      if (result.navigated) {
-        return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
-      }
-      return { typed: text, cleared: clear };
+        const result = await waitForStableOrNavigation(initialUrl, frameId);
+        if (secret) {
+          if (result.navigated) return { typed: true, cleared: clear, navigated: true, verified: false };
+          try {
+            const field = await sendToContent<{ exists: boolean; length?: number }>('getFieldLength', { selector }, frameId);
+            const length = field.exists && Number.isSafeInteger(field.length) && field.length! >= 0 ? field.length : undefined;
+            return { typed: true, cleared: clear, navigated: false, verified: clear && length === text.length,
+              ...(length === undefined ? {} : { length }) };
+          } catch {
+            return { typed: true, cleared: clear, navigated: false, verified: false, warning: 'FIELD_VERIFICATION_UNAVAILABLE' };
+          }
+        }
+        if (result.navigated) {
+          return { typed: text, cleared: clear, navigated: true, newUrl: result.newUrl };
+        }
+        return { typed: text, cleared: clear };
+      };
+      if (!sensitive) return typeText();
+      return withSecretLogging(async () => {
+        try { return await typeText(); }
+        catch { throw new Error('Secret typing failed'); }
+      });
     },
 
     browser_hover: async (payload) => {

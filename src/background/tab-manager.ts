@@ -3,7 +3,7 @@
  * Tracks which tab is currently being automated.
  */
 
-import { log } from '@/utils/logger';
+import { log, isSecretLogging } from '@/utils/logger';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
@@ -507,9 +507,10 @@ export class TabManager {
     }
   }
 
-  private recordCdpError(error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
+  private recordCdpError(error: unknown): string {
+    const message = isSecretLogging() ? 'Secret operation CDP failure' : error instanceof Error ? error.message : String(error);
     this.lastCdpError = message;
+    return message;
   }
 
   private async probeCdp(tabId: number): Promise<{ ok: true; error: null } | { ok: false; error: string }> {
@@ -522,8 +523,7 @@ export class TabManager {
       this.lastCdpError = null;
       return { ok: true, error: null };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.recordCdpError(error);
+      const message = this.recordCdpError(error);
       return { ok: false, error: message };
     }
   }
@@ -654,12 +654,16 @@ export class TabManager {
   }
 
   /**
-   * Close a tab.
+   * Close a tab (the connected one when no id is given). Returns the id it closed.
    */
-  async closeTab(tabId?: number): Promise<void> {
-    const targetTabId = tabId || this.connectedTabId;
+  async closeTab(tabId?: number): Promise<number> {
+    if (tabId !== undefined && (!Number.isSafeInteger(tabId) || tabId <= 0)) {
+      throw new Error('Tab ID must be a positive integer');
+    }
 
-    if (!targetTabId) {
+    const targetTabId = tabId === undefined ? this.connectedTabId : tabId;
+
+    if (targetTabId === null) {
       throw new Error('No tab specified and no connected tab');
     }
 
@@ -669,6 +673,7 @@ export class TabManager {
 
     await chrome.tabs.remove(targetTabId);
     log.info(`Closed tab: ${targetTabId}`);
+    return targetTabId;
   }
 
   /**

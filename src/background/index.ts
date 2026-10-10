@@ -30,6 +30,7 @@ import {
   parseWsUrl,
   setServerUrl,
   setToken,
+  setLabel,
   STORAGE_KEYS,
 } from '@/config/runtime';
 
@@ -146,17 +147,18 @@ async function tryConnect(): Promise<void> {
   // first command that needs it (see ensureTabId in tools/utils.ts).
   void tabId;
 
-  // Skip if ws-client already has a reconnect scheduled
-  if (wsClient.isReconnecting()) {
-    log.debug('[Loop] Reconnect already scheduled, skipping');
+  // Wait for credentials without repeating the capability probe on each alarm.
+  if (wsClient.isReconnecting() || wsClient.isAwaitingToken()) {
+    log.debug('[Loop] Connection in progress or waiting for credentials, skipping');
     return;
   }
 
   if (!wsConnected) {
     log.info('[Loop] Not connected, attempting WebSocket connect...');
     try {
-      await wsClient.connect();
-      log.info('[Loop] Connected to browser-mcp');
+      if (await wsClient.connect()) {
+        log.info('[Loop] Connected to browser-mcp');
+      }
     } catch (error) {
       log.warn(`[Loop] Connect failed: ${(error as Error).message}`);
     }
@@ -227,6 +229,7 @@ async function handlePopupMessage(message: {
       const tabs = tabManager ? await tabManager.listTabs() : [];
       return {
         connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
         tabId: tabManager?.getConnectedTabId() || null,
         tabs,
       };
@@ -260,13 +263,15 @@ async function handlePopupMessage(message: {
           : '',
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
+        label: cfg.label ?? '',
         connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
         pairing: getPairingInfo(),
       };
     }
 
     case 'saveServerConfig': {
-      const { serverUrl, token } = (payload || {}) as { serverUrl?: string; token?: string };
+      const { serverUrl, token, label } = (payload || {}) as { serverUrl?: string; token?: string; label?: string };
       if (typeof serverUrl === 'string') {
         const trimmed = serverUrl.trim();
         if (trimmed && parseWsUrl(trimmed) === null) {
@@ -277,6 +282,9 @@ async function handlePopupMessage(message: {
       if (typeof token === 'string') {
         await setToken(token.trim());
       }
+      if (typeof label === 'string') {
+        await setLabel(label);
+      }
       // Reconnect immediately so the new URL/token take effect.
       cancelPairing();
       wsClient?.disconnect();
@@ -286,6 +294,7 @@ async function handlePopupMessage(message: {
         success: true,
         connected: wsClient?.isConnected() || false,
         effectiveUrl: buildDisplayUrl(cfg),
+        label: cfg.label ?? '',
       };
     }
 
@@ -317,7 +326,11 @@ async function handlePopupMessage(message: {
       wsClient?.resetReconnectAttempts();
       await wsClient?.connect();
       await updateKeepAliveAlarm();
-      return { success: true };
+      return {
+        success: true,
+        connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
+      };
     }
 
     case 'disconnectMcp': {
@@ -338,7 +351,11 @@ async function handlePopupMessage(message: {
       wsClient?.resetReconnectAttempts();
       await wsClient?.connect();
       await updateKeepAliveAlarm();
-      return { success: true, connected: true };
+      return {
+        success: true,
+        connected: wsClient?.isConnected() || false,
+        awaitingToken: wsClient?.isAwaitingToken() || false,
+      };
     }
 
     case 'disconnectTab': {

@@ -105,6 +105,12 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
     case 'dispatchClick':
       return handleDispatchClick(payload as { selector: string });
 
+    case 'getFieldLength': {
+      const element = document.querySelector((payload as { selector: string }).selector);
+      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return { exists: false };
+      return { exists: true, length: element.value.length };
+    }
+
     case 'focusElement':
       return handleFocusElement(payload as { selector: string });
 

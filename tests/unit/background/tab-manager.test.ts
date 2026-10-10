@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockChrome = {
   storage: {
@@ -45,7 +45,8 @@ const mockChrome = {
 
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
-vi.mock('@/utils/logger', () => ({
+vi.mock('@/utils/logger', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/utils/logger')>(),
   log: {
     info: vi.fn(),
     debug: vi.fn(),
@@ -61,6 +62,86 @@ vi.mock('@/background/activity-log', () => ({
 
 import { TabManager } from '@/background/tab-manager';
 import { pageEvents } from '@/background/page-events';
+import { createTabHandlers } from '@/background/tools/handlers/tabs';
+import type { HandlerContext } from '@/background/tools/handlers/types';
+
+describe('TabManager closeTab', () => {
+  let manager: TabManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChrome.tabs.remove.mockReset().mockResolvedValue(undefined);
+    mockChrome.debugger.detach.mockResolvedValue(undefined);
+    manager = new TabManager();
+    (manager as unknown as { connectedTabId: number }).connectedTabId = 7;
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '42'])(
+    'rejects invalid explicit id %s without closing or disconnecting the connected tab', async (tabId) => {
+      const disconnect = vi.spyOn(manager, 'disconnectTab');
+
+      await expect(manager.closeTab(tabId as number)).rejects.toThrow('positive integer');
+
+      expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
+      expect(disconnect).not.toHaveBeenCalled();
+      expect(manager.getConnectedTabId()).toBe(7);
+    },
+  );
+
+  it('closes the requested tab through the real handler and preserves the connected tab', async () => {
+    const handlers = createTabHandlers({ tabManager: manager } as HandlerContext);
+    const disconnect = vi.spyOn(manager, 'disconnectTab');
+
+    await expect(handlers.browser_close_tab({ tabId: 42 })).resolves.toEqual({ closed: true, tabId: 42 });
+
+    expect(mockChrome.tabs.remove).toHaveBeenCalledTimes(1);
+    expect(mockChrome.tabs.remove).toHaveBeenCalledWith(42);
+    expect(disconnect).not.toHaveBeenCalled();
+    expect(manager.getConnectedTabId()).toBe(7);
+  });
+
+  it('rejects zero through the real handler and manager without any tab effects', async () => {
+    const handlers = createTabHandlers({ tabManager: manager } as HandlerContext);
+
+    await expect(handlers.browser_close_tab({ tabId: 0 })).rejects.toThrow();
+
+    expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
+    expect(mockChrome.storage.local.remove).not.toHaveBeenCalled();
+    expect(manager.getConnectedTabId()).toBe(7);
+  });
+
+  it('closes and disconnects the connected tab when the handler receives no id', async () => {
+    const handlers = createTabHandlers({ tabManager: manager } as HandlerContext);
+
+    await expect(handlers.browser_close_tab({})).resolves.toEqual({ closed: true, tabId: 7 });
+
+    expect(mockChrome.tabs.remove).toHaveBeenCalledTimes(1);
+    expect(mockChrome.tabs.remove).toHaveBeenCalledWith(7);
+    expect(mockChrome.storage.local.remove).toHaveBeenCalled();
+    expect(manager.getConnectedTabId()).toBeNull();
+  });
+
+  it('reports failure for an unknown explicit id without closing the connected tab', async () => {
+    mockChrome.tabs.remove.mockRejectedValue(new Error('No tab with id: 42'));
+
+    await expect(manager.closeTab(42)).rejects.toThrow('No tab with id: 42');
+
+    expect(mockChrome.tabs.remove).toHaveBeenCalledTimes(1);
+    expect(mockChrome.tabs.remove).toHaveBeenCalledWith(42);
+    expect(mockChrome.storage.local.remove).not.toHaveBeenCalled();
+    expect(manager.getConnectedTabId()).toBe(7);
+  });
+
+  it('rejects omission when no tab is connected', async () => {
+    manager = new TabManager();
+
+    await expect(manager.closeTab()).rejects.toThrow('No tab specified and no connected tab');
+
+    expect(mockChrome.tabs.remove).not.toHaveBeenCalled();
+  });
+});
 
 describe('TabManager CDP readiness', () => {
   beforeEach(() => {
