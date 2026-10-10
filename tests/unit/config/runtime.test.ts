@@ -359,3 +359,36 @@ describe('buildWsUrl / httpOrigin', () => {
     expect(httpOrigin(cfg)).toBe('https://embedded.example.com');
   });
 });
+
+describe('serverRequiresToken', () => {
+  it.each([true, false])('returns declared authEnabled=%s without leaking a token', async (authEnabled) => {
+    const { getEffectiveConfig, serverRequiresToken } = await loadRuntime();
+    const cfg = await getEffectiveConfig();
+    fetchMock.mockResolvedValue(await bundleResponse({ authEnabled }));
+    expect(await serverRequiresToken(cfg)).toBe(authEnabled);
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('http://build.host:9999/connections');
+  });
+
+  it('represents HTTP 426 as unknown auth without trying to parse the WS-only response', async () => {
+    const { getEffectiveConfig, serverRequiresToken } = await loadRuntime();
+    const cfg = await getEffectiveConfig();
+    const json = vi.fn();
+    fetchMock.mockResolvedValue({ ok: false, status: 426, json });
+    expect(await serverRequiresToken(cfg)).toBeNull();
+    expect(json).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404, 503])('retains HTTP %s as a capability error', async (status) => {
+    const { getEffectiveConfig, serverRequiresToken } = await loadRuntime();
+    const cfg = await getEffectiveConfig();
+    fetchMock.mockResolvedValue(await bundleResponse({}, status));
+    await expect(serverRequiresToken(cfg)).rejects.toThrow(`HTTP ${status}`);
+  });
+
+  it('rejects a missing authentication status', async () => {
+    const { getEffectiveConfig, serverRequiresToken } = await loadRuntime();
+    const cfg = await getEffectiveConfig();
+    fetchMock.mockResolvedValue(await bundleResponse({}));
+    await expect(serverRequiresToken(cfg)).rejects.toThrow('no authentication status');
+  });
+});

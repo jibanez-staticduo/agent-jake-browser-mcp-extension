@@ -84,11 +84,11 @@ export class WebSocketClient {
       cfg = await getEffectiveConfig();
       this.effectiveUrl = buildDisplayUrl(cfg);
       // The legacy loopback build default uses a dedicated WS port without HTTP.
-      // Manual and packaged destinations must still advertise their auth status.
+      // Other destinations probe auth metadata, with WS-only 426 handled by runtime.
       const legacyLocalDefault = cfg.source === 'build' && !cfg.secure && cfg.scheme === 'ws'
         && ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(cfg.hostname);
       if (!cfg.token && !legacyLocalDefault
-        && (this.awaitingTokenUrl === this.effectiveUrl || await serverRequiresToken(cfg))) {
+        && (this.awaitingTokenUrl === this.effectiveUrl || await serverRequiresToken(cfg) === true)) {
         if (generation !== this.connectionGeneration) return false;
         this.awaitingTokenUrl = this.effectiveUrl;
         this.isConnecting = false;

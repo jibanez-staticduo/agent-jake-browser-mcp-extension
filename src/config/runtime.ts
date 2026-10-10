@@ -286,8 +286,8 @@ export function httpOrigin(cfg: RuntimeServerConfig): string {
   return `${scheme}://${cfg.hostname}${portSuffix}`;
 }
 
-/** Public server capability check; never send a token in the URL. */
-export async function serverRequiresToken(cfg: RuntimeServerConfig): Promise<boolean> {
+/** Public capability check; null means a WS-only listener has no auth metadata. */
+export async function serverRequiresToken(cfg: RuntimeServerConfig): Promise<boolean | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
   try {
@@ -295,6 +295,9 @@ export async function serverRequiresToken(cfg: RuntimeServerConfig): Promise<boo
       signal: controller.signal,
       cache: 'no-store',
     });
+    // Dedicated WS listeners answer plain HTTP with 426. Let their handshake
+    // enforce authentication; network failures and other HTTP errors still fail.
+    if (response.status === 426) return null;
     if (!response.ok) throw new Error(`Server capability check failed: HTTP ${response.status}`);
     const body = await response.json() as { authEnabled?: unknown };
     if (typeof body?.authEnabled !== 'boolean') {

@@ -91,6 +91,36 @@ describe('WebSocket authentication startup', () => {
     expect(await connecting).toBe(true);
   });
 
+  it.each([
+    ['manual', 'localhost'],
+    ['manual', '192.168.1.5'],
+    ['config.json', '127.0.0.1'],
+    ['config.json', '192.168.1.5'],
+  ] as const)('connects a tokenless %s dedicated WS server at %s after HTTP 426', async (source, hostname) => {
+    mocks.config.mockResolvedValue({ ...cfg, source, hostname, secure: false,
+      scheme: 'ws', port: 8765, fromStorage: source === 'manual' });
+    fetchMock.mockResolvedValue({ ok: false, status: 426 });
+    const connecting = client.connect();
+    await settle();
+    expect(fetchMock.mock.calls[0][0]).toBe(`http://${hostname}:8765/connections`);
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(FakeSocket.instances[0].url).not.toContain('token=');
+    expect(client.isAwaitingToken()).toBe(false);
+    FakeSocket.instances[0].open();
+    expect(await connecting).toBe(true);
+  });
+
+  it('keeps a failed dedicated WS handshake as a connection failure', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 426 });
+    const connecting = client.connect();
+    const rejected = expect(connecting).rejects.toThrow('WebSocket connection failed');
+    await settle();
+    FakeSocket.instances[0].onerror?.();
+    await rejected;
+    expect(client.isAwaitingToken()).toBe(false);
+    expect(client.isConnected()).toBe(false);
+  });
+
   it('reports a configured token failure without discarding it or logging its URL', async () => {
     mocks.config.mockResolvedValue({ ...cfg, token: 'stale-secret' });
     const connecting = client.connect();
@@ -108,6 +138,13 @@ describe('WebSocket authentication startup', () => {
     expect(client.isAwaitingToken()).toBe(false);
     expect(client.isReconnecting()).toBe(false);
     expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('does not attempt WS after a network failure in preflight', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+    await expect(client.connect()).rejects.toThrow('server unavailable or invalid response');
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(client.isAwaitingToken()).toBe(false);
   });
 
   it('discards a preflight superseded by disconnect', async () => {
