@@ -657,9 +657,13 @@ export class TabManager {
    * Close a tab (the connected one when no id is given). Returns the id it closed.
    */
   async closeTab(tabId?: number): Promise<number> {
-    const targetTabId = tabId || this.connectedTabId;
+    if (tabId !== undefined && (!Number.isSafeInteger(tabId) || tabId <= 0)) {
+      throw new Error('Tab ID must be a positive integer');
+    }
 
-    if (!targetTabId) {
+    const targetTabId = tabId === undefined ? this.connectedTabId : tabId;
+
+    if (targetTabId === null) {
       throw new Error('No tab specified and no connected tab');
     }
 

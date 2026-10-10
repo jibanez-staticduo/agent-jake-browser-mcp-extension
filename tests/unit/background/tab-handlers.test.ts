@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTabHandlers } from '@/background/tools/handlers/tabs';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
-/** A tab manager whose closeTab behaves like the real one: the given id, else the connected tab. */
+/** Handler stub; TabManager target selection is covered separately with the real manager. */
 function contextWith(connectedTabId: number) {
   const closeTab = vi.fn(async (tabId?: number) => tabId ?? connectedTabId);
   const listTabs = vi.fn(async () => [{ id: connectedTabId, url: 'https://a.example/', title: 'a', active: true, connected: true }]);
@@ -29,12 +29,14 @@ describe('browser_close_tab', () => {
     expect(answer).toEqual({ closed: true, tabId: 7 });
   });
 
-  it('rejects an id that is not a number', async () => {
-    const { handlers, closeTab } = contextWith(7);
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, 'all'])(
+    'rejects invalid explicit id %s before calling the manager', async (tabId) => {
+      const { handlers, closeTab } = contextWith(7);
 
-    await expect(handlers.browser_close_tab({ tabId: 'all' })).rejects.toThrow();
-    expect(closeTab).not.toHaveBeenCalled();
-  });
+      await expect(handlers.browser_close_tab({ tabId })).rejects.toThrow();
+      expect(closeTab).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('browser_list_tabs', () => {

@@ -68,7 +68,7 @@ export const schemas = {
   }),
 
   browser_close_tab: z.object({
-    tabId: z.number().optional(),
+    tabId: z.number().int().positive().optional(),
   }),
 
   browser_get_text: z.object({
