@@ -32,10 +32,14 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
     ...ctx,
 
     async dispatchMouseEventTyped(type, x, y, button = 'left', clickCount = 1) {
+      // INFRA-855: the drawn pointer glides on the move and ripples on the press.
+      if (type === 'mouseMoved') void ctx.sendToContent('cursor', { kind: 'move', x, y }).catch(() => {});
+      if (type === 'mousePressed') void ctx.sendToContent('cursor', { kind: 'click', x, y }).catch(() => {});
       await ctx.dispatchMouseEvent(type, x, y, button, clickCount);
     },
 
     async dispatchKeyEventTyped(type, key, text?) {
+      if (type === 'char') void ctx.sendToContent('cursor', { kind: 'type' }).catch(() => {});
       const keyDef = getKeyDefinition(key);
       await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
         type,

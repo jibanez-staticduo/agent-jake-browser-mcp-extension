@@ -9,6 +9,7 @@ import {
   getElementByRef,
   formatSnapshotAsText,
 } from './aria-tree';
+import { showCursor } from './cursor';
 import {
   buildSelector,
   findElement,
@@ -89,6 +90,9 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
     case 'waitForElement':
       return handleWaitForElement(payload as { selector: string; timeout?: number });
+
+    case 'cursor':
+      return showCursor(payload as Parameters<typeof showCursor>[0]);
 
     case 'highlight':
       return handleHighlight(payload as { selector: string });
