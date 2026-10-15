@@ -21,7 +21,7 @@ button {
   color: var(--text-primary);
   background: var(--accent-primary-dim);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 5px 10px;
   min-height: 32px;
   cursor: pointer;
@@ -55,7 +55,7 @@ textarea {
   color: var(--text-primary);
   background: var(--bg-deep);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   padding: 6px 8px;
 }
 

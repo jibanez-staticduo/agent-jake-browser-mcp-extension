@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest';
 
 /** Rule of the panel: informative text is >= 4.5:1 on every background, in each published theme. */
 const css = readFileSync('src/popup/styles/variables.css', 'utf8');
-const lightStart = css.indexOf('prefers-color-scheme: light');
+const darkStart = css.indexOf('prefers-color-scheme: dark');
 
 function tokens(block: string): Record<string, string> {
   return Object.fromEntries([...block.matchAll(/(--[a-z-]+):\s*(#[0-9a-fA-F]{6})/g)].map((m) => [m[1], m[2]]));
 }
-const dark = tokens(css.slice(0, lightStart));
-const light = { ...dark, ...tokens(css.slice(lightStart)) };
+const light = tokens(css.slice(0, darkStart));
+const dark = { ...light, ...tokens(css.slice(darkStart)) };
 
 function lum(hex: string): number {
   const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)

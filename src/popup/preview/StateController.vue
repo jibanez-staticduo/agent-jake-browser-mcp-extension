@@ -108,13 +108,13 @@ function handleReset(): void {
   bottom: 12px;
   right: 12px;
   z-index: 99999;
-  background: #1a1a2e;
+  background: var(--bg-surface);
   border: 1px solid rgba(0, 212, 255, 0.3);
   border-radius: 8px;
   padding: 10px;
   font-family: 'DM Sans', sans-serif;
   font-size: 11px;
-  color: #f0f0f5;
+  color: var(--text-primary);
   min-width: 160px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
@@ -130,7 +130,7 @@ function handleReset(): void {
   right: 4px;
   background: none;
   border: none;
-  color: #8888a0;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   padding: 2px 6px;
@@ -138,7 +138,7 @@ function handleReset(): void {
 }
 
 .toggle-btn:hover {
-  color: #00d4ff;
+  color: var(--accent-primary);
   background: rgba(0, 212, 255, 0.1);
 }
 
@@ -149,7 +149,7 @@ function handleReset(): void {
 .title {
   font-size: 10px;
   font-weight: 600;
-  color: #00d4ff;
+  color: var(--accent-primary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 8px;
@@ -166,16 +166,16 @@ function handleReset(): void {
 .group-label {
   width: 100%;
   font-size: 9px;
-  color: #8888a0;
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 2px;
 }
 
 .ctrl-btn {
-  background: #242442;
+  background: var(--bg-elevated);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #f0f0f5;
+  color: var(--text-primary);
   padding: 3px 8px;
   border-radius: 4px;
   cursor: pointer;
@@ -185,18 +185,18 @@ function handleReset(): void {
 }
 
 .ctrl-btn:hover {
-  background: #2a2a4a;
+  background: var(--bg-hover);
   border-color: rgba(0, 212, 255, 0.3);
 }
 
 .ctrl-btn.active {
   background: rgba(16, 185, 129, 0.15);
-  border-color: #10b981;
-  color: #10b981;
+  border-color: var(--accent-success);
+  color: var(--accent-success);
 }
 
 .ctrl-btn.danger {
-  color: #ef4444;
+  color: var(--accent-danger);
 }
 
 .ctrl-btn.danger:hover {
@@ -206,10 +206,10 @@ function handleReset(): void {
 
 .ctrl-btn.reset {
   width: 100%;
-  color: #8888a0;
+  color: var(--text-secondary);
 }
 
 .ctrl-btn.reset:hover {
-  color: #f0f0f5;
+  color: var(--text-primary);
 }
 </style>

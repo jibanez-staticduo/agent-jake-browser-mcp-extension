@@ -26,11 +26,14 @@ import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
+  chatOfScope,
   currentChatId,
   deleteChat,
   listChats,
   newChat,
   saveChat,
+  scopeOf,
+  setCurrentChat,
   type Chat,
   type Item,
 } from './chats';
@@ -39,6 +42,7 @@ interface Target {
   id: number;
   title: string;
   url: string;
+  groupId?: number;
 }
 
 const MODES: { id: CopilotMode; label: string; hint: string }[] = [
@@ -281,7 +285,8 @@ function onKey(e: KeyboardEvent) {
 
 async function startNewChat() {
   if (running.value) return;
-  chat.value = newChat();
+  chat.value = { ...newChat(), scope: target.value ? scopeOf(target.value) : undefined };
+  await setCurrentChat(chat.value.id);
   panel.value = 'none';
   await nextTick();
   textarea.value?.focus();
@@ -295,6 +300,7 @@ async function openHistory() {
 function openChat(c: Chat) {
   if (running.value) return;
   chat.value = JSON.parse(JSON.stringify(c)) as Chat;
+  void setCurrentChat(c.id);
   panel.value = 'none';
   void scroll();
 }
@@ -312,7 +318,10 @@ async function removeChat(c: Chat) {
   undoable.value = JSON.parse(JSON.stringify(c)) as Chat;
   await deleteChat(c.id);
   chats.value = await listChats();
-  if (c.id === chat.value.id) chat.value = newChat();
+  if (c.id === chat.value.id) {
+    chat.value = { ...newChat(), scope: target.value ? scopeOf(target.value) : undefined };
+    await setCurrentChat(chat.value.id);
+  }
 }
 
 async function saveSettings(next?: CopilotSettings) {
@@ -361,14 +370,32 @@ function openOptions() {
 async function refreshTarget() {
   if (pinned.value || windowId === null) return;
   const [tab] = await chrome.tabs.query({ active: true, windowId });
-  target.value = tab?.id ? { id: tab.id, title: tab.title || '', url: tab.url || '' } : null;
+  target.value = tab?.id ? { id: tab.id, title: tab.title || '', url: tab.url || '', groupId: tab.groupId } : null;
+  await followScope();
+}
+
+/** One conversation per tab (or per tab group): follow the target's scope when it changes. */
+async function followScope() {
+  if (running.value || !target.value) return;
+  const scope = scopeOf(target.value);
+  if (!scope || chat.value.scope === scope) return;
+  const saved = await chatOfScope(scope);
+  chat.value = saved ? (JSON.parse(JSON.stringify(saved)) as Chat) : { ...newChat(), scope };
+  for (const i of chat.value.items) {
+    if (i.kind === 'request' && !i.answered) i.answered = 'cancelled';
+    i.streaming = false;
+  }
+  void scroll();
 }
 
 const onActivated = (info: chrome.tabs.OnActivatedInfo) => {
   if (info.windowId === windowId) void refreshTarget();
 };
 const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
-  if (target.value?.id === tabId) target.value = { id: tabId, title: tab.title || '', url: tab.url || '' };
+  if (target.value?.id === tabId) {
+    target.value = { id: tabId, title: tab.title || '', url: tab.url || '', groupId: tab.groupId };
+    void followScope();
+  }
 };
 const onRemoved = (tabId: number) => {
   if (target.value?.id === tabId) {
@@ -621,7 +648,7 @@ button.link.title { color: var(--text-primary); }
 .log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
 .empty { text-align: center; margin-top: 30px; line-height: 1.6; padding: 0 10px; }
 .item { word-break: break-word; line-height: 1.5; }
-.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--accent-primary-dim); padding: 6px 10px; border-radius: 10px; max-width: 85%; }
+.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 6px 10px; border-radius: var(--radius-lg); max-width: 85%; }
 .item.assistant.interim { color: var(--text-secondary); }
 .md :deep(p) { margin: 0 0 6px; }
 .md :deep(p:last-child) { margin-bottom: 0; }
@@ -641,41 +668,37 @@ button.link.title { color: var(--text-primary); }
 .steps > .item { margin: 3px 0 0 6px; }
 .item.tool { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary); }
 .item.tool summary { cursor: pointer; }
-.item.tool pre { margin: 4px 0 0 14px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; }
+.item.tool pre { margin: 4px 0 0 14px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; background: var(--bg-surface); padding: 6px; border-radius: var(--radius-sm); }
 .item.error { color: var(--accent-danger); white-space: pre-wrap; }
 .item.info { color: var(--text-secondary); font-style: italic; }
 .ok { color: var(--accent-success); }
 .ko { color: var(--accent-danger); }
 .pending { color: var(--accent-warning); }
 .plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 4px 10px 6px; max-height: 30%; overflow-y: auto; }
-.plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; }
+.plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; font-family: var(--font-serif); font-size: 15px; }
 .plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
 footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border-default); }
-.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: 4px; }
+.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .notice span { color: var(--text-secondary); }
 .notice.err { margin: 0; border-left-color: var(--accent-danger); }
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
 .waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
 .send-group { display: flex; gap: 6px; flex-shrink: 0; margin-left: auto; }
-.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: 10px; background: var(--bg-deep); padding: 6px; gap: 6px; }
+.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 6px; gap: 6px; box-shadow: var(--shadow-pop); }
 .composer:focus-within { border-color: var(--accent-primary); }
 .composer textarea { resize: none; border: none; background: none; outline: none; padding: 4px; }
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
 .send-group button { font-weight: 600; }
 .under { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.keys { color: var(--text-secondary); font-size: 11px; }
+.keys { color: var(--text-tertiary); font-size: 11px; }
 .keys kbd { font-family: var(--font-mono, monospace); font-size: 10.5px; border: 1px solid var(--border-default); border-radius: 4px; padding: 0 4px; }
 @media (max-width: 379px) { .keys { display: none; } }
-.modes { display: flex; }
-.mode { border-radius: 0; background: none; padding: 4px 12px; margin-left: -1px; color: var(--text-secondary); }
-.mode:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
-.mode:last-child { border-radius: 0 6px 6px 0; }
-.mode.on { z-index: 1; border-color: var(--accent-primary); }
-.mode.on.ask { background: var(--accent-warning-dim); color: var(--text-primary); }
-.mode.on.auto { background: var(--accent-success-dim); color: var(--text-primary); }
-.mode.on.plan { background: var(--accent-secondary-dim); color: var(--text-primary); }
+.modes { display: flex; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 2px; gap: 2px; }
+.mode { border: none; border-radius: var(--radius-pill); background: none; padding: 4px 14px; color: var(--text-secondary); }
+.mode.on { background: var(--accent-primary); color: var(--bg-deepest); font-weight: 600; }
+.send { background: var(--accent-primary); color: var(--bg-deepest); border-color: var(--accent-primary); }
 </style>

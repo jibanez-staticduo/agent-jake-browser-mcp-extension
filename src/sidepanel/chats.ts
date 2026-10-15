@@ -30,6 +30,15 @@ export interface Chat {
   updatedAt: number;
   items: Item[];
   plan: PlanStep[];
+  /** Tab the conversation belongs to: `g:<groupId>` when the tab is grouped, else `t:<tabId>`.
+   * shortcut: tab/group ids die with the browser session, so the binding is lost on restart. */
+  scope?: string;
+}
+
+/** Session key of a tab: one conversation per tab group, or per tab when it has no group. */
+export function scopeOf(tab: { id?: number; groupId?: number }): string | undefined {
+  if (tab.id === undefined) return undefined;
+  return tab.groupId !== undefined && tab.groupId >= 0 ? `g:${tab.groupId}` : `t:${tab.id}`;
 }
 
 export function newChat(): Chat {
@@ -60,6 +69,16 @@ export async function saveChat(chat: Chat): Promise<void> {
 export async function deleteChat(id: string): Promise<void> {
   const chats = (await listChats()).filter((c) => c.id !== id);
   await chrome.storage.local.set({ [CHATS_KEY]: chats });
+}
+
+/** Remember which conversation the panel shows, so «Nueva conversación» survives a reopen. */
+export async function setCurrentChat(id: string): Promise<void> {
+  await chrome.storage.local.set({ [CURRENT_CHAT_KEY]: id });
+}
+
+/** Most recently updated saved conversation bound to a tab scope, if any. */
+export async function chatOfScope(scope: string): Promise<Chat | undefined> {
+  return (await listChats()).find((c) => c.scope === scope);
 }
 
 export async function currentChatId(): Promise<string | null> {

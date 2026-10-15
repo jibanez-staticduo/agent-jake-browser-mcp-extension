@@ -66,16 +66,16 @@ function answer(value: string) {
 <style scoped>
 .card {
   border: 1px solid var(--accent-warning); background: var(--accent-warning-dim);
-  border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+  border-radius: var(--radius-md); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
 }
 .card.plan { border-color: var(--accent-secondary); background: var(--accent-secondary-dim); }
 .card.question { border-color: var(--accent-primary); background: var(--accent-primary-dim); }
 .card.done { opacity: 0.7; }
-.head { font-weight: 600; }
+.head { font-weight: 600; font-family: var(--font-serif); font-size: 15px; }
 .head :deep(p) { margin: 0; }
 .summary :deep(p) { margin: 0 0 4px; }
 ol { margin: 0; padding-left: 20px; }
-pre { margin: 0; font-size: 11px; max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+pre { margin: 0; font-size: 11px; max-height: 120px; overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--bg-surface); padding: 6px; border-radius: var(--radius-sm); }
 code { font-family: var(--font-mono, monospace); }
 .buttons { display: flex; gap: 6px; }
 .buttons.wrap { flex-wrap: wrap; }

@@ -166,7 +166,7 @@ onUnmounted(() => {
 h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--accent-primary); font-family: var(--font-mono, monospace); margin: 16px 0 8px; }
 .help { margin: 0 0 8px; color: var(--text-secondary); font-size: 12px; }
 .block { margin: 12px 0; }
-.summary { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-success); background: var(--bg-surface); border-radius: 4px; }
+.summary { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-success); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .summary.bad { border-left-color: var(--accent-warning); }
 .goto { display: flex; flex-wrap: wrap; gap: 4px; }
 .update-banner { margin-bottom: 12px; padding: 10px 12px; border-radius: var(--radius-lg); border: 1px solid var(--accent-primary); font-size: 12px; }
