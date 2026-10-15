@@ -604,7 +604,7 @@ html body {
   background: var(--bg-deepest);
   color: var(--text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 13px;
+  font-size: 14px;
 }
 #app { height: 100%; }
 </style>
@@ -645,12 +645,12 @@ button.link.title { color: var(--text-primary); }
 .chat-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; }
 .chat-row.current { background: var(--bg-elevated); }
 .chat-row .muted { font-size: 11px; white-space: nowrap; }
-.log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-.empty { text-align: center; margin-top: 30px; line-height: 1.6; padding: 0 10px; }
-.item { word-break: break-word; line-height: 1.5; }
-.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 6px 10px; border-radius: var(--radius-lg); max-width: 85%; }
+.log { flex: 1; overflow-y: auto; padding: 14px max(16px, calc((100% - 660px) / 2)); display: flex; flex-direction: column; gap: 14px; }
+.empty { text-align: center; margin-top: 40px; line-height: 1.8; padding: 0 10px; }
+.item { word-break: break-word; line-height: 1.7; }
+.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 8px 14px; border-radius: var(--radius-lg); max-width: 85%; }
 .item.assistant.interim { color: var(--text-secondary); }
-.md :deep(p) { margin: 0 0 6px; }
+.md :deep(p) { margin: 0 0 10px; }
 .md :deep(p:last-child) { margin-bottom: 0; }
 .md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
 .md :deep(code) { font-family: var(--font-mono, monospace); background: var(--bg-elevated); padding: 1px 4px; border-radius: 4px; font-size: 12px; }
@@ -676,11 +676,11 @@ button.link.title { color: var(--text-primary); }
 .pending { color: var(--accent-warning); }
 .plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 4px 10px 6px; max-height: 30%; overflow-y: auto; }
 .plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; font-family: var(--font-serif); font-size: 15px; }
-.plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
 footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border-default); }
-.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
+.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .notice span { color: var(--text-secondary); }
 .notice.err { margin: 0; border-left-color: var(--accent-danger); }
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
@@ -689,7 +689,7 @@ footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px
 .send-group { display: flex; gap: 6px; flex-shrink: 0; margin-left: auto; }
 .composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 6px; gap: 6px; box-shadow: var(--shadow-pop); }
 .composer:focus-within { border-color: var(--accent-primary); }
-.composer textarea { resize: none; border: none; background: none; outline: none; padding: 4px; }
+.composer textarea { resize: none; border: none; background: none; outline: none; padding: 6px; }
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
 .send-group button { font-weight: 600; }
