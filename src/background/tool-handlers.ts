@@ -5,7 +5,7 @@
 
 import type { TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
-import { log } from '@/utils/logger';
+import { log, withSecretLogging } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
 import { getKeyDefinition } from '@/constants/keys';
 import { createToolContext } from './tools/utils';
@@ -48,8 +48,30 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
 }
 
 /**
- * Create tool handlers bound to a tab manager.
+ * Follow the server's session tab without activating it; strip routing metadata before parsing.
  */
+export async function routeToTargetTab(
+  tabManager: Pick<TabManager, 'getConnectedTabId' | 'hasTab' | 'connectTab'>,
+  payload: unknown,
+): Promise<unknown> {
+  if (!payload || typeof payload !== 'object' || !Object.prototype.hasOwnProperty.call(payload, 'targetTabId')) return payload;
+  const { targetTabId, ...rest } = payload as Record<string, unknown>;
+  if (typeof targetTabId !== 'number' || !Number.isSafeInteger(targetTabId) || targetTabId <= 0) {
+    const invalid = new Error('targetTabId must be a positive integer');
+    invalid.name = 'INVALID_TARGET_TAB_ID';
+    throw invalid;
+  }
+  // Check before connectTab can release the tab another session currently uses.
+  if (!await tabManager.hasTab(targetTabId)) {
+    const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists`);
+    gone.name = 'TAB_GONE';
+    throw gone;
+  }
+  if (tabManager.getConnectedTabId() !== targetTabId) await tabManager.connectTab(targetTabId);
+  return rest;
+}
+
+/** Create tool handlers bound to a tab manager. */
 export function createToolHandlers(tabManager: TabManager) {
   const ctx = buildHandlerContext(tabManager);
 
@@ -87,7 +109,8 @@ export function createToolHandlers(tabManager: TabManager) {
         };
       }
 
-      const result = await handler(payload);
+      const execute = async () => handler(await routeToTargetTab(tabManager, payload));
+      const result = await (secret ? withSecretLogging(execute) : execute());
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = secret ? 'Type secret' : getToolDescription(type, payload, result);
@@ -147,6 +170,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `New tab: ${p?.url || 'unknown'}`;
     case 'browser_switch_tab':
       return `Switch to tab ${p?.tabId}`;
+    case 'browser_close_window':
+      return `Close window ${p?.windowId}`;
     case 'browser_close_tab':
       return 'Close tab';
     case 'browser_evaluate':

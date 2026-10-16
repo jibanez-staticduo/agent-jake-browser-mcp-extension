@@ -12,6 +12,7 @@ import './sw-polyfill';
 
 import { WebSocketClient } from './ws-client';
 import { TabManager } from './tab-manager';
+import { logDebuggerDetached } from './debugger-diagnostics';
 import { createToolHandlers } from './tool-handlers';
 import { activityLog } from './activity-log';
 import { preparePrivateStorage } from './storage-privacy';
@@ -402,7 +403,7 @@ chrome.runtime.onInstalled.addListener((details) => {
  * Attempts to reattach if it wasn't user-initiated.
  */
 chrome.debugger.onDetach.addListener(async (source, reason) => {
-  log.warn(`Debugger detached from tab ${source.tabId}: ${reason}`);
+  logDebuggerDetached(source.tabId, reason);
 
   // Mark debugger as detached in TabManager
   tabManager?.markDebuggerDetached();

@@ -56,7 +56,8 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
-    switchTo: z.boolean().optional().default(false),
+    switchTo: z.boolean().optional().default(false), // Compatibility: ignored; never activates.
+    windowId: z.number().int().positive().optional(),
   }),
 
   browser_switch_tab: z.object({
@@ -69,6 +70,11 @@ export const schemas = {
 
   browser_close_tab: z.object({
     tabId: z.number().int().positive().optional(),
+  }),
+
+  browser_close_window: z.object({
+    windowId: z.number().int().positive(),
+    tabIds: z.array(z.number().int().positive()),
   }),
 
   browser_get_text: z.object({

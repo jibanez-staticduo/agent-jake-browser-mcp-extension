@@ -1,6 +1,6 @@
 # Agent Jake Browser MCP Extension
 
-[![Version](https://img.shields.io/badge/version-2.2.3-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](package.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Chrome Extension](https://img.shields.io/badge/chrome-extension-yellow.svg)](https://developer.chrome.com/docs/extensions/)
 
@@ -14,6 +14,33 @@ This extension bridges AI agents with browser automation, supporting two connect
 - **Remote Mode**: WebSocket connection to Laravel backend via Reverb for server-coordinated automation
 
 Together, these provide a complete browser automation solution enabling AI agents to navigate websites, click elements, fill forms, take screenshots, and more.
+
+## Session windows (2.5.0)
+
+`browser_list_tabs` advertises `closeById`, `closeWindow` and `windowPerSession`.
+`browser_new_tab` accepts an optional session `windowId` and returns
+`{ tab, windowId, windowCreated }`. A missing, closed or unverified window opens a
+new unfocused window; a verified window receives an inactive tab. `switchTo` is
+accepted for compatibility and ignored. Agent switching and screenshot capture
+never activate tabs or focus windows; popup buttons remain explicit user actions.
+Older servers remain compatible but open a separate window for each new tab.
+
+The internal `browser_close_window` message requires `{ windowId, tabIds }`.
+It removes only named tabs still in a verified agent window, never calls
+`windows.remove`, and returns `{ windowId, closed, closedTabIds }`. Missing tabs
+are omitted from `closedTabIds`; user tabs moved into the window remain open.
+An empty list removes nothing. Failed removals of still-live tabs are errors.
+
+Ownership survives worker restarts and extension reloads/updates through private
+`storage.local` records of created tabs and their Chrome debugger target UUIDs.
+A numeric window/tab ID alone grants no ownership: live UUID and window membership
+must match. Browser restarts create new targets, so restored or reused numeric IDs
+are rejected. If every created witness tab is closed or moved out, the remaining
+window loses agent ownership. Registry operations are serialized and rejected
+operations do not block later cleanup.
+
+Chrome API references: [debugger targets](https://developer.chrome.com/docs/extensions/reference/api/debugger)
+and [storage session lifetime](https://developer.chrome.com/docs/extensions/reference/api/storage).
 
 ## Architecture
 

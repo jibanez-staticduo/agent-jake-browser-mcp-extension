@@ -112,6 +112,17 @@ describe('secret typing boundaries', () => {
     expect(JSON.stringify([result, capture.mock.calls, saved])).not.toContain(SECRET);
     capture.mockRestore();
   });
+  it.each(['invalid', 'gone', 'connect-error'])('redacts secret routing failures (%s)', async mode => {
+    const captures = ['debug', 'info', 'warn', 'error'].map(level => vi.spyOn(console, level as 'debug').mockImplementation(() => {}));
+    const tab = { getConnectedTabId: () => 1, hasTab: vi.fn(async () => mode !== 'gone'), connectTab: vi.fn(async () => {
+      log.warn(SECRET); throw new Error(SECRET);
+    }) };
+    const result = await createToolHandlers(tab as never)({ id: 'secret-route', type: 'browser_type', payload: { targetTabId: mode === 'invalid' ? SECRET : 2, ref: '1', text: SECRET, secret: true } });
+    expect(result).toMatchObject({ success: false, error: { code: 'EXECUTION_ERROR', message: 'Secret typing failed' } });
+    expect(JSON.stringify([result, saved, captures.map(capture => capture.mock.calls)])).not.toContain(SECRET);
+    expect(isSecretLogging()).toBe(false);
+    captures.forEach(capture => capture.mockRestore());
+  });
   it('redacts WebSocket send logs and secret handler rejection', async () => {
     const captures = ['debug', 'error'].map(level => vi.spyOn(console, level as 'debug').mockImplementation(() => {}));
     vi.stubGlobal('WebSocket', { OPEN: 1 });

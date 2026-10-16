@@ -74,7 +74,7 @@ export const AGENT_TOOLS: FunctionTool[] = [
   tool('browser_list_tabs', 'List open tabs with id, url, title, active and connected flags.'),
   tool('browser_switch_tab', 'Connect to another tab: later tools act on it.', { tabId: { type: 'number' } }, ['tabId']),
   tool('browser_new_tab', 'Open a URL in a new background tab and connect to it.',
-    { url: { type: 'string' }, switchTo: { type: 'boolean', description: 'Bring it to the front' } }, ['url']),
+    { url: { type: 'string' }, switchTo: { type: 'boolean', description: 'Accepted for compatibility; tabs always open without focus' } }, ['url']),
   tool('browser_close_tab', 'Close the connected tab.'),
   tool('browser_evaluate', 'Run JavaScript in the page and return the result (last resort; prefer the tools above).',
     { code: { type: 'string' } }, ['code']),
