@@ -27,6 +27,7 @@ import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
+  blocksOf,
   chatOfScope,
   currentChatId,
   deleteChat,
@@ -102,20 +103,7 @@ const placeholder = computed(() => {
   return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
-/** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
-type Block = { key: number; item: Item } | { key: number; steps: Item[] };
-
-const blocks = computed<Block[]>(() => {
-  const out: Block[] = [];
-  items.value.forEach((item, i) => {
-    const quiet = item.kind === 'tool' || (item.kind === 'assistant' && item.interim && !item.text.trim());
-    const last = out[out.length - 1];
-    if (quiet && last && 'steps' in last) last.steps.push(item);
-    else if (quiet) out.push({ key: i, steps: [item] });
-    else out.push({ key: i, item });
-  });
-  return out;
-});
+const blocks = computed(() => blocksOf(items.value));
 
 function stepsLabel(steps: Item[]): string {
   const tools = steps.filter((s) => s.kind === 'tool');
@@ -603,10 +591,13 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
               <summary><span :class="item.ok === undefined ? 'pending' : item.ok ? 'ok' : 'ko'">●</span> {{ item.text }}</summary>
               <pre>{{ item.detail }}</pre>
             </details>
-            <details v-else-if="item.reasoning" class="item reasoning">
-              <summary>razonamiento</summary>
-              <pre>{{ item.reasoning }}</pre>
-            </details>
+            <div v-else class="item assistant interim">
+              <details v-if="item.reasoning" class="reasoning">
+                <summary>razonamiento</summary>
+                <pre>{{ item.reasoning }}</pre>
+              </details>
+              <div v-if="item.text" class="md" v-html="renderMarkdown(item.text)" />
+            </div>
           </template>
         </details>
         <template v-else>

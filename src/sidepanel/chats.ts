@@ -57,6 +57,22 @@ export function titleOf(items: Item[]): string {
   return oneLine ? (oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine) : 'Nueva conversación';
 }
 
+/** A turn's quiet run — tool calls and the narration between them — shown collapsed as one «N pasos» block. */
+export type Block = { key: number; item: Item } | { key: number; steps: Item[] };
+
+/** Group each turn's activity (reasoning, narration and tool calls) into one block; the final answer stays its own (INFRA-898). */
+export function blocksOf(items: Item[]): Block[] {
+  const out: Block[] = [];
+  items.forEach((item, i) => {
+    const quiet = item.kind === 'tool' || (item.kind === 'assistant' && item.interim);
+    const last = out[out.length - 1];
+    if (quiet && last && 'steps' in last) last.steps.push(item);
+    else if (quiet) out.push({ key: i, steps: [item] });
+    else out.push({ key: i, item });
+  });
+  return out;
+}
+
 export async function listChats(): Promise<Chat[]> {
   const stored = await chrome.storage.local.get(CHATS_KEY);
   const chats = stored[CHATS_KEY];
