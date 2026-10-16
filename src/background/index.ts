@@ -25,7 +25,7 @@ import {
 import { log } from '@/utils/logger';
 import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
-import { openPanelForTab } from './panel-open';
+import { disablePanelByDefault, openPanelForTab } from './panel-open';
 import {
   UPDATE_ALARM,
   UPDATE_NOTIFICATION_ID,
@@ -73,6 +73,7 @@ chrome.commands.onCommand.addListener((command, tab) => {
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch((error) => {
   log.warn('[Copilot] Could not set the panel behavior:', error);
 });
+disablePanelByDefault(chrome.sidePanel);
 chrome.action.onClicked.addListener((tab) => openPanelForTab(chrome.sidePanel, tab));
 
 /**
