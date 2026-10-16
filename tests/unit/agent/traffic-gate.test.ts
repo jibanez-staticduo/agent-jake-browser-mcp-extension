@@ -59,6 +59,21 @@ describe('Copilot/MCP traffic gate', () => {
     expect(await gate.handleMcp(message)).toMatchObject({ success: true, result: { tabId: 1 } });
   });
 
+  it('lets the deploy reload through while the copilot is active, and nothing else', async () => {
+    const { tabManager, handler } = setup();
+    const gate = createCopilotTrafficGate(tabManager, handler);
+    const release = gate.acquire();
+    expect(release).not.toBeNull();
+
+    const reload: IncomingMessage = { id: 'mcp-2', type: 'browser_reload_extension', payload: {} };
+    expect(await gate.handleMcp(reload)).toMatchObject({ id: 'mcp-2', success: true });
+    expect(handler).toHaveBeenCalledWith(reload);
+    // El resto del tráfico de herramientas sigue esperando a que el copiloto termine.
+    expect(await gate.handleMcp(message)).toMatchObject({ success: false, error: { code: 'COPILOT_BUSY' } });
+
+    await release?.();
+  });
+
   it('restores the absence of an MCP tab and unlocks even when restore fails', async () => {
     const empty = setup(null);
     const emptyGate = createCopilotTrafficGate(empty.tabManager, empty.handler);

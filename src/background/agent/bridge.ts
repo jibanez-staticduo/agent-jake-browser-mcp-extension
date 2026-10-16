@@ -29,7 +29,11 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
 
   return {
     async handleMcp(message: IncomingMessage): Promise<OutgoingMessage> {
-      if (copilotActive) {
+      // La recarga es control del despliegue, no una herramienta: si se gatea, un panel con una
+      // aprobación pendiente bloquea para siempre que este navegador se ponga al día (medido 16-10,
+      // el primer merge tras INFRA-858: `502 Copilot is using this browser` y el job rojo).
+      // Recargar mata el proceso de todos modos, así que no pisa ninguna acción en curso.
+      if (copilotActive && message.type !== 'browser_reload_extension') {
         return {
           id: message.id,
           success: false,
