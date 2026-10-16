@@ -174,6 +174,10 @@ export class TabManager {
   /**
    * Check if a tab exists.
    */
+  async hasTab(tabId: number): Promise<boolean> {
+    return this.tabExists(tabId);
+  }
+
   private async tabExists(tabId: number): Promise<boolean> {
     try {
       await chrome.tabs.get(tabId);

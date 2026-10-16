@@ -96,6 +96,19 @@ test('session windows survive extension reload and preserve user tabs without ch
     expect(closed).toMatchObject({ success: true, result: { windowId: agentWindow, closed: false, closedTabIds: [firstId, secondId, thirdId] } });
     expect(userPage.isClosed()).toBe(false);
     expect(await popup.evaluate(async id => (await chrome.tabs.get(id)).url, userId)).toBe(`${origin}/human`);
+    // Session A cleanup can leave the singleton manager disconnected while B owns a tab.
+    const survivor = await request('browser_new_tab', { url: `${origin}/survivor-b` });
+    const survivorId = survivor.result.tab.id;
+    const victim = await request('browser_new_tab', { url: `${origin}/cleanup-a` });
+    const cleanup = await request('browser_close_window', { windowId: victim.result.windowId, tabIds: [victim.result.tab.id] });
+    expect(cleanup.success).toBe(true);
+    const routed = await request('browser_navigate', { url: `${origin}/survivor-b-routed`, targetTabId: survivorId });
+    expect(routed.success).toBe(true);
+    expect(await popup.evaluate(async id => (await chrome.tabs.get(id)).url, survivorId)).toBe(`${origin}/survivor-b-routed`);
+    expect(await popup.evaluate(async id => (await chrome.tabs.get(id)).url, userId)).toBe(`${origin}/human`);
+    const gone = await request('browser_navigate', { url: `${origin}/must-not-navigate`, targetTabId: firstId });
+    expect(gone).toMatchObject({ success: false, error: { code: 'TAB_GONE' } });
+    expect(await popup.evaluate(async id => (await chrome.tabs.get(id)).url, survivorId)).toBe(`${origin}/survivor-b-routed`);
     const stale = await request('browser_new_tab', { url: `${origin}/new-session`, windowId: agentWindow });
     expect(stale.result.windowCreated).toBe(true);
     expect(stale.result.windowId).not.toBe(agentWindow);
