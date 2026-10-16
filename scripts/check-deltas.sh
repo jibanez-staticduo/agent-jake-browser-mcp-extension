@@ -44,4 +44,7 @@ chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
 # INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
 chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
+# INFRA-413: native passkey ceremony retains its explicit activation; ordinary tab routes do not.
+chk "19 session windows open without focus" grep -q "focused: false" src/background/agent-windows.ts
+chk "20 session window ownership uses live target UUIDs" bash -c 'grep -q "target.id === witness.targetId" src/background/agent-windows.ts && grep -q "windowPerSession: true" src/background/tools/handlers/tabs.ts'
 exit $fail
