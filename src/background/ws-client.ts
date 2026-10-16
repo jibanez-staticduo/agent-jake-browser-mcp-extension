@@ -198,7 +198,8 @@ export class WebSocketClient {
     }
 
     const data = JSON.stringify(message);
-    log.debug('Sending:', data);
+    // Only the id and the outcome: a response body may carry a value the agent must not see (browser_read_secret).
+    log.debug('[WS] Sending response', message.id, message.success);
     this.socket.send(data);
   }
 

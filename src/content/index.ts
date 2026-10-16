@@ -23,6 +23,7 @@ import { TIMEOUTS, getHighlightCSS } from '@/constants';
 import { CONFIG } from '@/types/config';
 import { generateCompactState, formatCompactState, findCompact } from './compact-state';
 import { handleClearField, handleDispatchDrop, handleFieldLength, handleFillField, handleSetFieldText } from './form-actions';
+import { readSecret } from './read-secret';
 
 // Visual highlight overlay
 let highlightOverlay: HTMLDivElement | null = null;
@@ -81,6 +82,13 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
     case 'getText':
       return handleGetText(payload as { selector: string });
+
+    case 'readSecret':
+      try {
+        return readSecret(payload as Parameters<typeof readSecret>[0]);
+      } catch {
+        return { ok: false, code: 'SECRET_NO_MATCH' };
+      }
 
     case 'getAttribute':
       return handleGetAttribute(payload as { selector: string; attribute: string });

@@ -47,4 +47,8 @@ chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" 
 # INFRA-413: native passkey ceremony retains its explicit activation; ordinary tab routes do not.
 chk "19 session windows open without focus" grep -q "focused: false" src/background/agent-windows.ts
 chk "20 session window ownership uses live target UUIDs" bash -c 'grep -q "target.id === witness.targetId" src/background/agent-windows.ts && grep -q "windowPerSession: true" src/background/tools/handlers/tabs.ts'
+# SC-2102: browser_read_secret devuelve un valor de la página al servidor y a nadie más.
+not "21 ws-client no registra el cuerpo de las respuestas" grep -qF "log.debug('Sending:'" src/background/ws-client.ts
+chk "22 execTool del copiloto solo ejecuta el catálogo del modelo" grep -q "COPILOT_TOOL_NAMES.has(name)" src/background/agent/bridge.ts
+chk "23 handler browser_read_secret registrado" grep -q "browser_read_secret:" src/background/tools/handlers/queries.ts
 exit $fail

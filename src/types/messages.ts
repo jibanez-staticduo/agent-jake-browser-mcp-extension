@@ -44,7 +44,9 @@ export type ToolName =
   | 'browser_cdp'
   | 'browser_drop'
   | 'browser_fill_form'
-  | 'browser_passkey';
+  | 'browser_passkey'
+  // Internal (SC-2102): the server asks for a page value it never shows the agent. Not an MCP tool.
+  | 'browser_read_secret';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {

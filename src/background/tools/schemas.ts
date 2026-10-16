@@ -96,6 +96,10 @@ export const schemas = {
 
   browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),
 
+  // Internal message (SC-2102), not an MCP tool: the value of an element, or group 1 of a regex over its text.
+  browser_read_secret: z.object({ ...target, regex: z.string().min(1).max(256).optional() })
+    .refine((d) => hasTarget(d) || d.regex !== undefined, { message: 'Either ref, selector or regex must be provided' }),
+
   browser_get_attribute: z.object({ ...target, attribute: z.string() }).refine(hasTarget, targetRequired),
 
   browser_wait_for_element: z.object({
