@@ -271,6 +271,13 @@ function setMode(mode: CopilotMode) {
   void saveSettings();
 }
 
+function onModeSelect(e: Event) {
+  setMode((e.target as HTMLSelectElement).value as CopilotMode);
+}
+
+/** Lo que hace el modo elegido; el chip lo dice en el tooltip (antes ocupaba media pantalla). */
+const modeHint = computed(() => MODES.find((m) => m.id === settings.value.mode)?.hint ?? '');
+
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
@@ -481,7 +488,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
           @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
       </div>
-      <div class="target" :title="target?.url">
+      <div class="target" :title="target ? `${target.url}\n${pinned ? 'Fijada: el agente trabaja en esta pestaña' : 'Sigue la activa: cambia con la pestaña que abras'}` : ''">
         <template v-if="target">
           <span class="dot" :class="{ pinned }" />
           <div class="where">
@@ -494,7 +501,6 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           :title="pinned ? 'Dejar de fijar: seguir la pestaña activa' : 'Fijar esta pestaña como objetivo'"
           @click="pinned = !pinned; refreshTarget()">{{ pinned ? 'Fijada' : 'Fijar' }}</button>
       </div>
-      <span v-if="target" class="muted follow">{{ pinned ? 'Fijada: el agente trabaja en esta pestaña' : 'Sigue la activa: cambia con la pestaña que abras' }}</span>
     </header>
 
     <div v-if="panel === 'history'" class="drawer history">
@@ -508,12 +514,6 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
     </div>
 
     <main ref="log" class="log">
-      <div v-if="!items.length" class="empty">
-        <p>Pide algo sobre esta página u otras pestañas.</p>
-        <p class="muted">El agente ve la pestaña objetivo (URL, título y elementos) en cada mensaje.
-          <b>Preguntar</b> pide permiso antes de actuar, <b>Auto</b> actúa solo y <b>Plan</b> propone un plan antes de tocar nada
-          (Shift+Tab cambia de modo).</p>
-      </div>
       <template v-for="(block, b) in blocks" :key="block.key">
         <details v-if="'steps' in block" class="steps" :open="running && b === blocks.length - 1">
           <summary>{{ stepsLabel(block.steps) }}</summary>
@@ -575,23 +575,20 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           :placeholder="placeholder" @keydown="onKey" />
         <div v-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
         <div class="bar">
-          <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
-            @update:model-value="onModelChange" @options="openOptions" />
-          <div class="send-group">
-            <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
-            <button type="button" class="send" :disabled="!input.trim() || !!blockedReason"
-              :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
+          <select class="mode-chip" :value="settings.mode" aria-label="Modo del agente" :title="modeHint"
+            @change="onModeSelect">
+            <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
+          </select>
+          <div class="right">
+            <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+              @update:model-value="onModelChange" @options="openOptions" />
+            <div class="send-group">
+              <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
+              <button type="button" class="send" :disabled="!input.trim() || !!blockedReason"
+                :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="under">
-        <div class="modes" role="radiogroup" aria-label="Modo">
-          <button v-for="m in MODES" :key="m.id" type="button" class="mode" role="radio" :aria-checked="settings.mode === m.id"
-            :class="[m.id, { on: settings.mode === m.id }]" :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
-        </div>
-        <span class="keys" :title="keysHelp">
-          <kbd>Enter</kbd> envía · <kbd>Shift+Enter</kbd> salto · <kbd>Alt+J</kbd> abre el panel
-        </span>
       </div>
     </footer>
     </template>
@@ -621,7 +618,6 @@ header {
 .where .host { font-weight: 700; font-family: var(--font-mono, monospace); font-size: 12px; word-break: break-all; }
 .where .path { font-weight: 400; color: var(--text-secondary); }
 .where .title { color: var(--text-secondary); word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.follow { font-size: 11px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; margin-top: 5px; }
 .dot.pinned { background: var(--accent-warning); }
 button.pin { margin-left: auto; flex-shrink: 0; }
@@ -646,7 +642,6 @@ button.link.title { color: var(--text-primary); }
 .chat-row.current { background: var(--bg-elevated); }
 .chat-row .muted { font-size: 11px; white-space: nowrap; }
 .log { flex: 1; overflow-y: auto; padding: 14px max(16px, calc((100% - 660px) / 2)); display: flex; flex-direction: column; gap: 14px; }
-.empty { text-align: center; margin-top: 40px; line-height: 1.8; padding: 0 10px; }
 .item { word-break: break-word; line-height: 1.7; }
 .item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 8px 14px; border-radius: var(--radius-lg); max-width: 85%; }
 .item.assistant.interim { color: var(--text-secondary); }
@@ -686,19 +681,15 @@ footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
 .waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
-.send-group { display: flex; gap: 6px; flex-shrink: 0; margin-left: auto; }
+.right { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
+.send-group { display: flex; gap: 6px; flex-shrink: 0; }
 .composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 6px; gap: 6px; box-shadow: var(--shadow-pop); }
 .composer:focus-within { border-color: var(--accent-primary); }
 .composer textarea { resize: none; border: none; background: none; outline: none; padding: 6px; }
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
+/* El modo como en Claude: un chip con desplegable, no una fila entera de botones. */
+.mode-chip { flex-shrink: 0; font: inherit; font-weight: 600; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 4px 8px; }
 .send-group button { font-weight: 600; }
-.under { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.keys { color: var(--text-tertiary); font-size: 11px; }
-.keys kbd { font-family: var(--font-mono, monospace); font-size: 10.5px; border: 1px solid var(--border-default); border-radius: 4px; padding: 0 4px; }
-@media (max-width: 379px) { .keys { display: none; } }
-.modes { display: flex; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 2px; gap: 2px; }
-.mode { border: none; border-radius: var(--radius-pill); background: none; padding: 4px 14px; color: var(--text-secondary); }
-.mode.on { background: var(--accent-primary); color: var(--bg-deepest); font-weight: 600; }
 .send { background: var(--accent-primary); color: var(--bg-deepest); border-color: var(--accent-primary); }
 </style>
