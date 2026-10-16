@@ -317,7 +317,6 @@ export async function runAgent(
   try {
     for (let step = 1; step <= settings.maxSteps; step++) {
       checkAbort(deps.signal);
-      deps.emit({ type: 'step', step });
 
       const reply = await complete(settings, mode, messages, deps);
       const calls = reply.tool_calls ?? [];
@@ -371,7 +370,8 @@ export async function runAgent(
     throw error;
   }
 
+  // Sin contador en pantalla: el corte se avisa aquí y el panel pone el botón de continuar (INFRA-876).
   const text = `Stopped after ${settings.maxSteps} steps without a final answer.`;
-  deps.emit({ type: 'assistant', text });
+  deps.emit({ type: 'assistant', text, limit: true });
   return text;
 }
