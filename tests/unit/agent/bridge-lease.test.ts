@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentStopped, runAgent } from '@/background/agent/loop';
+import { AgentStopped, runAgent, type ToolOutcome } from '@/background/agent/loop';
 import { createCopilotTrafficGate, registerCopilotBridge } from '@/background/agent/bridge';
 import { COPILOT_PORT, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 import type { TabManager } from '@/background/tab-manager';
@@ -54,8 +54,8 @@ function setup() {
       send: (message: PanelToWorker) => receive(message),
       // Cerrar el panel: el puerto se va y el `prompt` en curso se queda sin quien le espere.
       close: () => leave(),
-      prompt: (tabId: number) => receive({
-        type: 'prompt', history: [], prompt: 'inspect', targetTabId: tabId, mode: 'auto', model: 'chat',
+      prompt: (tabId: number, over: Partial<Extract<PanelToWorker, { type: 'prompt' }>> = {}) => receive({
+        type: 'prompt', history: [], prompt: 'inspect', targetTabId: tabId, mode: 'auto', model: 'chat', ...over,
       }),
     };
   }
@@ -154,5 +154,32 @@ describe('Copilot bridge lease', () => {
     await turn;
     expect(getTab()).toBe(1);
     expect(vi.mocked(tabManager.connectTab).mock.calls.filter(([id]) => id === 1)).toHaveLength(1);
+  });
+
+  it('keeps the agent on the chinchetada tab until the pin comes off', async () => {
+    const { panel, handler } = setup();
+    let started!: () => void;
+    let go!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const unblocked = new Promise<void>((resolve) => { go = resolve; });
+    const outcomes: ToolOutcome[] = [];
+    vi.mocked(runAgent).mockImplementation(async (_history, _prompt, _settings, deps) => {
+      outcomes.push(await deps.execTool('browser_switch_tab', { tabId: 9 }));
+      started();
+      await unblocked;
+      outcomes.push(await deps.execTool('browser_new_tab', { url: 'https://otra.test/' }));
+      return 'ok';
+    });
+    const first = panel();
+    const turn = first.prompt(2, { pinned: true });
+    await running;
+    expect(outcomes[0]).toEqual({ ok: false, error: expect.stringContaining('chincheta') });
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_switch_tab' }));
+
+    await first.send({ type: 'pin', pinned: false });
+    go();
+    await turn;
+    expect(outcomes[1]).toMatchObject({ ok: true });
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_new_tab' }));
   });
 });

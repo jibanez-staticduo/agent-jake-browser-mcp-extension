@@ -23,6 +23,9 @@ import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage) => Promise<OutgoingMessage>;
 
+/** Las dos herramientas que se llevan el objetivo a otra pestaña; con la chincheta puesta, no. */
+const LEAVES_TAB = new Set<string>(['browser_switch_tab', 'browser_new_tab']);
+
 export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: HandleMessage) {
   let copilotActive = false;
   let mcpInFlight = 0;
@@ -101,6 +104,8 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
     if (port.name !== COPILOT_PORT) return;
     let controller: AbortController | null = null;
     let releaseLease: (() => Promise<void>) | null = null;
+    // La chincheta de la cabecera: con `pinned` el agente no mueve su objetivo a otra pestaña (INFRA-875).
+    let pinned = false;
     const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
 
     const emit = (event: WorkerToPanel) => {
@@ -126,6 +131,9 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       });
 
     const execTool = async (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+      if (pinned && LEAVES_TAB.has(name)) {
+        return { ok: false, error: 'La pestaña está chinchetada: el usuario quiere que trabajes aquí. Pídele que quite la chincheta si necesitas ir a otra.' };
+      }
       const { handleMessage } = await getDeps();
       if (!handleMessage) return { ok: false, error: 'Extension not initialized yet' };
       const res = await handleMessage({ id: `copilot-${++seq}`, type: name as ToolName, payload: args });
@@ -143,10 +151,15 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         p?.resolve(msg.response);
         return;
       }
+      if (msg.type === 'pin') {
+        pinned = msg.pinned;
+        return;
+      }
       if (msg.type !== 'prompt' || controller) return;
 
       const runController = new AbortController();
       controller = runController;
+      pinned = msg.pinned ?? pinned;
       let stopped = false;
       let errorMessage: string | null = null;
       try {

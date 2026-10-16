@@ -268,6 +268,7 @@ function send() {
     history: turns,
     prompt,
     targetTabId: target.value?.id ?? null,
+    pinned: pinned.value,
     mode: settings.value.mode,
     model: settings.value.model,
     images,
@@ -458,11 +459,22 @@ function openOptions() {
   view.value = 'options';
 }
 
-async function refreshTarget() {
-  if (pinned.value || windowId === null) return;
+/**
+ * The panel belongs to the tab that opened it (INFRA-875): it is never re-pointed at whichever tab
+ * you happen to click on. Chrome hides this instance when you leave the tab and shows it again when
+ * you come back, so the target is decided once, here.
+ */
+async function bindOwnTab() {
+  if (windowId === null) return;
   const [tab] = await chrome.tabs.query({ active: true, windowId });
   target.value = tab?.id ? { id: tab.id, title: tab.title || '', url: tab.url || '', groupId: tab.groupId } : null;
   await followScope();
+}
+
+/** La chincheta: congelar la pestaña. Se comunica al service worker porque es él quien ejecuta las herramientas. */
+function togglePin() {
+  pinned.value = !pinned.value;
+  connect().postMessage({ type: 'pin', pinned: pinned.value });
 }
 
 /** One conversation per tab (or per tab group): follow the target's scope when it changes. */
@@ -479,19 +491,10 @@ async function followScope() {
   void scroll();
 }
 
-const onActivated = (info: chrome.tabs.OnActivatedInfo) => {
-  if (info.windowId === windowId) void refreshTarget();
-};
 const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
   if (target.value?.id === tabId) {
     target.value = { id: tabId, title: tab.title || '', url: tab.url || '', groupId: tab.groupId };
     void followScope();
-  }
-};
-const onRemoved = (tabId: number) => {
-  if (target.value?.id === tabId) {
-    pinned.value = false;
-    void refreshTarget();
   }
 };
 
@@ -502,9 +505,7 @@ const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: 
 };
 
 onMounted(async () => {
-  // ?windowId=N: the panel runs detached in its own window and follows N's active tab.
-  const detached = Number(new URLSearchParams(location.search).get('windowId'));
-  windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
+  windowId = (await chrome.windows.getCurrent()).id ?? null;
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
   const id = await currentChatId();
@@ -516,19 +517,15 @@ onMounted(async () => {
       i.streaming = false;
     }
   }
-  await refreshTarget();
+  await bindOwnTab();
   void loadModels();
   void scroll();
-  chrome.tabs.onActivated.addListener(onActivated);
   chrome.tabs.onUpdated.addListener(onUpdated);
-  chrome.tabs.onRemoved.addListener(onRemoved);
   chrome.storage.onChanged.addListener(onStorage);
 });
 
 onUnmounted(() => {
-  chrome.tabs.onActivated.removeListener(onActivated);
   chrome.tabs.onUpdated.removeListener(onUpdated);
-  chrome.tabs.onRemoved.removeListener(onRemoved);
   chrome.storage.onChanged.removeListener(onStorage);
   port?.disconnect();
 });
@@ -572,18 +569,24 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
           @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
       </div>
-      <div class="target" :title="target ? `${target.url}\n${pinned ? 'Fijada: el agente trabaja en esta pestaña' : 'Sigue la activa: cambia con la pestaña que abras'}` : ''">
+      <div class="target" :title="target ? `${target.url}\n${pinned ? 'Chincheta puesta: el agente no se mueve de esta pestaña' : 'El panel es de esta pestaña: se oculta cuando cambias'}` : ''">
         <template v-if="target">
-          <span class="dot" :class="{ pinned }" />
+          <span class="dot" />
           <div class="where">
             <span class="host">{{ host(target.url) }}<span class="path">{{ pathOf(target.url) }}</span></span>
             <span class="title">{{ target.title || 'Sin título' }}</span>
           </div>
+          <!-- Chincheta: lo único que hace es no dejar que el agente se mueva de esta pestaña. -->
+          <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned"
+            :title="pinned ? 'Quitar la chincheta: dejar que el agente cambie de pestaña' : 'Chincheta: que el agente no se mueva de esta pestaña'"
+            @click="togglePin">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor">
+              <path d="M5.6 1.6h4.8l-.9 4.6 2.2 1.7v1.3H4.3V7.9l2.2-1.7z" />
+              <path d="M7.3 9.9h1.4l.4 4.5H6.9z" />
+            </svg>
+          </button>
         </template>
         <span v-else class="muted">Sin pestaña objetivo</span>
-        <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
-          :title="pinned ? 'Dejar de fijar: seguir la pestaña activa' : 'Fijar esta pestaña como objetivo'"
-          @click="pinned = !pinned; refreshTarget()">{{ pinned ? 'Fijada' : 'Fijar' }}</button>
       </div>
     </header>
 
@@ -730,9 +733,10 @@ header {
 .where .path { font-weight: 400; color: var(--text-secondary); }
 .where .title { color: var(--text-secondary); word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; margin-top: 5px; }
-.dot.pinned { background: var(--accent-warning); }
-button.pin { margin-left: auto; flex-shrink: 0; }
-button.pin.on { border-color: var(--accent-warning); }
+button.pin {
+  margin-left: auto; flex-shrink: 0; line-height: 0; padding: 3px 6px; color: var(--text-secondary);
+}
+button.pin.on { color: var(--accent-warning); border-color: var(--accent-warning); }
 .warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .actions button.on { border-color: var(--accent-primary); }

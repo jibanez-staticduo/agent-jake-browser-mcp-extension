@@ -35,7 +35,8 @@ chk "13 foco emulado: la entrada llega a pestañas en segundo plano" grep -q "Em
 chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
 chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "UPDATE_PERIOD_MINUTES = 30" src/background/update-check.ts && grep -q "onStartup" src/background/index.ts'
 # INFRA-421: el botón de la barra abre el side panel (sin popup) y la provisión del copiloto corre al arrancar.
-chk "16 el botón abre el side panel, sin popup"         bash -c 'grep -q "openPanelOnActionClick: true" src/background/index.ts && ! grep -q default_popup manifest.json'
+# INFRA-875: lo abre solo en la pestaña que lo pidió (`open({ tabId })`), que es lo que hace que el panel sea de su pestaña.
+chk "16 el botón abre el side panel de su pestaña, sin popup" bash -c 'grep -q "open({ tabId" src/background/panel-open.ts && ! grep -q default_popup manifest.json'
 chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'

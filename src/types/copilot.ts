@@ -97,9 +97,12 @@ export type UserResponse =
   | { kind: 'plan'; decision: 'reject'; feedback: string };
 
 export type PanelToWorker =
-  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; mode: CopilotMode; model: string;
+  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; pinned?: boolean;
+      mode: CopilotMode; model: string;
       /** data URLs of the images attached to this prompt (INFRA-857). */ images?: string[] }
   | { type: 'response'; requestId: string; response: UserResponse }
+  /** La chincheta de la cabecera: con `pinned` el agente no puede irse a otra pestaña (INFRA-875). */
+  | { type: 'pin'; pinned: boolean }
   | { type: 'stop' };
 
 export type WorkerToPanel =

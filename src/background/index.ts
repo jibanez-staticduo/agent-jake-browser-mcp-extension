@@ -25,6 +25,7 @@ import {
 import { log } from '@/utils/logger';
 import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
+import { openPanelForTab } from './panel-open';
 import {
   UPDATE_ALARM,
   UPDATE_NOTIFICATION_ID,
@@ -64,18 +65,15 @@ registerCopilotBridge(async () => {
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
-  // No await before open(): the shortcut's user gesture must still be live.
-  if (command === 'open-copilot' && tab?.windowId !== undefined) {
-    chrome.sidePanel.open({ windowId: tab.windowId }).catch((error) => {
-      log.warn('[Copilot] Could not open side panel:', error);
-    });
-  }
+  if (command === 'open-copilot') openPanelForTab(chrome.sidePanel, tab ?? {});
 });
 
-// The toolbar button opens the side panel (no popup): the click is the user gesture.
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+// El botón de la barra abre el panel él mismo: con `openPanelOnActionClick` Chrome lo abre en todas
+// las pestañas de la ventana, y el panel es de la pestaña que lo abrió (INFRA-875).
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch((error) => {
   log.warn('[Copilot] Could not set the panel behavior:', error);
 });
+chrome.action.onClicked.addListener((tab) => openPanelForTab(chrome.sidePanel, tab));
 
 /**
  * Initialize the extension.
