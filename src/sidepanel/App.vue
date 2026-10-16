@@ -56,7 +56,6 @@ const chat = ref<Chat>(newChat());
 const chats = ref<Chat[]>([]);
 const input = ref('');
 const running = ref(false);
-const step = ref(0);
 const target = ref<Target | null>(null);
 const pinned = ref(false);
 const panel = ref<'none' | 'history'>('none');
@@ -94,8 +93,10 @@ const blockedReason = computed(() => {
   return '';
 });
 const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
+// Sin botón de enviar, el motivo por el que no se puede enviar se lee en el campo (INFRA-881).
 const placeholder = computed(() => {
   if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
+  if (!controllable.value) return 'Esta pestaña no se puede controlar';
   return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
@@ -121,8 +122,6 @@ function stepsLabel(steps: Item[]): string {
   const n = tools.length || 1;
   return `${n} ${n === 1 ? 'paso' : 'pasos'}${names ? ` · ${names}` : ''}${failed ? ` · ${failed} con error` : ''}`;
 }
-
-const waiting = computed(() => items.value.some((i) => i.kind === 'request' && !i.answered));
 
 function history(): ChatTurn[] {
   return items.value
@@ -169,9 +168,6 @@ function closeStreaming(interim: boolean) {
 
 function onWorker(event: WorkerToPanel) {
   switch (event.type) {
-    case 'step':
-      step.value = event.step;
-      break;
     case 'delta': {
       const s = streamingItem();
       if (s) s.text += event.text;
@@ -216,8 +212,9 @@ function onWorker(event: WorkerToPanel) {
         s.text = event.text || s.text;
         s.streaming = false;
         s.interim = false;
+        s.limit = event.limit;
       } else {
-        push({ kind: 'assistant', text: event.text || '(sin respuesta)' });
+        push({ kind: 'assistant', text: event.text || '(sin respuesta)', ...(event.limit ? { limit: true } : {}) });
       }
       break;
     }
@@ -229,7 +226,6 @@ function onWorker(event: WorkerToPanel) {
       closeStreaming(false);
       for (const i of items.value) if (i.kind === 'request' && !i.answered) i.answered = 'cancelled';
       running.value = false;
-      step.value = 0;
       if (event.stopped) push({ kind: 'info', text: 'Parado.' });
       persist();
       break;
@@ -250,8 +246,9 @@ function connect(): chrome.runtime.Port {
   return port;
 }
 
-function send() {
-  const written = input.value.trim();
+/** `text` sin escribir en el campo: el «Continuar» de un corte por pasos (INFRA-876). */
+function send(text?: string) {
+  const written = (text ?? input.value).trim();
   if ((!written && !attachments.value.length) || blockedReason.value) return;
   const turns = history();
   const images = imageParts(attachments.value);
@@ -279,17 +276,31 @@ function pickFiles() {
   fileInput.value?.click();
 }
 
-async function onFiles(e: Event) {
-  const field = e.target as HTMLInputElement;
-  const chosen = Array.from(field.files ?? []);
-  field.value = '';
+async function addFiles(files: File[]) {
   const rejected: string[] = [];
-  for (const file of chosen) {
+  for (const file of files) {
     const read = await readAttachment(file);
     if ('error' in read) rejected.push(read.error);
     else attachments.value.push(read);
   }
   attachError.value = rejected.join(' · ');
+}
+
+async function onFiles(e: Event) {
+  const field = e.target as HTMLInputElement;
+  const chosen = Array.from(field.files ?? []);
+  field.value = '';
+  await addFiles(chosen);
+}
+
+/** Ctrl+V con una imagen en el portapapeles: entra como adjunto, igual que con el botón +. */
+async function onPaste(e: ClipboardEvent) {
+  const files = Array.from(e.clipboardData?.files ?? []);
+  if (!files.length) return;
+  // Solo imagen en el portapapeles: se traga el pegado (el textarea no pinta nada).
+  // Con texto además, el texto entra normal y la imagen se añade como adjunto.
+  if (!e.clipboardData?.getData('text')) e.preventDefault();
+  await addFiles(files);
 }
 
 function removeAttachment(index: number) {
@@ -561,31 +572,27 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
       @back="view = 'chat'" @save="saveSettings" />
     <template v-else>
     <header>
-      <div class="actions">
-        <button type="button" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
-          @click="startNewChat">Nueva conversación</button>
-        <button type="button" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
-        <button type="button" class="opts" :class="{ on: view === 'options', warn: needsSetup }"
+      <div class="top">
+        <button type="button" class="quiet" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
+          @click="startNewChat">Nueva</button>
+        <button type="button" class="quiet" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
+        <button type="button" class="quiet" :class="{ on: view === 'options', warn: needsSetup }"
           :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
           @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
+        <!-- Chincheta: arriba a la derecha; lo único que hace es no dejar que el agente se mueva de esta pestaña. -->
+        <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
+          :title="pinned ? 'Quitar la chincheta: dejar que el agente cambie de pestaña' : 'Chincheta: que el agente no se mueva de esta pestaña'"
+          @click="togglePin">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor">
+            <path d="M5.6 1.6h4.8l-.9 4.6 2.2 1.7v1.3H4.3V7.9l2.2-1.7z" />
+            <path d="M7.3 9.9h1.4l.4 4.5H6.9z" />
+          </svg>
+        </button>
       </div>
-      <div class="target" :title="target ? `${target.url}\n${pinned ? 'Chincheta puesta: el agente no se mueve de esta pestaña' : 'El panel es de esta pestaña: se oculta cuando cambias'}` : ''">
-        <template v-if="target">
-          <span class="dot" />
-          <div class="where">
-            <span class="host">{{ host(target.url) }}<span class="path">{{ pathOf(target.url) }}</span></span>
-            <span class="title">{{ target.title || 'Sin título' }}</span>
-          </div>
-          <!-- Chincheta: lo único que hace es no dejar que el agente se mueva de esta pestaña. -->
-          <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned"
-            :title="pinned ? 'Quitar la chincheta: dejar que el agente cambie de pestaña' : 'Chincheta: que el agente no se mueva de esta pestaña'"
-            @click="togglePin">
-            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor">
-              <path d="M5.6 1.6h4.8l-.9 4.6 2.2 1.7v1.3H4.3V7.9l2.2-1.7z" />
-              <path d="M7.3 9.9h1.4l.4 4.5H6.9z" />
-            </svg>
-          </button>
-        </template>
+      <!-- Una sola línea: el título de la página repite lo que ya dice la dirección (INFRA-876). -->
+      <div class="target" :title="target ? `${target.title}\n${target.url}` : ''">
+        <span class="dot" />
+        <span v-if="target" class="where"><span class="host">{{ host(target.url) }}</span><span class="path">{{ pathOf(target.url) }}</span></span>
         <span v-else class="muted">Sin pestaña objetivo</span>
       </div>
     </header>
@@ -628,7 +635,14 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
               <summary>razonamiento</summary>
               <pre>{{ block.item.reasoning }}</pre>
             </details>
-            <div class="md" v-html="renderMarkdown(block.item.text)" /><span v-if="block.item.streaming" class="caret">▍</span>
+            <template v-if="block.item.limit">
+              <p class="limit">Sin respuesta cerrada: se acabaron los {{ settings.maxSteps }} pasos.</p>
+              <button type="button" class="link" :disabled="running" title="Darle otra ronda de pasos a esta conversación"
+                @click="send('Continúa donde lo dejaste.')">Continuar</button>
+            </template>
+            <template v-else>
+              <div class="md" v-html="renderMarkdown(block.item.text)" /><span v-if="block.item.streaming" class="caret">▍</span>
+            </template>
           </div>
           <RequestCard v-else-if="block.item.kind === 'request' && block.item.request" :request="block.item.request"
             :answered="block.item.answered" @respond="(r, label) => respond(block.item, r, label)" />
@@ -641,7 +655,6 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           <div v-else class="item" :class="block.item.kind">{{ block.item.text }}</div>
         </template>
       </template>
-      <div v-if="running && !waiting" class="item info">Trabajando… paso {{ step || 1 }}/{{ settings.maxSteps }}</div>
     </main>
 
     <section v-if="plan.length" class="plan">
@@ -675,16 +688,19 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <p v-if="attachError" class="attach-err" role="alert">{{ attachError }}</p>
         <input ref="fileInput" type="file" multiple hidden @change="onFiles">
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
-          :placeholder="placeholder" @keydown="onKey" />
+          :placeholder="placeholder" @keydown="onKey" @paste="onPaste" />
         <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
-        <div v-else-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
+        <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Esc para parar)</div>
+        <!-- Sin botón de enviar: Enter envía (como en Claude). Los controles son texto e iconos planos. -->
         <div class="bar">
           <button type="button" class="icon" aria-label="Adjuntar imágenes o ficheros" title="Adjuntar imágenes o ficheros de texto"
             @click="pickFiles">+</button>
-          <select class="mode-chip" :value="settings.mode" aria-label="Modo del agente" :title="modeHint"
-            @change="onModeSelect">
-            <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
-          </select>
+          <label class="mode" :title="modeHint">
+            <select :value="settings.mode" aria-label="Modo del agente" @change="onModeSelect">
+              <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
+            </select>
+            <span aria-hidden="true">▾</span>
+          </label>
           <div class="right">
             <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
               @update:model-value="onModelChange" @options="openOptions" />
@@ -696,11 +712,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
                 <rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
               </svg>
             </button>
-            <div class="send-group">
-              <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
-              <button type="button" class="send" :disabled="(!input.trim() && !attachments.length) || !!blockedReason"
-                :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
-            </div>
+            <button v-if="running" type="button" class="quiet" title="Parar la respuesta (Esc)" @click="stop">Parar</button>
           </div>
         </div>
       </div>
@@ -724,28 +736,26 @@ html body {
 .panel { display: flex; flex-direction: column; height: 100%; }
 .grow { flex: 1; overflow-y: auto; }
 header {
-  display: flex; flex-direction: column; gap: 6px; padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border-default); background: var(--bg-deep);
 }
-.target { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
-.where { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.where .host { font-weight: 700; font-family: var(--font-mono, monospace); font-size: 12px; word-break: break-all; }
-.where .path { font-weight: 400; color: var(--text-secondary); }
-.where .title { color: var(--text-secondary); word-break: break-word; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; margin-top: 5px; }
-button.pin {
-  margin-left: auto; flex-shrink: 0; line-height: 0; padding: 3px 6px; color: var(--text-secondary);
-}
-button.pin.on { color: var(--accent-warning); border-color: var(--accent-warning); }
+.top { display: flex; align-items: center; gap: 18px; }
+/* Los tres accesos son texto discreto, no tres pastillas: la cabecera no compite con la conversación. */
+.quiet { border: none; background: none; padding: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.quiet.on { color: var(--text-primary); }
+.quiet.warn { color: var(--accent-warning); }
+.target { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-secondary); }
+.where .host { font-weight: 700; color: var(--text-primary); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
+button.pin { margin-left: auto; flex-shrink: 0; line-height: 0; min-height: 0; padding: 2px 4px; border: none; background: none; color: var(--text-secondary); }
+button.pin.on { color: var(--accent-warning); }
 .warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
-.actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.actions button.on { border-color: var(--accent-primary); }
-button.opts.warn { border-color: var(--accent-warning); }
 button.link.del { flex: none; color: var(--accent-danger); }
 button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; }
 button.link.title { color: var(--text-primary); }
 .muted { color: var(--text-secondary); }
-.drawer { padding: 10px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
+.drawer { padding: 12px 18px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
 .settings { display: flex; flex-direction: column; gap: 8px; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); flex: 1; }
 .settings label.check { flex-direction: row; align-items: center; gap: 6px; }
@@ -756,10 +766,12 @@ button.link.title { color: var(--text-primary); }
 .chat-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; }
 .chat-row.current { background: var(--bg-elevated); }
 .chat-row .muted { font-size: 11px; white-space: nowrap; }
-.log { flex: 1; overflow-y: auto; padding: 14px max(16px, calc((100% - 660px) / 2)); display: flex; flex-direction: column; gap: 14px; }
+.log { flex: 1; overflow-y: auto; padding: 22px max(22px, calc((100% - 640px) / 2)); display: flex; flex-direction: column; gap: 18px; }
 .item { word-break: break-word; line-height: 1.7; }
-.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 8px 14px; border-radius: var(--radius-lg); max-width: 85%; }
+.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 10px 16px; border-radius: var(--radius-lg); max-width: 85%; }
 .item.assistant.interim { color: var(--text-secondary); }
+/* Corte por pasos (INFRA-876): se cambia el texto interno del bucle por una línea y un botón. */
+.limit { margin: 0 0 10px; color: var(--text-secondary); }
 .md :deep(p) { margin: 0 0 10px; }
 .md :deep(p:last-child) { margin-bottom: 0; }
 .md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
@@ -784,33 +796,31 @@ button.link.title { color: var(--text-primary); }
 .ok { color: var(--accent-success); }
 .ko { color: var(--accent-danger); }
 .pending { color: var(--accent-warning); }
-.plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 4px 10px 6px; max-height: 30%; overflow-y: auto; }
+.plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 8px 18px 10px; max-height: 30%; overflow-y: auto; }
 .plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; font-family: var(--font-serif); font-size: 15px; }
 .plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
-footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: 1px solid var(--border-default); }
+/* Sin línea sobre el campo: partía el panel en dos y no aportaba nada (INFRA-883). */
+footer { display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 18px; }
 .notice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .notice span { color: var(--text-secondary); }
 .notice.err { margin: 0; border-left-color: var(--accent-danger); }
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
 .waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
-.right { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-.send-group { display: flex; gap: 6px; flex-shrink: 0; }
-.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 6px; gap: 6px; box-shadow: var(--shadow-pop); }
+.right { display: flex; align-items: center; gap: 14px; margin-left: auto; min-width: 0; }
+.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 10px; gap: 8px; box-shadow: var(--shadow-pop); }
 .composer:focus-within { border-color: var(--accent-primary); }
-.composer textarea { resize: none; border: none; background: none; outline: none; padding: 6px; }
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
+.composer textarea { resize: none; border: none; background: none; outline: none; padding: 8px 6px; }
+.bar { display: flex; align-items: center; gap: 14px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
-/* El modo como en Claude: un chip con desplegable, no una fila entera de botones. */
-.mode-chip { flex-shrink: 0; font: inherit; font-weight: 600; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 4px 8px; }
-.send-group button { font-weight: 600; }
-.send { background: var(--accent-primary); color: var(--bg-deepest); border-color: var(--accent-primary); }
+/* Pie plano (INFRA-881): sin bordes ni rellenos; el modo es un desplegable de texto, como en Claude. */
+.mode { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.mode select { appearance: none; field-sizing: content; min-height: 0; border: none; background: none; padding: 0; font: inherit; color: var(--text-primary); cursor: pointer; }
 /* Adjuntos (INFRA-857): «+» y micro como iconos, y los elegidos en chips encima del campo. */
-.icon { padding: 4px 10px; border-radius: var(--radius-pill); line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
-.icon.mic { display: inline-flex; align-items: center; padding: 5px 9px; }
-.icon.mic.on { color: var(--accent-primary); border-color: var(--accent-primary); }
+.icon { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border: none; background: none; line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.icon.mic.on { color: var(--accent-primary); }
 .files { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 0; }
 .file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill); background: var(--bg-surface); font-size: 12px; }
 .file img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; }

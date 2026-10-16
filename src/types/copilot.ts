@@ -106,7 +106,6 @@ export type PanelToWorker =
   | { type: 'stop' };
 
 export type WorkerToPanel =
-  | { type: 'step'; step: number }
   | { type: 'delta'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
@@ -114,6 +113,7 @@ export type WorkerToPanel =
   | { type: 'request'; requestId: string; request: UserRequest }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'mode'; mode: CopilotMode }
-  | { type: 'assistant'; text: string }
+  // `limit`: el bucle se quedó sin pasos sin cerrar la respuesta; el panel ofrece «Continuar» (INFRA-876).
+  | { type: 'assistant'; text: string; limit?: boolean }
   | { type: 'error'; message: string }
   | { type: 'done'; stopped: boolean };

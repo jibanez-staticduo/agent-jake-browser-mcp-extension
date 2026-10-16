@@ -110,11 +110,12 @@ function onKey(e: KeyboardEvent) {
 </template>
 
 <style scoped>
-.chip { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; background: var(--bg-elevated); }
+/* Plano (INFRA-881): el modelo es texto del pie, no un botón con su propio marco. */
+.chip { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 0; padding: 0; border: none; background: none; color: var(--text-secondary); font-size: 12px; }
 .external { border: 1px solid var(--accent-warning); color: var(--accent-warning); border-radius: 4px; padding: 0 5px; font-size: 10.5px; font-weight: 600; white-space: nowrap; }
 .tags { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 @media (max-width: 379px) { .chip .grp { display: none; } }
-.chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text-primary); }
 .chip .grp { color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
 .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: flex-end; z-index: 50; }
 .sheet { width: 100%; max-height: 80%; display: flex; flex-direction: column; gap: 8px; padding: 12px; background: var(--bg-surface); border-top: 1px solid var(--border-default); border-radius: 12px 12px 0 0; box-sizing: border-box; }

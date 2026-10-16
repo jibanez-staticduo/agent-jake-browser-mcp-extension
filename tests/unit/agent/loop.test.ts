@@ -67,7 +67,7 @@ describe('copilot agent loop', () => {
     const second = bodies[1].messages;
     expect(second.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1', content: '{"clicked":true}' });
 
-    expect(events.map((e) => e.type)).toEqual(['step', 'tool_call', 'tool_result', 'step', 'assistant']);
+    expect(events.map((e) => e.type)).toEqual(['tool_call', 'tool_result', 'assistant']);
   });
 
   it('reports tool errors to the model instead of failing', async () => {
@@ -92,14 +92,15 @@ describe('copilot agent loop', () => {
     expect(String(bodies[1].messages.at(-1)?.content)).toMatch(/^Error: /);
   });
 
-  it('stops at maxSteps', async () => {
+  it('stops at maxSteps and tells the panel to offer a continue', async () => {
     const replies = Array.from({ length: 3 }, (_, i) => reply(toolCall(`c${i}`, 'browser_state', {})));
-    const { deps, fetchMock } = makeDeps(replies);
+    const { deps, events, fetchMock } = makeDeps(replies);
 
     const text = await runAgent([], 'loop', { ...settings, maxSteps: 3 }, deps);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(text).toMatch(/Stopped after 3 steps/);
+    expect(events.at(-1)).toMatchObject({ type: 'assistant', limit: true });
   });
 
   it('aborts between tools', async () => {

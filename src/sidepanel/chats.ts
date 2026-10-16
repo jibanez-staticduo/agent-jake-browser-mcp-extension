@@ -18,6 +18,8 @@ export interface Item {
   streaming?: boolean;
   /** assistant: text emitted alongside tool calls, not a final answer */
   interim?: boolean;
+  /** assistant: the run stopped at the step cap without an answer; the panel offers «Continuar» */
+  limit?: boolean;
   reasoning?: string;
   request?: UserRequest;
   /** request: what the user answered, or 'cancelled' */

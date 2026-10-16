@@ -64,16 +64,35 @@ test('internal secret reader routes refs, bounds regex and keeps canaries out of
     expect(await read({ selector: '#seed', regex: '(x)\\1' })).toMatchObject({ success: false, error: { code: 'SECRET_REGEX_INVALID' } });
     expect(await read({ selector: '#poison', regex: '(a+)+$' })).toMatchObject({ success: false, error: { code: 'SECRET_REGEX_NO_MATCH' } });
     expect(await read({ ref: `s999999e42${CANARY}` })).toMatchObject({ success: false, error: { code: 'SECRET_NO_MATCH' } });
+    await page.evaluate(() => {
+      const input = document.querySelector('#input')!;
+      input.setAttribute('id', 'duplicate');
+      input.setAttribute('aria-label', 'identity target');
+    });
     const snapshot = await request('browser_snapshot', { targetTabId: tabId });
     expect(snapshot.success).toBe(true);
     const refs = [...JSON.stringify(snapshot.result).matchAll(/\[(f\d+:s\d+e\d+)[|\]]/g)];
     expect(refs.length).toBeGreaterThan(0);
+    const identityRef = /identity target[^\n]*\[(s\d+e\d+)[|\]]/.exec(snapshot.result.snapshot)![1];
+    await page.evaluate(() => {
+      const decoy = document.createElement('input');
+      decoy.id = 'duplicate';
+      decoy.value = 'wrong-element';
+      document.body.prepend(decoy);
+      for (const mode of ['open', 'closed'] as const) {
+        const host = document.createElement('div');
+        host.id = `shadow-${mode}`;
+        host.attachShadow({ mode }).innerHTML = '<input id="hidden" value="wrong-shadow-element">';
+        document.body.append(host);
+      }
+    });
+    expect(await read({ ref: identityRef })).toMatchObject({ success: true, result: { value: CANARY } });
+    expect(await read({ selector: '#shadow-closed #hidden' })).toMatchObject({ success: false, error: { code: 'SECRET_NO_MATCH' } });
     const frames = await worker.evaluate(async id => chrome.webNavigation.getAllFrames({ tabId: id }), tabId);
     const frameId = frames!.find(frame => frame.parentFrameId === 0)!.frameId;
-    const compact = await request('browser_state', { targetTabId: tabId });
-    expect(JSON.stringify(compact.result)).toContain(`f${frameId}:`);
+    await worker.evaluate(async ({ tabId, frameId }) => chrome.tabs.sendMessage(tabId, { action: 'generateState', payload: {} }, { frameId }), { tabId, frameId });
     expect(await read({ ref: `f${frameId}:0` })).toMatchObject({ success: true, result: { value: CANARY } });
-    // Snapshot identity stays correct even when an open shadow root has a CSS decoy.
+    // An ARIA ref stays in the same frame and generation after numeric refs are refreshed.
     const identity = await read({ ref: refs[0][1] });
     expect(identity.success || identity.error.code === 'SECRET_EMPTY').toBe(true);
     const stored = await worker.evaluate(async () => ({ local: await chrome.storage.local.get(null), session: await chrome.storage.session.get(null) }));
