@@ -9,6 +9,7 @@ import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 import { pageEvents } from './page-events';
 import { AgentWindows } from './agent-windows';
+import { logDebuggerDetachFailure } from './debugger-diagnostics';
 
 export interface CdpStatus {
   connectedTabId: number | null;
@@ -415,8 +416,7 @@ export class TabManager {
       await chrome.debugger.detach({ tabId: this.connectedTabId });
       log.debug('Debugger detached');
     } catch (error) {
-      // May already be detached
-      log.warn('Failed to detach debugger:', error);
+      logDebuggerDetachFailure(error);
     }
   }
 
