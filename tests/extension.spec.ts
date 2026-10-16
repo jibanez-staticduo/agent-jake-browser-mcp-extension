@@ -200,10 +200,10 @@ test('copilot panel opens in a fresh install without contacting a model', async 
   const panel = await context.newPage();
   try {
     await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
-    // Without settings the textarea stays usable, Enviar is off and a notice says why, with the way out.
+    // Sin botón de enviar: el campo sigue usable y es él quien dice por qué no se puede enviar (INFRA-881).
     await expect(panel.locator('textarea')).toBeEnabled();
+    await expect(panel.locator('textarea')).toHaveAttribute('placeholder', /Falta configurar el copiloto/);
     await expect(panel.getByText('Falta configurar el copiloto').first()).toBeVisible();
-    await expect(panel.getByRole('button', { name: 'Enviar' })).toBeDisabled();
     await panel.getByRole('button', { name: 'Abrir Opciones' }).click();
     await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue('');
     await expect(panel.getByRole('button', { name: 'Guardar copiloto' })).toBeDisabled();

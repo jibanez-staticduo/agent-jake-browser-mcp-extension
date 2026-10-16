@@ -93,8 +93,10 @@ const blockedReason = computed(() => {
   return '';
 });
 const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
+// Sin botón de enviar, el motivo por el que no se puede enviar se lee en el campo (INFRA-881).
 const placeholder = computed(() => {
   if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
+  if (!controllable.value) return 'Esta pestaña no se puede controlar';
   return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
@@ -621,7 +623,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
             </details>
             <template v-if="block.item.limit">
               <p class="limit">Sin respuesta cerrada: se acabaron los {{ settings.maxSteps }} pasos.</p>
-              <button type="button" class="continue" :disabled="running" title="Darle otra ronda de pasos a esta conversación"
+              <button type="button" class="link" :disabled="running" title="Darle otra ronda de pasos a esta conversación"
                 @click="send('Continúa donde lo dejaste.')">Continuar</button>
             </template>
             <template v-else>
@@ -675,13 +677,16 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           :placeholder="placeholder" @keydown="onKey" />
         <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
         <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Esc para parar)</div>
+        <!-- Sin botón de enviar: Enter envía (como en Claude). Los controles son texto e iconos planos. -->
         <div class="bar">
           <button type="button" class="icon" aria-label="Adjuntar imágenes o ficheros" title="Adjuntar imágenes o ficheros de texto"
             @click="pickFiles">+</button>
-          <select class="mode-chip" :value="settings.mode" aria-label="Modo del agente" :title="modeHint"
-            @change="onModeSelect">
-            <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
-          </select>
+          <label class="mode" :title="modeHint">
+            <select :value="settings.mode" aria-label="Modo del agente" @change="onModeSelect">
+              <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
+            </select>
+            <span aria-hidden="true">▾</span>
+          </label>
           <div class="right">
             <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
               @update:model-value="onModelChange" @options="openOptions" />
@@ -693,11 +698,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
                 <rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
               </svg>
             </button>
-            <div class="send-group">
-              <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
-              <button type="button" class="send" :disabled="(!input.trim() && !attachments.length) || !!blockedReason"
-                :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send()">Enviar</button>
-            </div>
+            <button v-if="running" type="button" class="quiet" title="Parar la respuesta (Esc)" @click="stop">Parar</button>
           </div>
         </div>
       </div>
@@ -733,8 +734,8 @@ header {
 .where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-secondary); }
 .where .host { font-weight: 700; color: var(--text-primary); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
-button.pin { margin-left: auto; flex-shrink: 0; line-height: 0; padding: 4px 8px; color: var(--text-secondary); }
-button.pin.on { color: var(--accent-warning); border-color: var(--accent-warning); }
+button.pin { margin-left: auto; flex-shrink: 0; line-height: 0; min-height: 0; padding: 2px 4px; border: none; background: none; color: var(--text-secondary); }
+button.pin.on { color: var(--accent-warning); }
 .warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
 button.link.del { flex: none; color: var(--accent-danger); }
 button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; }
@@ -757,7 +758,6 @@ button.link.title { color: var(--text-primary); }
 .item.assistant.interim { color: var(--text-secondary); }
 /* Corte por pasos (INFRA-876): se cambia el texto interno del bucle por una línea y un botón. */
 .limit { margin: 0 0 10px; color: var(--text-secondary); }
-.continue { font-size: 12px; padding: 4px 12px; border-radius: var(--radius-pill); }
 .md :deep(p) { margin: 0 0 10px; }
 .md :deep(p:last-child) { margin-bottom: 0; }
 .md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
@@ -794,21 +794,18 @@ footer { display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 18
 .notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
 .notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
 .waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
-.right { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
-.send-group { display: flex; gap: 6px; flex-shrink: 0; }
+.right { display: flex; align-items: center; gap: 14px; margin-left: auto; min-width: 0; }
 .composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 10px; gap: 8px; box-shadow: var(--shadow-pop); }
 .composer:focus-within { border-color: var(--accent-primary); }
 .composer textarea { resize: none; border: none; background: none; outline: none; padding: 8px 6px; }
-.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
+.bar { display: flex; align-items: center; gap: 14px; min-width: 0; flex-wrap: nowrap; }
 .bar > :first-child { min-width: 0; }
-/* El modo como en Claude: un chip con desplegable, no una fila entera de botones. */
-.mode-chip { flex-shrink: 0; font: inherit; font-weight: 600; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 4px 8px; }
-.send-group button { font-weight: 600; }
-.send { background: var(--accent-primary); color: var(--bg-deepest); border-color: var(--accent-primary); }
+/* Pie plano (INFRA-881): sin bordes ni rellenos; el modo es un desplegable de texto, como en Claude. */
+.mode { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.mode select { appearance: none; field-sizing: content; min-height: 0; border: none; background: none; padding: 0; font: inherit; color: var(--text-primary); cursor: pointer; }
 /* Adjuntos (INFRA-857): «+» y micro como iconos, y los elegidos en chips encima del campo. */
-.icon { padding: 4px 10px; border-radius: var(--radius-pill); line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
-.icon.mic { display: inline-flex; align-items: center; padding: 5px 9px; }
-.icon.mic.on { color: var(--accent-primary); border-color: var(--accent-primary); }
+.icon { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border: none; background: none; line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.icon.mic.on { color: var(--accent-primary); }
 .files { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 0; }
 .file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill); background: var(--bg-surface); font-size: 12px; }
 .file img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; }
