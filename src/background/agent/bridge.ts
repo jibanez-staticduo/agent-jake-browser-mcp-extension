@@ -191,7 +191,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
               stateError: state.ok ? undefined : state.error,
             });
           },
-        });
+        }, msg.images ?? []);
       } catch (error) {
         if (error instanceof AgentStopped) {
           stopped = true;

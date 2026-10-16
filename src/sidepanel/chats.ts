@@ -22,6 +22,10 @@ export interface Item {
   request?: UserRequest;
   /** request: what the user answered, or 'cancelled' */
   answered?: string;
+  /** user: attached images (data URLs). Kept in memory only — saveChat strips them. */
+  images?: string[];
+  /** user: names of the attached text files (their content went into the prompt). */
+  files?: string[];
 }
 
 export interface Chat {
@@ -60,7 +64,15 @@ export async function listChats(): Promise<Chat[]> {
 export async function saveChat(chat: Chat): Promise<void> {
   if (!chat.items.length) return;
   const chats = (await listChats()).filter((c) => c.id !== chat.id);
-  const saved: Chat = { ...chat, title: titleOf(chat.items), updatedAt: Date.now() };
+  const saved: Chat = {
+    ...chat,
+    title: titleOf(chat.items),
+    updatedAt: Date.now(),
+    // shortcut: las imágenes no se guardan — chrome.storage.local tiene 10 MB y una foto en base64
+    // ocupa cientos de KB. Queda su nombre (`files`) y el texto; la imagen se ve mientras el panel
+    // está abierto, que es cuando el modelo la necesita.
+    items: chat.items.map(({ images, ...rest }) => rest),
+  };
   // Plain JSON: Vue proxies do not survive structured cloning.
   const next = [JSON.parse(JSON.stringify(saved)) as Chat, ...chats].slice(0, MAX_CHATS);
   await chrome.storage.local.set({ [CHATS_KEY]: next, [CURRENT_CHAT_KEY]: chat.id });

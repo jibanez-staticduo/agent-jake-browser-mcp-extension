@@ -68,10 +68,13 @@ export function isCopilotConfigured(settings: CopilotSettings): boolean {
   return copilotMissing(settings).length === 0;
 }
 
+/** OpenAI-style content part: a turn is text, or text plus the images the user attached (INFRA-857). */
+export type ChatPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 /** One finished turn of the visible conversation (tool traffic stays in the worker). */
 export interface ChatTurn {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ChatPart[];
 }
 
 export type PlanStatus = 'pending' | 'in_progress' | 'done';
@@ -94,7 +97,8 @@ export type UserResponse =
   | { kind: 'plan'; decision: 'reject'; feedback: string };
 
 export type PanelToWorker =
-  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; mode: CopilotMode; model: string }
+  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; mode: CopilotMode; model: string;
+      /** data URLs of the images attached to this prompt (INFRA-857). */ images?: string[] }
   | { type: 'response'; requestId: string; response: UserResponse }
   | { type: 'stop' };
 

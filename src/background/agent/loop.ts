@@ -231,14 +231,22 @@ export async function runAgent(
   prompt: string,
   settings: CopilotSettings,
   deps: AgentDeps,
+  /** Imágenes que el usuario adjuntó a este mensaje (INFRA-857): mismo formato que las capturas. */
+  images: string[] = [],
 ): Promise<string> {
   if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
   let mode: CopilotMode = settings.mode;
   const context = await deps.getContext();
+  const userText = `${context}\n\n${prompt}`;
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt(mode) },
     ...history.map((t) => ({ role: t.role, content: t.content })),
-    { role: 'user', content: `${context}\n\n${prompt}` },
+    {
+      role: 'user',
+      content: images.length
+        ? [{ type: 'text' as const, text: userText }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+        : userText,
+    },
   ];
 
   /** Meta tools are answered here and by the user; browser tools go to the handlers. */

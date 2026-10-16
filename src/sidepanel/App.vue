@@ -20,6 +20,7 @@ import {
   type WorkerToPanel,
 } from '@/types/copilot';
 import { renderMarkdown } from './markdown';
+import { imageParts, promptWithFiles, readAttachment, transcribe, type Attachment } from './attachments';
 import ModelPicker from './ModelPicker.vue';
 import { explainError, isControllable, missingText as describeMissing } from './setup';
 import OptionsView from './OptionsView.vue';
@@ -69,6 +70,12 @@ const check = ref<{ state: 'idle' | 'ok' | 'error'; text: string }>({ state: 'id
 const planOpen = ref(true);
 const log = ref<HTMLElement | null>(null);
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const attachments = ref<Attachment[]>([]);
+const attachError = ref('');
+const fileInput = ref<HTMLInputElement | null>(null);
+const recording = ref(false);
+const transcribing = ref(false);
+let recorder: MediaRecorder | null = null;
 
 let port: chrome.runtime.Port | null = null;
 let windowId: number | null = null;
@@ -120,7 +127,17 @@ const waiting = computed(() => items.value.some((i) => i.kind === 'request' && !
 function history(): ChatTurn[] {
   return items.value
     .filter((i) => i.kind === 'user' || (i.kind === 'assistant' && !i.interim && i.text))
-    .map((i) => ({ role: i.kind as ChatTurn['role'], content: i.text }));
+    .map((i) => ({
+      role: i.kind as ChatTurn['role'],
+      // Un turno de usuario con imágenes adjuntas viaja con sus partes, como las capturas del agente.
+      content:
+        i.kind === 'user' && i.images?.length
+          ? [
+              { type: 'text' as const, text: i.text },
+              ...i.images.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+            ]
+          : i.text,
+    }));
 }
 
 function persist() {
@@ -234,12 +251,17 @@ function connect(): chrome.runtime.Port {
 }
 
 function send() {
-  const prompt = input.value.trim();
-  if (!prompt || blockedReason.value) return;
+  const written = input.value.trim();
+  if ((!written && !attachments.value.length) || blockedReason.value) return;
   const turns = history();
+  const images = imageParts(attachments.value);
+  const files = attachments.value.filter((a) => a.kind === 'text').map((a) => a.name);
+  const prompt = promptWithFiles(written, attachments.value);
   input.value = '';
+  attachments.value = [];
+  attachError.value = '';
   running.value = true;
-  push({ kind: 'user', text: prompt });
+  push({ kind: 'user', text: written, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
   persist();
   connect().postMessage({
     type: 'prompt',
@@ -248,7 +270,69 @@ function send() {
     targetTabId: target.value?.id ?? null,
     mode: settings.value.mode,
     model: settings.value.model,
+    images,
   });
+}
+
+function pickFiles() {
+  fileInput.value?.click();
+}
+
+async function onFiles(e: Event) {
+  const field = e.target as HTMLInputElement;
+  const chosen = Array.from(field.files ?? []);
+  field.value = '';
+  const rejected: string[] = [];
+  for (const file of chosen) {
+    const read = await readAttachment(file);
+    if ('error' in read) rejected.push(read.error);
+    else attachments.value.push(read);
+  }
+  attachError.value = rejected.join(' · ');
+}
+
+function removeAttachment(index: number) {
+  attachments.value.splice(index, 1);
+}
+
+/** Dictado: graba, lo transcribe el Whisper de casa y deja el texto en el campo, editable antes de enviar. */
+async function toggleMic() {
+  if (recorder) {
+    recorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks: Blob[] = [];
+    const rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => {
+      if (e.data.size) chunks.push(e.data);
+    };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      recorder = null;
+      recording.value = false;
+      const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+      if (!blob.size) return;
+      transcribing.value = true;
+      try {
+        const said = await transcribe(blob, settings.value);
+        input.value = input.value.trim() ? `${input.value.trim()} ${said}` : said;
+        await nextTick();
+        textarea.value?.focus();
+      } catch (error) {
+        attachError.value = (error as Error).message;
+      } finally {
+        transcribing.value = false;
+      }
+    };
+    rec.start();
+    recorder = rec;
+    recording.value = true;
+    attachError.value = '';
+  } catch (error) {
+    attachError.value = `No pude grabar (${(error as Error).name}): el panel necesita permiso de micrófono.`;
+  }
 }
 
 function respond(item: Item, response: UserResponse, label: string) {
@@ -529,7 +613,13 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           </template>
         </details>
         <template v-else>
-          <div v-if="block.item.kind === 'user'" class="item user">{{ block.item.text }}</div>
+          <div v-if="block.item.kind === 'user'" class="item user">
+            <span v-if="block.item.text">{{ block.item.text }}</span>
+            <span v-if="block.item.files?.length" class="files-line">{{ block.item.files.join(' · ') }}</span>
+            <span v-if="block.item.images?.length" class="thumbs">
+              <img v-for="(src, t) in block.item.images" :key="t" :src="src" alt="imagen adjunta">
+            </span>
+          </div>
           <div v-else-if="block.item.kind === 'assistant'" class="item assistant" :class="{ interim: block.item.interim }">
             <details v-if="block.item.reasoning" class="reasoning">
               <summary>razonamiento</summary>
@@ -571,10 +661,23 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <span>El agente no puede actuar en páginas del navegador ni de extensiones. Abre una página web y elígela como objetivo.</span>
       </div>
       <div class="composer" :title="keysHelp">
+        <div v-if="attachments.length" class="files">
+          <span v-for="(a, i) in attachments" :key="i" class="file">
+            <img v-if="a.kind === 'image'" :src="a.data" :alt="a.name">
+            <span v-else class="kind" aria-hidden="true">≡</span>
+            <span class="name" :title="a.name">{{ a.name }}</span>
+            <button type="button" :aria-label="`Quitar ${a.name}`" @click="removeAttachment(i)">×</button>
+          </span>
+        </div>
+        <p v-if="attachError" class="attach-err" role="alert">{{ attachError }}</p>
+        <input ref="fileInput" type="file" multiple hidden @change="onFiles">
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
           :placeholder="placeholder" @keydown="onKey" />
-        <div v-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
+        <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
+        <div v-else-if="running" class="waiting" role="status">Esperando al agente · tu borrador se conserva; envíalo cuando termine (o pulsa Parar)</div>
         <div class="bar">
+          <button type="button" class="icon" aria-label="Adjuntar imágenes o ficheros" title="Adjuntar imágenes o ficheros de texto"
+            @click="pickFiles">+</button>
           <select class="mode-chip" :value="settings.mode" aria-label="Modo del agente" :title="modeHint"
             @change="onModeSelect">
             <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
@@ -582,9 +685,17 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           <div class="right">
             <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
               @update:model-value="onModelChange" @options="openOptions" />
+            <button type="button" class="icon mic" :class="{ on: recording }" :disabled="transcribing"
+              :aria-label="recording ? 'Parar de grabar' : 'Dictar por micrófono'"
+              :title="recording ? 'Parar de grabar' : 'Dictar: se transcribe y lo puedes editar antes de enviar'"
+              @click="toggleMic">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+              </svg>
+            </button>
             <div class="send-group">
               <button v-if="running" type="button" class="danger" title="Parar la respuesta (Esc)" @click="stop">■ Parar</button>
-              <button type="button" class="send" :disabled="!input.trim() || !!blockedReason"
+              <button type="button" class="send" :disabled="(!input.trim() && !attachments.length) || !!blockedReason"
                 :title="blockedReason || `Enviar (Enter). ${keysHelp}`" @click="send">Enviar</button>
             </div>
           </div>
@@ -692,4 +803,18 @@ footer { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px
 .mode-chip { flex-shrink: 0; font: inherit; font-weight: 600; color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-pill); padding: 4px 8px; }
 .send-group button { font-weight: 600; }
 .send { background: var(--accent-primary); color: var(--bg-deepest); border-color: var(--accent-primary); }
+/* Adjuntos (INFRA-857): «+» y micro como iconos, y los elegidos en chips encima del campo. */
+.icon { padding: 4px 10px; border-radius: var(--radius-pill); line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.icon.mic { display: inline-flex; align-items: center; padding: 5px 9px; }
+.icon.mic.on { color: var(--accent-primary); border-color: var(--accent-primary); }
+.files { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 0; }
+.file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill); background: var(--bg-surface); font-size: 12px; }
+.file img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; }
+.file .kind { color: var(--text-secondary); }
+.file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.file button { border: none; background: none; padding: 0 2px; color: var(--text-secondary); font-size: 14px; line-height: 1; }
+.attach-err { margin: 4px 4px 0; color: var(--accent-danger); font-size: 12px; }
+.files-line { display: block; margin-top: 6px; color: var(--text-secondary); font-size: 12px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.thumbs img { max-width: 120px; max-height: 120px; border-radius: var(--radius-sm); border: 1px solid var(--border-default); }
 </style>
