@@ -8,6 +8,7 @@ import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER, TIMEOUTS } from '@/constants';
 import { pageEvents } from './page-events';
+import { AgentWindows } from './agent-windows';
 import { passkeysForHost, rpIdMatchesHost, savePasskeys, summarize, type PasskeySummary, type StoredPasskey } from './passkey-vault';
 
 /**
@@ -169,6 +170,7 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
 }
 
 export class TabManager {
+  private readonly agentWindows = new AgentWindows();
   private connectedTabId: number | null = null;
   /** Set when the connected tab is the user's own, reached through auto-attach and not opened or chosen by the agent. */
   private autoAttachedTabId: number | null = null;
@@ -976,7 +978,7 @@ export class TabManager {
    */
   async listTabs(): Promise<TabInfo[]> {
     // Get the active tab in the last focused window (most reliable method)
-    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const currentTab = (await chrome.tabs.query({ lastFocusedWindow: true })).find(tab => tab.active);
     const currentTabId = currentTab?.id;
 
     const tabs = await chrome.tabs.query({});
@@ -988,22 +990,22 @@ export class TabManager {
       // Only mark the specific current tab as active
       active: tab.id === currentTabId,
       connected: tab.id === this.connectedTabId,
+      windowId: tab.windowId,
     }));
   }
 
   /**
    * Create a new tab and optionally connect to it.
    *
-   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
-   * `active: false` would jump the window to the new tab and steal the user's
-   * view. Pass `active: true` only when the user is meant to see it.
+   * Opens an unfocused window or an inactive tab in a verified session window.
+   * Preserves guard-first navigation and bounded page load results.
    */
-  async createTab(url: string, connect = true, active = false): Promise<{ tab: TabInfo; loaded: boolean }> {
+  async createTab(url: string, connect = true, windowId?: number): Promise<{ tab: TabInfo; loaded: boolean; windowId: number; windowCreated: boolean }> {
     // The WebAuthn guard's page script only beats a password manager's content script in
     // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
     // drive opens blank, we attach, and only then does it load the URL.
     const guardFirst = connect && /^https?:/i.test(url);
-    const tab = await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
+    const { tab, windowCreated } = await this.agentWindows.openTab(guardFirst ? 'about:blank' : url, windowId);
     // Not waited for unless we connect; and a page that outlasts TAB_LOAD_WAIT is still a tab we
     // opened and drive: it stays connected and the answer says loaded:false (it is not an error).
     let loaded = tab.status === 'complete';
@@ -1033,34 +1035,23 @@ export class TabManager {
         title: current.title || '',
         active: current.active,
         connected: connect && tab.id === this.connectedTabId,
+        windowId: tab.windowId,
       },
       loaded,
+      windowId: tab.windowId!,
+      windowCreated,
     };
   }
 
-  /**
-   * Push a tab to the background by activating another tab of its window.
-   * No-op when the tab is already hidden or it is the only tab there.
-   */
-  async sendTabToBack(tabId?: number): Promise<number | null> {
-    const targetId = tabId ?? this.connectedTabId;
-    if (!targetId) {
-      throw new Error('No tab specified and no connected tab');
-    }
+  async closeWindow(windowId: number, tabIds: number[]): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
+    return this.agentWindows.closeWindow(windowId, tabIds, async id => {
+      if (id === this.connectedTabId) await this.disconnectTab();
+    });
+  }
 
-    const tab = await chrome.tabs.get(targetId);
-    if (!tab.active) {
-      return null;
-    }
-
-    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
-    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
-    if (!other?.id) {
-      return null;
-    }
-
-    await chrome.tabs.update(other.id, { active: true });
-    return other.id;
+  /** Ordinary agent commands never activate tabs; native passkey ceremony keeps its explicit flow. */
+  async sendTabToBack(_tabId?: number): Promise<number | null> {
+    return null;
   }
 
   /**
@@ -1072,7 +1063,6 @@ export class TabManager {
     }
 
     await this.connectTab(tabId);
-    await chrome.tabs.update(tabId, { active: true });
   }
 
   /**
@@ -1090,6 +1080,7 @@ export class TabManager {
     }
 
     await chrome.tabs.remove(targetTabId);
+    await this.agentWindows.prune();
     log.info(`Closed tab: ${targetTabId}`);
     return targetTabId;
   }
@@ -1129,6 +1120,7 @@ export class TabManager {
           title: tab.title || '',
           active: tab.active,
           connected: false,
+          windowId: tab.windowId,
         };
       }
     };

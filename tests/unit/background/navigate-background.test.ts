@@ -34,7 +34,7 @@ describe('browser_navigate never drives the user\'s own tab', () => {
 
     const answer = await handlers.browser_navigate({ url: 'https://example.com/login' });
 
-    expect(createTab).toHaveBeenCalledWith('https://example.com/login', true, false); // connect, in the background
+    expect(createTab).toHaveBeenCalledWith('https://example.com/login', true); // connect in a new unfocused window
     expect(waitForNextTabLoad).not.toHaveBeenCalled();
     expect(updated).toEqual([]);
     expect(answer).toEqual({ navigated: 'https://example.com/login', loaded: true, tabId: 99, openedNewTab: true });
@@ -46,7 +46,7 @@ describe('browser_navigate never drives the user\'s own tab', () => {
 
     const answer = await handlers.browser_navigate({ url: 'https://example.com/' });
 
-    expect(createTab).toHaveBeenCalledWith('https://example.com/', true, false);
+    expect(createTab).toHaveBeenCalledWith('https://example.com/', true);
     expect(waitForNextTabLoad).not.toHaveBeenCalled();
     expect(updated).toEqual([]); // chrome.tabs.update never touched tab 7
     expect(answer).toMatchObject({ tabId: 99, openedNewTab: true });

@@ -1,4 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { AgentWindows } from '@/background/agent-windows';
+
+// Provenance and registry races are exercised by agent-windows.test.ts. Keep these tests
+// focused on the real manager's bounded loading, WebAuthn and passkey behavior.
+beforeEach(() => {
+  vi.spyOn(AgentWindows.prototype, 'openTab').mockImplementation(async (url, windowId) => ({
+    tab: { ...await mockChrome.tabs.create({ url, active: false }), windowId: windowId ?? 30 },
+    windowCreated: windowId === undefined,
+  }));
+  vi.spyOn(AgentWindows.prototype, 'prune').mockResolvedValue(undefined);
+});
 
 const mockChrome = {
   storage: {
@@ -536,27 +547,16 @@ describe('TabManager background-tab control', () => {
     expect(mockChrome.webNavigation.onCommitted.removeListener).toHaveBeenCalledWith(listener);
   });
 
-  it('createTab activates the tab only when asked', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });
-
-    await manager.createTab('https://example.com', false, true);
-
-    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
-      url: 'https://example.com',
-      active: true,
-    });
+  it('createTab passes a session window and preserves its additive loading contract', async () => {
+    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: false });
+    const answer = await new TabManager().createTab('https://example.com', false, 30);
+    expect(AgentWindows.prototype.openTab).toHaveBeenCalledWith('https://example.com', 30);
+    expect(answer).toMatchObject({ tab: { id: 5, windowId: 30 }, windowId: 30, windowCreated: false });
   });
 
-  it('sendTabToBack activates a sibling tab of the same window', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
-
-    const activated = await manager.sendTabToBack(5);
-
-    expect(activated).toBe(6);
-    expect(mockChrome.tabs.update).toHaveBeenCalledWith(6, { active: true });
+  it('sendTabToBack never activates a sibling', async () => {
+    expect(await new TabManager().sendTabToBack(5)).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
   });
 
   it('sendTabToBack is a no-op for an already hidden tab', async () => {
@@ -632,7 +632,7 @@ describe('TabManager auto-attach flag', () => {
   });
 
   it('requireTabId (read-only tools) auto-attaches the active tab with the flag set', async () => {
-    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 7, url: 'https://a.example/' }]);
+    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 7, active: true, url: 'https://a.example/' }]);
     const manager = new TabManager();
     const ctx = createToolContext(manager);
 

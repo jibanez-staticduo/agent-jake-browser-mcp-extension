@@ -6,8 +6,12 @@ import type { HandlerContext } from '@/background/tools/handlers/types';
 function contextWith(connectedTabId: number) {
   const closeTab = vi.fn(async (tabId?: number) => tabId ?? connectedTabId);
   const listTabs = vi.fn(async () => [{ id: connectedTabId, url: 'https://a.example/', title: 'a', active: true, connected: true }]);
-  const ctx = { tabManager: { closeTab, listTabs } } as unknown as HandlerContext;
-  return { handlers: createTabHandlers(ctx), closeTab };
+  const createTab = vi.fn(async (url: string, _connect: boolean, windowId?: number) => ({
+    tab: { id: 9, url, title: '', active: false, connected: true, windowId: windowId ?? 50 }, loaded: true, windowId: windowId ?? 50, windowCreated: windowId === undefined,
+  }));
+  const closeWindow = vi.fn(async (windowId: number, tabIds: number[]) => ({ windowId, closed: true, closedTabIds: tabIds }));
+  const ctx = { tabManager: { closeTab, listTabs, createTab, closeWindow } } as unknown as HandlerContext;
+  return { handlers: createTabHandlers(ctx), closeTab, createTab, closeWindow };
 }
 
 describe('browser_close_tab', () => {
@@ -46,6 +50,60 @@ describe('browser_list_tabs', () => {
     expect(answer.closeById).toBe(true);
     expect(answer.tabs.map((t) => t.id)).toEqual([7]);
   });
+
+  it('announces window-per-session and close-window', async () => {
+    const { handlers } = contextWith(7);
+
+    const answer = (await handlers.browser_list_tabs({})) as { closeWindow: boolean; windowPerSession: boolean };
+
+    expect(answer).toMatchObject({ closeWindow: true, windowPerSession: true });
+  });
+});
+
+describe('browser_new_tab', () => {
+  it('without windowId opens a window and says so', async () => {
+    const { handlers, createTab } = contextWith(7);
+
+    const answer = await handlers.browser_new_tab({ url: 'https://a.example/' });
+
+    expect(createTab).toHaveBeenCalledWith('https://a.example/', true, undefined);
+    expect(answer).toMatchObject({ windowId: 50, windowCreated: true, tab: { id: 9, windowId: 50 } });
+    expect(answer).not.toHaveProperty('tab.windowCreated');
+  });
+
+  it('passes the windowId of the session and ignores switchTo', async () => {
+    const { handlers, createTab } = contextWith(7);
+
+    const answer = await handlers.browser_new_tab({ url: 'https://a.example/', windowId: 30, switchTo: true });
+
+    expect(createTab).toHaveBeenCalledWith('https://a.example/', true, 30);
+    expect(answer).toMatchObject({ windowId: 30, windowCreated: false });
+  });
+});
+
+describe('browser_close_window', () => {
+  it('closes the window with the tabs it was given', async () => {
+    const { handlers, closeWindow } = contextWith(7);
+
+    const answer = await handlers.browser_close_window({ windowId: 30, tabIds: [5, 6] });
+
+    expect(closeWindow).toHaveBeenCalledWith(30, [5, 6]);
+    expect(answer).toEqual({ windowId: 30, closed: true, closedTabIds: [5, 6] });
+  });
+
+  it('rejects a payload without tabIds: it would close nothing it was told to', async () => {
+    const { handlers, closeWindow } = contextWith(7);
+
+    await expect(handlers.browser_close_window({ windowId: 30 })).rejects.toThrow();
+    expect(closeWindow).not.toHaveBeenCalled();
+  });
+
+  it('rejects a payload without windowId', async () => {
+    const { handlers, closeWindow } = contextWith(7);
+
+    await expect(handlers.browser_close_window({ tabIds: [5] })).rejects.toThrow();
+    expect(closeWindow).not.toHaveBeenCalled();
+  });
 });
 
 describe('browser_new_tab', () => {
@@ -56,7 +114,7 @@ describe('browser_new_tab', () => {
 
     const answer = await handlers.browser_new_tab({ url: 'https://slow.example/hang' });
 
-    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, false);
+    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, undefined);
     expect(answer).toEqual({ tab, loaded: false });
   });
 });
