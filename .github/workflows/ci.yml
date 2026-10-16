@@ -83,13 +83,15 @@ jobs:
   # Tras cada merge a main se publica la build neutra y firmada en el pod; cada extensión
   # instalada en <Descargas>/agent-jake-browser se reescribe sola desde ella (self-update.ts).
   publicar:
-    name: Publicar la build firmada en el pod
+    name: Publicar la build firmada y desplegarla en x86 y Mac
     needs: [build-test, deltas]
     # Solo push a main. NUNCA pull_request: el secreto de firma y el runner del host no se exponen a PRs.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Runner del x86 solo porque tiene kubectl hacia el pod de agentjake-browser.
     runs-on: [self-hosted, x86, agent-browser]
-    timeout-minutes: 20
+    # Publicar (~1 min de build neutra) + dos syncs, cada uno con su build y su recarga del
+    # navegador, que espera hasta 90 s al service worker (INFRA-858).
+    timeout-minutes: 30
     concurrency: { group: publicar-extension, cancel-in-progress: false }
     permissions: { contents: read }
     steps:
@@ -119,3 +121,18 @@ jobs:
       - name: Publicar
         run: bash scripts/publicar.sh
         env: { AJB_UPDATE_SIGNING_KEY: '${{ secrets.AJB_UPDATE_SIGNING_KEY }}' }
+      - name: Desplegar en x86 y Mac
+        # El zip publicado solo AVISA a quien abre el navegador; los dos navegadores del Dani
+        # (x86 y Mac, instalación descomprimida fuera de Downloads) no se auto-reescriben: los
+        # pone al día agent-browser-sync.sh, que hasta aquí nadie ejecutaba al fusionar. Sin este
+        # paso, un Chrome abierto durante días se queda con la versión vieja aunque el pod ya
+        # anuncie la nueva (INFRA-858). El vigilante (agent-browser-sync-watch.service) sigue
+        # cubriendo el navegador cerrado o dormido: se sincroniza al reconectarse.
+        # Se llama a x86 y Mac sueltos, nunca `all`: `all` volvería a construir y subir el zip que
+        # el paso anterior acaba de publicar.
+        run: |
+          set -euo pipefail
+          sync="$HOME/.local/libexec/x86-host-runtime/agent-browser-sync.sh"
+          [[ -x "$sync" ]] || { echo "falta $sync: el runtime del x86 no está instalado" >&2; exit 1; }
+          bash "$sync" --force x86
+          bash "$sync" --force mac
