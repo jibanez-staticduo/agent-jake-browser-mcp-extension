@@ -276,17 +276,31 @@ function pickFiles() {
   fileInput.value?.click();
 }
 
-async function onFiles(e: Event) {
-  const field = e.target as HTMLInputElement;
-  const chosen = Array.from(field.files ?? []);
-  field.value = '';
+async function addFiles(files: File[]) {
   const rejected: string[] = [];
-  for (const file of chosen) {
+  for (const file of files) {
     const read = await readAttachment(file);
     if ('error' in read) rejected.push(read.error);
     else attachments.value.push(read);
   }
   attachError.value = rejected.join(' · ');
+}
+
+async function onFiles(e: Event) {
+  const field = e.target as HTMLInputElement;
+  const chosen = Array.from(field.files ?? []);
+  field.value = '';
+  await addFiles(chosen);
+}
+
+/** Ctrl+V con una imagen en el portapapeles: entra como adjunto, igual que con el botón +. */
+async function onPaste(e: ClipboardEvent) {
+  const files = Array.from(e.clipboardData?.files ?? []);
+  if (!files.length) return;
+  // Solo imagen en el portapapeles: se traga el pegado (el textarea no pinta nada).
+  // Con texto además, el texto entra normal y la imagen se añade como adjunto.
+  if (!e.clipboardData?.getData('text')) e.preventDefault();
+  await addFiles(files);
 }
 
 function removeAttachment(index: number) {
@@ -674,7 +688,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <p v-if="attachError" class="attach-err" role="alert">{{ attachError }}</p>
         <input ref="fileInput" type="file" multiple hidden @change="onFiles">
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
-          :placeholder="placeholder" @keydown="onKey" />
+          :placeholder="placeholder" @keydown="onKey" @paste="onPaste" />
         <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
         <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Esc para parar)</div>
         <!-- Sin botón de enviar: Enter envía (como en Claude). Los controles son texto e iconos planos. -->
