@@ -787,7 +787,8 @@ button.link.title { color: var(--text-primary); }
 .plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
-footer { display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 18px; border-top: 1px solid var(--border-default); }
+/* Sin línea sobre el campo: partía el panel en dos y no aportaba nada (INFRA-883). */
+footer { display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 18px; }
 .notice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .notice span { color: var(--text-secondary); }
 .notice.err { margin: 0; border-left-color: var(--accent-danger); }

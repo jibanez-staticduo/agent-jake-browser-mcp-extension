@@ -15,7 +15,8 @@
     "activeTab",
     "notifications",
     "downloads",
-    "downloads.ui"
+    "downloads.ui",
+    "microphone"
   ],
   "host_permissions": [
     "<all_urls>"
