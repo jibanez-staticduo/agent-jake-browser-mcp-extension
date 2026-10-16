@@ -6,8 +6,10 @@ import type { HandlerContext } from '@/background/tools/handlers/types';
 function contextWith(connectedTabId: number) {
   const closeTab = vi.fn(async (tabId?: number) => tabId ?? connectedTabId);
   const listTabs = vi.fn(async () => [{ id: connectedTabId, url: 'https://a.example/', title: 'a', active: true, connected: true }]);
-  const ctx = { tabManager: { closeTab, listTabs } } as unknown as HandlerContext;
-  return { handlers: createTabHandlers(ctx), closeTab };
+  const createTab = vi.fn(async () => ({ id: 9, windowId: 30, windowCreated: true }));
+  const closeWindow = vi.fn(async (windowId: number, tabIds: number[]) => ({ windowId, closed: false, closedTabIds: tabIds }));
+  const ctx = { tabManager: { closeTab, listTabs, createTab, closeWindow } } as unknown as HandlerContext;
+  return { handlers: createTabHandlers(ctx), closeTab, createTab, closeWindow };
 }
 
 describe('browser_close_tab', () => {
@@ -47,5 +49,26 @@ describe('browser_list_tabs', () => {
 
     expect(answer.closeById).toBe(true);
     expect(answer.tabs.map((t) => t.id)).toEqual([7]);
+  });
+});
+
+describe('window session protocol', () => {
+  it('announces capabilities and returns additive window metadata', async () => {
+    const { handlers, createTab } = contextWith(7);
+    expect(await handlers.browser_list_tabs({})).toMatchObject({ closeById: true, closeWindow: true, windowPerSession: true });
+    expect(await handlers.browser_new_tab({ url: 'https://a.example', windowId: 30, switchTo: true })).toEqual({ tab: { id: 9, windowId: 30 }, windowId: 30, windowCreated: true });
+    expect(createTab).toHaveBeenCalledWith('https://a.example', true, 30);
+  });
+
+  it.each([{ windowId: 30 }, { windowId: 30, tabIds: [0] }, { tabIds: [5] }, { windowId: '30', tabIds: [5] }])('rejects unsafe cleanup payload %s', async payload => {
+    const { handlers, closeWindow } = contextWith(7);
+    await expect(handlers.browser_close_window(payload)).rejects.toThrow();
+    expect(closeWindow).not.toHaveBeenCalled();
+  });
+
+  it('passes the exact selected tab IDs to cleanup', async () => {
+    const { handlers, closeWindow } = contextWith(7);
+    await handlers.browser_close_window({ windowId: 30, tabIds: [5, 6] });
+    expect(closeWindow).toHaveBeenCalledWith(30, [5, 6]);
   });
 });

@@ -73,7 +73,7 @@ export function createToolContext(tabManager: TabManager): ToolContext {
   async function requireTabId(): Promise<number> {
     let tabId = tabManager.getConnectedTabId();
     if (!tabId) {
-      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const active = (await chrome.tabs.query({ lastFocusedWindow: true })).find(tab => tab.active);
       if (!active?.id) {
         throw new Error('No active tab to attach to');
       }

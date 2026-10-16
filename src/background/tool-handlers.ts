@@ -147,6 +147,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `New tab: ${p?.url || 'unknown'}`;
     case 'browser_switch_tab':
       return `Switch to tab ${p?.tabId}`;
+    case 'browser_close_window':
+      return `Close window ${p?.windowId}`;
     case 'browser_close_tab':
       return 'Close tab';
     case 'browser_evaluate':

@@ -8,6 +8,7 @@ import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER } from '@/constants';
 import { pageEvents } from './page-events';
+import { AgentWindows } from './agent-windows';
 
 export interface CdpStatus {
   connectedTabId: number | null;
@@ -17,6 +18,7 @@ export interface CdpStatus {
 }
 
 export class TabManager {
+  private readonly agentWindows = new AgentWindows();
   private connectedTabId: number | null = null;
   private debuggerAttached = false;
   private captureEvents = false;
@@ -534,7 +536,7 @@ export class TabManager {
    */
   async listTabs(): Promise<TabInfo[]> {
     // Get the active tab in the last focused window (most reliable method)
-    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const currentTab = (await chrome.tabs.query({ lastFocusedWindow: true })).find(tab => tab.active);
     const currentTabId = currentTab?.id;
 
     const tabs = await chrome.tabs.query({});
@@ -546,99 +548,32 @@ export class TabManager {
       // Only mark the specific current tab as active
       active: tab.id === currentTabId,
       connected: tab.id === this.connectedTabId,
+      windowId: tab.windowId,
     }));
   }
 
-  /**
-   * Create a new tab and optionally connect to it.
-   *
-   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
-   * `active: false` would jump the window to the new tab and steal the user's
-   * view. Pass `active: true` only when the user is meant to see it.
-   */
-  async createTab(url: string, connect = true, active = false): Promise<TabInfo> {
-    const tab = await chrome.tabs.create({ url, active });
-
+  /** Create a tab in a verified agent window without changing the user's focus. */
+  async createTab(url: string, connect = true, windowId?: number): Promise<TabInfo & { windowCreated: boolean }> {
+    const { tab, windowCreated } = await this.agentWindows.openTab(url, windowId);
     if (connect && tab.id) {
-      // Wait for tab to finish loading
       await this.waitForTabLoad(tab.id);
       await this.connectTab(tab.id);
     }
-
     return {
-      id: tab.id!,
-      url: tab.url || url,
-      title: tab.title || '',
-      active: tab.active,
-      connected: connect && tab.id === this.connectedTabId,
+      id: tab.id!, url: tab.url || url, title: tab.title || '', active: tab.active,
+      connected: connect && tab.id === this.connectedTabId, windowId: tab.windowId, windowCreated,
     };
   }
 
-  /**
-   * Activate a tab inside its own window (no window focus change).
-   * Returns the tab that was active there before, or null when the tab was
-   * already in front — callers use it as the token for restoreTabBehind.
-   */
-  async bringTabToFront(tabId: number): Promise<number | null> {
-    const tab = await chrome.tabs.get(tabId);
-    const [previous] = await chrome.tabs.query({
-      windowId: tab.windowId,
-      active: true,
+  async closeWindow(windowId: number, tabIds: number[]): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
+    return this.agentWindows.closeWindow(windowId, tabIds, async id => {
+      if (id === this.connectedTabId) await this.disconnectTab();
     });
-    if (previous?.id === tabId) {
-      return null;
-    }
-    await chrome.tabs.update(tabId, { active: true });
-    return previous?.id ?? null;
   }
 
-  /**
-   * Undo a bringTabToFront: put the previously visible tab back, but only if
-   * our tab is still the one in front. If the user switched tabs meanwhile,
-   * their choice wins and we leave it alone.
-   */
-  async restoreTabBehind(tabId: number, previousTabId: number | null): Promise<void> {
-    if (previousTabId === null) {
-      return;
-    }
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      const [current] = await chrome.tabs.query({
-        windowId: tab.windowId,
-        active: true,
-      });
-      if (current?.id !== tabId) {
-        return;
-      }
-      await chrome.tabs.update(previousTabId, { active: true });
-    } catch {
-      // The tab to restore was closed mid-capture; nothing to undo.
-    }
-  }
-
-  /**
-   * Push a tab to the background by activating another tab of its window.
-   * No-op when the tab is already hidden or it is the only tab there.
-   */
-  async sendTabToBack(tabId?: number): Promise<number | null> {
-    const targetId = tabId ?? this.connectedTabId;
-    if (!targetId) {
-      throw new Error('No tab specified and no connected tab');
-    }
-
-    const tab = await chrome.tabs.get(targetId);
-    if (!tab.active) {
-      return null;
-    }
-
-    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
-    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
-    if (!other?.id) {
-      return null;
-    }
-
-    await chrome.tabs.update(other.id, { active: true });
-    return other.id;
+  /** Compatibility operation: agent tools never activate another tab. */
+  async sendTabToBack(_tabId?: number): Promise<number | null> {
+    return null;
   }
 
   /**
@@ -650,7 +585,6 @@ export class TabManager {
     }
 
     await this.connectTab(tabId);
-    await chrome.tabs.update(tabId, { active: true });
   }
 
   /**
@@ -672,6 +606,7 @@ export class TabManager {
     }
 
     await chrome.tabs.remove(targetTabId);
+    await this.agentWindows.prune();
     log.info(`Closed tab: ${targetTabId}`);
     return targetTabId;
   }
@@ -711,6 +646,7 @@ export class TabManager {
           title: tab.title || '',
           active: tab.active,
           connected: false,
+          windowId: tab.windowId,
         };
       }
     };
@@ -755,6 +691,16 @@ export class TabManager {
         }
       };
       chrome.tabs.onUpdated.addListener(listener);
+      // Provenance persistence can outlast a fast page load; subscribe before checking status.
+      chrome.tabs.get(tabId).then(tab => {
+        if (tab.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      }, () => {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      });
     });
   }
 
