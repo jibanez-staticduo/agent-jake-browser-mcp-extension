@@ -100,6 +100,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== COPILOT_PORT) return;
     let controller: AbortController | null = null;
+    let releaseLease: (() => Promise<void>) | null = null;
     const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
 
     const emit = (event: WorkerToPanel) => {
@@ -146,7 +147,6 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
 
       const runController = new AbortController();
       controller = runController;
-      let releaseLease: (() => Promise<void>) | null = null;
       let stopped = false;
       let errorMessage: string | null = null;
       try {
@@ -217,6 +217,13 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       }
     });
 
-    port.onDisconnect.addListener(abortAll);
+    // Cerrar el panel no es detener la ejecución: si la llamada a una herramienta cuelga, el
+    // `finally` del `prompt` nunca llega y la puerta deja el navegador bloqueado para siempre —
+    // ni copiloto ni MCP ni la recarga del despliegue. La liberamos aquí; el `finally` la vuelve a
+    // pedir y su bandera interna la hace idempotente.
+    port.onDisconnect.addListener(() => {
+      abortAll();
+      void releaseLease?.();
+    });
   });
 }

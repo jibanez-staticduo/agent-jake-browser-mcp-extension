@@ -41,16 +41,19 @@ function setup() {
   function panel() {
     const events: WorkerToPanel[] = [];
     let receive!: (message: PanelToWorker) => Promise<void>;
+    let leave!: () => void;
     const port = {
       name: COPILOT_PORT,
       postMessage: (event: WorkerToPanel) => { events.push(event); },
       onMessage: { addListener: (listener: typeof receive) => { receive = listener; } },
-      onDisconnect: { addListener: vi.fn() },
+      onDisconnect: { addListener: (listener: () => void) => { leave = listener; } },
     };
     onConnect.mock.calls[0][0](port);
     return {
       events,
       send: (message: PanelToWorker) => receive(message),
+      // Cerrar el panel: el puerto se va y el `prompt` en curso se queda sin quien le espere.
+      close: () => leave(),
       prompt: (tabId: number) => receive({
         type: 'prompt', history: [], prompt: 'inspect', targetTabId: tabId, mode: 'auto', model: 'chat',
       }),
@@ -110,5 +113,46 @@ describe('Copilot bridge lease', () => {
     expect(getTab()).toBe(1);
     expect(first.events).toContainEqual({ type: 'error', message: 'model down' });
     expect(first.events).toContainEqual({ type: 'done', stopped: false });
+  });
+
+  it('frees the browser when the panel closes on a run that never aborts', async () => {
+    const { panel, gate, getTab } = setup();
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    // Una herramienta colgada: el abort no la interrumpe, así que su `finally` nunca llega.
+    vi.mocked(runAgent).mockImplementation(() => {
+      started();
+      return new Promise<string>(() => {});
+    });
+    const first = panel();
+    void first.prompt(2);
+    await running;
+    expect(getTab()).toBe(2);
+    expect((await gate.handleMcp({ id: 'm1', type: 'browser_type', payload: {} })).error?.code).toBe('COPILOT_BUSY');
+
+    first.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getTab()).toBe(1);
+    expect(await gate.handleMcp({ id: 'm2', type: 'browser_state', payload: {} })).toMatchObject({ result: { tabId: 1 } });
+  });
+
+  it('restores the previous tab once even if the hung run unwinds after the panel closed', async () => {
+    const { panel, tabManager, getTab } = setup();
+    let started!: () => void;
+    let finish!: (value: string) => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    vi.mocked(runAgent).mockImplementation(() => new Promise<string>((resolve) => {
+      started();
+      finish = resolve;
+    }));
+    const first = panel();
+    const turn = first.prompt(2);
+    await running;
+
+    first.close();
+    finish('ok');
+    await turn;
+    expect(getTab()).toBe(1);
+    expect(vi.mocked(tabManager.connectTab).mock.calls.filter(([id]) => id === 1)).toHaveLength(1);
   });
 });
