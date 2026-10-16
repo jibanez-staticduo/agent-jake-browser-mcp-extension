@@ -1,36 +1,14 @@
 import { test, expect, chromium } from '@playwright/test';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { createRequire } from 'node:module';
-// Reuse the WebSocket fixture bundled with Playwright; no runtime product dependency.
-const { wsServer: WebSocketServer } = createRequire(import.meta.url)('../node_modules/playwright-core/lib/utilsBundle.js');
 import { fileURLToPath } from 'node:url';
+import { startBrowserServer } from './helpers/browser-server';
 
 test('session windows survive extension reload and preserve user tabs without changing focus', async () => {
   test.setTimeout(60000);
-  let socket: any;
-  let sequence = 0;
-  const pending = new Map<string, (reply: any) => void>();
-  const server = http.createServer((req, res) => {
-    if (req.url === '/connections') {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ authEnabled: false, connections: [] }));
-    } else {
-      res.writeHead(200, { 'content-type': 'text/html' });
-      res.end('<!doctype html><title>Tab close fixture</title><p>Disposable test tab</p>');
-    }
+  const fixture = await startBrowserServer({
+    prefix: 'tab-close', timeout: 20000,
+    html: () => '<!doctype html><title>Tab close fixture</title><p>Disposable test tab</p>',
   });
-  const wss = new WebSocketServer({ server });
-  wss.on('connection', client => {
-    socket = client;
-    client.on('message', raw => {
-      const reply = JSON.parse(raw.toString());
-      pending.get(reply.id)?.(reply);
-      pending.delete(reply.id);
-    });
-  });
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const { origin, request } = fixture;
   const context = await chromium.launchPersistentContext('', {
     channel: 'chromium', headless: true,
     args: [
@@ -41,21 +19,13 @@ test('session windows survive extension reload and preserve user tabs without ch
       '--disable-features=ExtensionDisableUnsupportedDeveloper',
     ],
   });
-  const request = (type: string, payload: Record<string, unknown>) => {
-    const id = `tab-close-${++sequence}`;
-    return new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Timeout: ${type} ${JSON.stringify(payload)}`)); }, 20000);
-      pending.set(id, reply => { clearTimeout(timer); resolve(reply); });
-      socket!.send(JSON.stringify({ id, type, payload }));
-    });
-  };
   try {
     let worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const popupUrl = `chrome-extension://${new URL(worker.url()).host}/src/sidepanel/index.html`;
     let popup = await context.newPage();
     await popup.goto(popupUrl);
     await popup.evaluate(async serverUrl => chrome.runtime.sendMessage({ action: 'saveServerConfig', payload: { serverUrl, token: '' } }), origin.replace('http:', 'ws:'));
-    await expect.poll(() => socket?.readyState).toBe(1);
+    await expect.poll(() => fixture.socket?.readyState).toBe(1);
     const userPage = await context.newPage();
     await userPage.goto(`${origin}/human`);
     const baseline = await worker.evaluate(async () => (await chrome.windows.getLastFocused()).id);
@@ -80,12 +50,12 @@ test('session windows survive extension reload and preserve user tabs without ch
     expect(await worker.evaluate(async () => (await chrome.windows.getLastFocused()).id)).toBe(baseline);
     const oldTargets = await worker.evaluate(async () => chrome.debugger.getTargets());
     const oldUuid = oldTargets.find(target => target.tabId === firstId)!.id;
-    const previousSocket = socket;
+    const previousSocket = fixture.socket;
     await worker.evaluate(() => setTimeout(() => chrome.runtime.reload(), 0));
     popup = await context.newPage();
     await expect(async () => { await popup.goto(popupUrl); }).toPass({ timeout: 20000 });
     // Observe extension recovery through its page; Playwright can reuse its Worker handle.
-    await expect.poll(() => socket !== previousSocket && socket?.readyState === 1, { timeout: 20000 }).toBe(true);
+    await expect.poll(() => fixture.socket !== previousSocket && fixture.socket?.readyState === 1, { timeout: 20000 }).toBe(true);
     expect((await popup.evaluate(async () => chrome.debugger.getTargets())).find(target => target.tabId === firstId)!.id).toBe(oldUuid);
     const third = await request('browser_new_tab', { url: `${origin}/agent-after-reload`, windowId: agentWindow });
     expect(third).toMatchObject({ success: true, result: { windowId: agentWindow, windowCreated: false } });
@@ -104,8 +74,6 @@ test('session windows survive extension reload and preserve user tabs without ch
     expect(stale.result.windowId).not.toBe(agentWindow);
   } finally {
     await context.close();
-    wss.clients.forEach(client => client.terminate());
-    await new Promise<void>(resolve => wss.close(() => resolve()));
-    await new Promise<void>(resolve => server.close(() => resolve()));
+    await fixture.close();
   }
 });
