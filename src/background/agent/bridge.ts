@@ -17,56 +17,141 @@ import {
   type UserResponse,
   type WorkerToPanel,
 } from '@/types/copilot';
+import { TIMEOUTS } from '@/constants/timeouts';
 import { log } from '@/utils/logger';
 import { AgentStopped, runAgent, type ToolOutcome } from './loop';
 import { formatPageContext } from './context';
 
-type HandleMessage = (message: IncomingMessage) => Promise<OutgoingMessage>;
+type HandleMessage = (message: IncomingMessage, signal?: AbortSignal) => Promise<OutgoingMessage>;
 
 /** Las dos herramientas que se llevan el objetivo a otra pestaña; con la chincheta puesta, no. */
 const LEAVES_TAB = new Set<string>(['browser_switch_tab', 'browser_new_tab']);
+/** They touch no tab and cannot hang (a bounded sleep, the deploy's reload): no queue, no gate. */
+const UNGATED = new Set<string>(['browser_wait', 'browser_reload_extension']);
+/** They pick, list or need no tab, so the copilot's calls go out without its tab (the server's NOT_ROUTED). */
+const NOT_ROUTED = new Set<string>(['browser_new_tab', 'browser_switch_tab', 'browser_list_tabs', ...UNGATED]);
+/** Tab management that names its own tab in `tabId` (the server's NAMES_TAB). */
+const NAMES_TAB = new Set<string>(['browser_switch_tab', 'browser_close_tab', 'browser_send_to_back']);
 
+/** A copilot panel's hold on its tab. */
+export interface CopilotLease {
+  /** The tab it works in; it moves with the copilot's own browser_switch_tab and browser_new_tab. */
+  tabId(): number;
+  exec(name: string, args: Record<string, unknown>): Promise<OutgoingMessage>;
+  /** Gives the browser back as MCP had it and frees the tab. Idempotent. */
+  release(): Promise<void>;
+}
+
+const refusal = (id: string, code: string, message: string): OutgoingMessage => ({ id, success: false, error: { code, message } });
+
+/**
+ * MCP and the copilot panels share one browser that follows a single connected tab, so every call
+ * runs alone, in one queue, and is cut at TIMEOUTS.TOOL_CALL — for MCP counted from its arrival, so
+ * the extension answers before the server gives up. A cut call is fenced (createToolHandlers) and
+ * the queue moves on: a tab that never answers cannot hold the browser (16-10, a click hung on a
+ * frozen tab kept the old in-flight counter up for hours). Each panel holds its own tab: MCP stays
+ * out of that tab, and only of that one.
+ */
 export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: HandleMessage) {
-  let copilotActive = false;
-  let mcpInFlight = 0;
+  const copilotTabs = new Set<number>();
+  let tail: Promise<unknown> = Promise.resolve();
+
+  function queued<T>(job: (signal: AbortSignal) => Promise<T>, expired: () => T, arrivedAt?: number): Promise<T> {
+    const run = async (): Promise<T> => {
+      const left = (arrivedAt ?? Date.now()) + TIMEOUTS.TOOL_CALL - Date.now();
+      if (left <= 0) return expired();
+      const cut = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([job(cut.signal), new Promise<T>((resolve) => { timer = setTimeout(() => resolve(expired()), left); })]);
+      } finally {
+        clearTimeout(timer);
+        // Its turn is over: whatever it left running may not touch the browser again.
+        cut.abort(new Error('CALL_CUT: this call no longer holds the browser'));
+      }
+    };
+    const result = tail.then(run, run);
+    tail = result.catch(() => undefined);
+    return result;
+  }
+
+  const timedOut = (message: IncomingMessage) => (): OutgoingMessage => {
+    log.warn(`[Gate] ${message.type} (${message.id}) cut after ${TIMEOUTS.TOOL_CALL} ms`);
+    return refusal(message.id, 'TIMEOUT', `${message.type} did not finish in ${TIMEOUTS.TOOL_CALL / 1000} s (the page is not answering: frozen or hung). It was cut and does nothing more; retry it, or reload the tab.`);
+  };
+
+  /** The tab an MCP command acts on: null when none, undefined when it would take the user's active tab. */
+  function tabOf({ type, payload }: IncomingMessage): number | null | undefined {
+    if (typeof payload?.targetTabId === 'number') return payload.targetTabId;
+    if (NAMES_TAB.has(type) && typeof payload?.tabId === 'number') return payload.tabId;
+    if (type === 'browser_new_tab' || type === 'browser_list_tabs') return null;
+    return tabManager.getConnectedTabId() ?? undefined;
+  }
 
   return {
-    async handleMcp(message: IncomingMessage): Promise<OutgoingMessage> {
+    handleMcp(message: IncomingMessage): Promise<OutgoingMessage> {
       // La recarga es control del despliegue, no una herramienta: si se gatea, un panel con una
       // aprobación pendiente bloquea para siempre que este navegador se ponga al día (medido 16-10,
       // el primer merge tras INFRA-858: `502 Copilot is using this browser` y el job rojo).
       // Recargar mata el proceso de todos modos, así que no pisa ninguna acción en curso.
-      if (copilotActive && message.type !== 'browser_reload_extension') {
-        return {
-          id: message.id,
-          success: false,
-          error: { code: 'COPILOT_BUSY', message: 'Copilot is using this browser; retry when it finishes.' },
-        };
-      }
-      mcpInFlight++;
-      try {
-        return await handleMessage(message);
-      } finally {
-        mcpInFlight--;
-      }
-    },
-    acquire(): (() => Promise<void>) | null {
-      if (copilotActive || mcpInFlight > 0) return null;
-      copilotActive = true;
-      const previousTabId = tabManager.getConnectedTabId();
-      let released = false;
-      return async () => {
-        if (released) return;
-        released = true;
-        try {
-          const currentTabId = tabManager.getConnectedTabId();
-          if (currentTabId !== previousTabId) {
-            if (previousTabId !== null) await tabManager.connectTab(previousTabId);
-            else if (currentTabId !== null) await tabManager.disconnectTab();
-          }
-        } finally {
-          copilotActive = false;
+      if (UNGATED.has(message.type)) return handleMessage(message);
+      const arrivedAt = Date.now();
+      return queued(async (signal) => {
+        const tab = tabOf(message);
+        if (tab === undefined ? copilotTabs.size > 0 : tab !== null && copilotTabs.has(tab)) {
+          return refusal(message.id, 'COPILOT_BUSY', 'Copilot is using this tab; retry when it finishes.');
         }
+        return handleMessage(message, signal);
+      }, timedOut(message), arrivedAt);
+    },
+
+    acquire(tabId: number): CopilotLease | null {
+      if (copilotTabs.has(tabId)) return null;
+      copilotTabs.add(tabId);
+      let tab = tabId;
+      // What MCP had connected before the copilot last came in: what release gives back.
+      let previous = tabManager.getConnectedTabId();
+      let released = false;
+      return {
+        tabId: () => tab,
+        exec(name, args) {
+          const message: IncomingMessage = {
+            id: `copilot-${++seq}`, type: name as ToolName, payload: NOT_ROUTED.has(name) ? args : { ...args, targetTabId: tab },
+          };
+          if (released) return Promise.resolve(refusal(message.id, 'COPILOT_STOPPED', 'This Copilot run has ended.'));
+          if (UNGATED.has(name)) return handleMessage(message);
+          return queued(async (signal) => {
+            const into = name === 'browser_switch_tab' ? args.tabId : undefined;
+            if (typeof into === 'number' && into !== tab && copilotTabs.has(into)) {
+              return refusal(message.id, 'COPILOT_BUSY', 'Another Copilot panel is working in that tab.');
+            }
+            const before = tabManager.getConnectedTabId();
+            if (before !== tab) previous = before;
+            const response = await handleMessage(message, signal);
+            const moved = name === 'browser_new_tab' ? (response.result as { tab?: { id?: unknown } } | undefined)?.tab?.id : into;
+            if (response.success && !signal.aborted && typeof moved === 'number' && moved !== tab) {
+              copilotTabs.delete(tab);
+              copilotTabs.add(moved);
+              tab = moved;
+            }
+            return response;
+          }, timedOut(message));
+        },
+        release() {
+          if (released) return Promise.resolve();
+          released = true;
+          const free = () => { copilotTabs.delete(tab); };
+          return queued(async () => {
+            try {
+              if (tabManager.getConnectedTabId() === tab && previous !== tab) {
+                if (previous !== null && await tabManager.hasTab(previous)) await tabManager.connectTab(previous);
+                else await tabManager.disconnectTab();
+              }
+            } finally {
+              free();
+            }
+          }, free);
+        },
       };
     },
   };
@@ -95,15 +180,14 @@ let seq = 0;
 
 type BridgeDeps = {
   tabManager: TabManager | null;
-  handleMessage: HandleMessage | null;
-  acquireLease?: () => (() => Promise<void>) | null;
+  acquireLease?: (tabId: number) => CopilotLease | null;
 };
 
 export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void {
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== COPILOT_PORT) return;
     let controller: AbortController | null = null;
-    let releaseLease: (() => Promise<void>) | null = null;
+    let lease: CopilotLease | null = null;
     // La chincheta de la cabecera: con `pinned` el agente no mueve su objetivo a otra pestaña (INFRA-875).
     let pinned = false;
     const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
@@ -134,13 +218,12 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       if (pinned && LEAVES_TAB.has(name)) {
         return { ok: false, error: 'La pestaña está chinchetada: el usuario quiere que trabajes aquí. Pídele que quite la chincheta si necesitas ir a otra.' };
       }
-      const { tabManager, handleMessage } = await getDeps();
-      if (!handleMessage) return { ok: false, error: 'Extension not initialized yet' };
-      const res = await handleMessage({ id: `copilot-${++seq}`, type: name as ToolName, payload: args });
+      const held = lease;
+      if (!held) return { ok: false, error: 'Extension not initialized yet' };
+      const res = await held.exec(name, args);
       // El panel sigue a su pestaña; si el agente se ha ido a otra, hay que decírselo por su nombre.
       if (res.success && LEAVES_TAB.has(name)) {
-        const id = tabManager?.getConnectedTabId() ?? null;
-        const tab = id !== null ? await chrome.tabs.get(id).catch(() => null) : null;
+        const tab = await chrome.tabs.get(held.tabId()).catch(() => null);
         emit({ type: 'target', title: (tab?.title || tab?.url || '').trim() || 'otra pestaña' });
       }
       return res.success ? { ok: true, result: res.result } : { ok: false, error: res.error?.message };
@@ -174,16 +257,13 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
         const { tabManager, acquireLease } = await getDeps();
         if (!tabManager || !acquireLease) throw new Error('Extension not initialized yet');
-        releaseLease = acquireLease();
-        if (!releaseLease) throw new Error('Browser is busy with another Copilot or MCP call; retry when it finishes.');
+        if (msg.targetTabId === null) throw new Error('This panel has no tab to work in; open it again from its tab.');
+        // Every call goes to this tab on its own: one that refuses the debugger (chrome://, the Web
+        // Store) leaves the error in the agent's context, and it can switch or open another tab.
+        const held = acquireLease(msg.targetTabId);
+        if (!held) throw new Error('This tab is busy with another Copilot panel; retry when it finishes.');
+        lease = held;
         if (runController.signal.aborted) throw new AgentStopped();
-        if (msg.targetTabId && tabManager.getConnectedTabId() !== msg.targetTabId) {
-          // chrome:// and the Web Store refuse the debugger: the agent still gets the
-          // tab list and the error in its context, and can switch or open another tab.
-          await tabManager.connectTab(msg.targetTabId).catch((error) => {
-            log.warn('[Copilot] Could not attach target tab:', error);
-          });
-        }
 
         await runAgent(msg.history, msg.prompt, settings, {
           fetch: (input, init) => fetch(input, init),
@@ -192,8 +272,8 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           requestUser,
           signal: runController.signal,
           currentTarget: async () => {
-            const tabId = tabManager.getConnectedTabId();
-            const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
+            const tabId = held.tabId();
+            const tab = await chrome.tabs.get(tabId).catch(() => null);
             return { tabId, origin: originOf(tab?.url) };
           },
           isOriginAllowed: async (origin) => !!origin && (await allowedOrigins()).includes(origin),
@@ -205,11 +285,10 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           },
           getContext: async () => {
             const tabs = await tabManager.listTabs();
-            const targetTabId = tabManager.getConnectedTabId() ?? msg.targetTabId;
             const state = await execTool('browser_state', { max: 120 });
             return formatPageContext({
               tabs,
-              targetTabId,
+              targetTabId: held.tabId(),
               state: state.ok ? String((state.result as { state?: string })?.state ?? '') : null,
               stateError: state.ok ? undefined : state.error,
             });
@@ -224,7 +303,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         }
       } finally {
         try {
-          await releaseLease?.();
+          await lease?.release();
         } catch (error) {
           log.warn('[Copilot] Could not restore the previous tab:', error);
           errorMessage = `Could not restore the previous tab: ${(error as Error).message}`;
@@ -236,13 +315,11 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       }
     });
 
-    // Cerrar el panel no es detener la ejecución: si la llamada a una herramienta cuelga, el
-    // `finally` del `prompt` nunca llega y la puerta deja el navegador bloqueado para siempre —
-    // ni copiloto ni MCP ni la recarga del despliegue. La liberamos aquí; el `finally` la vuelve a
-    // pedir y su bandera interna la hace idempotente.
+    // Cerrar el panel no es detener la ejecución: la pestaña se libera aquí, sin esperar a que el
+    // `prompt` desenrolle; el `finally` la vuelve a pedir y su bandera interna la hace idempotente.
     port.onDisconnect.addListener(() => {
       abortAll();
-      void releaseLease?.();
+      void lease?.release();
     });
   });
 }

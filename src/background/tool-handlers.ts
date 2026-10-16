@@ -78,37 +78,63 @@ export async function routeToTargetTab(
   return rest;
 }
 
+/** What a cut call may still do from its catch/finally: let go of what it took, never act. */
+const LETTING_GO = new Set<PropertyKey>(['stopNewTabDetection', 'endFileChooser']);
+
+/**
+ * The TabManager as one call sees it: once the gate cuts the call (agent/bridge.ts) every method
+ * that acts throws, so a handler that wakes up late — a frozen tab finally answering its content
+ * script, 16-10 — cannot act on the tab another call is using by then.
+ */
+function fencedTabManager(tabManager: TabManager, signal: AbortSignal): TabManager {
+  return new Proxy(tabManager, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const lettingGo = LETTING_GO.has(prop) || (prop === 'setFileChooserInterception' && args[1] === false);
+        if (!lettingGo) signal.throwIfAborted();
+        return value.apply(target, args);
+      };
+    },
+  });
+}
+
 /**
  * Create tool handlers bound to a tab manager.
  */
-export function createToolHandlers(tabManager: TabManager) {
-  const ctx = buildHandlerContext(tabManager);
+export function createToolHandlers(browser: TabManager) {
+  function handlersFor(tabManager: TabManager): Record<string, (payload: unknown) => Promise<unknown>> {
+    const ctx = buildHandlerContext(tabManager);
+    return {
+      ...createNavigationHandlers(ctx),
+      ...createInteractionHandlers(ctx),
+      ...createQueryHandlers(ctx),
+      ...createStateHandlers(ctx),
+      ...createTabHandlers(ctx),
+      ...createUtilityHandlers(ctx),
+      ...createDevtoolsHandlers(ctx),
 
-  const handlers: Record<string, (payload: unknown) => Promise<unknown>> = {
-    ...createNavigationHandlers(ctx),
-    ...createInteractionHandlers(ctx),
-    ...createQueryHandlers(ctx),
-    ...createStateHandlers(ctx),
-    ...createTabHandlers(ctx),
-    ...createUtilityHandlers(ctx),
-    ...createDevtoolsHandlers(ctx),
-
-    // Reload this extension from disk (unpacked build just replaced by a deploy). Answer first,
-    // reload right after: the socket drops and the new service worker reconnects on its own.
-    // Deploys call it through the server's loopback-only POST /extension/reload, so no Chrome
-    // debugging port, screen or human is needed to roll out a new build.
-    browser_reload_extension: async () => {
-      setTimeout(() => chrome.runtime.reload(), 300);
-      return { reloading: true, version: chrome.runtime.getManifest().version };
-    },
-  };
+      // Reload this extension from disk (unpacked build just replaced by a deploy). Answer first,
+      // reload right after: the socket drops and the new service worker reconnects on its own.
+      // Deploys call it through the server's loopback-only POST /extension/reload, so no Chrome
+      // debugging port, screen or human is needed to roll out a new build.
+      browser_reload_extension: async () => {
+        setTimeout(() => chrome.runtime.reload(), 300);
+        return { reloading: true, version: chrome.runtime.getManifest().version };
+      },
+    };
+  }
 
   /**
-   * Handle incoming message from WebSocket.
+   * Handle one call (from the WebSocket or the copilot). `signal` is the gate's cut: when it
+   * aborts, nothing this call left running touches the browser again.
    */
-  return async function handleMessage(message: IncomingMessage): Promise<OutgoingMessage> {
+  return async function handleMessage(message: IncomingMessage, signal = new AbortController().signal): Promise<OutgoingMessage> {
     const { id, type, payload } = message;
     const startTime = performance.now();
+    const tabManager = fencedTabManager(browser, signal);
+    const handlers = handlersFor(tabManager);
 
     log.debug(`[Tool] Received: ${type} (id: ${id})`);
 

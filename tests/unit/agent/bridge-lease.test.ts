@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AgentStopped, runAgent, type ToolOutcome } from '@/background/agent/loop';
+import { AgentStopped, runAgent, type AgentDeps, type ToolOutcome } from '@/background/agent/loop';
 import { createCopilotTrafficGate, registerCopilotBridge } from '@/background/agent/bridge';
 import { COPILOT_PORT, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 import type { TabManager } from '@/background/tab-manager';
+import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 import type { PanelToWorker, WorkerToPanel } from '@/types/copilot';
 
 vi.mock('@/utils/logger', () => ({ log: { warn: vi.fn() } }));
@@ -22,9 +23,14 @@ function setup() {
     getConnectedTabId: vi.fn(() => currentTab),
     connectTab: vi.fn(async (id: number) => { currentTab = id; }),
     disconnectTab: vi.fn(async () => { currentTab = 0; }),
+    hasTab: vi.fn(async () => true),
     listTabs: vi.fn(async () => []),
   } as unknown as TabManager;
-  const handler = vi.fn(async (message: { id: string }) => ({ id: message.id, success: true, result: { tabId: currentTab } }));
+  // Routes like createToolHandlers: a call with a target connects that tab first.
+  const handler = vi.fn(async (message: IncomingMessage, _signal?: AbortSignal): Promise<OutgoingMessage> => {
+    if (typeof message.payload.targetTabId === 'number') currentTab = message.payload.targetTabId;
+    return { id: message.id, success: true, result: { tabId: currentTab } };
+  });
   const gate = createCopilotTrafficGate(tabManager, handler);
   const onConnect = vi.fn();
   vi.stubGlobal('chrome', {
@@ -34,9 +40,7 @@ function setup() {
     })) } },
     tabs: { get: vi.fn(async (id: number) => ({ id, url: `https://tab${id}.test/` })) },
   });
-  registerCopilotBridge(async () => ({
-    tabManager, handleMessage: handler, acquireLease: () => gate.acquire(),
-  }));
+  registerCopilotBridge(async () => ({ tabManager, acquireLease: (tabId) => gate.acquire(tabId) }));
 
   function panel() {
     const events: WorkerToPanel[] = [];
@@ -54,7 +58,7 @@ function setup() {
       send: (message: PanelToWorker) => receive(message),
       // Cerrar el panel: el puerto se va y el `prompt` en curso se queda sin quien le espere.
       close: () => leave(),
-      prompt: (tabId: number, over: Partial<Extract<PanelToWorker, { type: 'prompt' }>> = {}) => receive({
+      prompt: (tabId: number | null, over: Partial<Extract<PanelToWorker, { type: 'prompt' }>> = {}) => receive({
         type: 'prompt', history: [], prompt: 'inspect', targetTabId: tabId, mode: 'auto', model: 'chat', ...over,
       }),
     };
@@ -63,67 +67,104 @@ function setup() {
   return { panel, gate, handler, tabManager, getTab: () => currentTab };
 }
 
+/** A run that reads its page first (the copilot is in its tab from then on) and then does `rest`. */
+function runs(rest: (deps: AgentDeps) => Promise<string>) {
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  vi.mocked(runAgent).mockImplementation(async (_history, _prompt, _settings, deps) => {
+    await deps.execTool('browser_state', {});
+    started();
+    return rest(deps);
+  });
+  return running;
+}
+
+const untilStopped = (deps: AgentDeps) => new Promise<string>((_resolve, reject) => {
+  deps.signal.addEventListener('abort', () => reject(new AgentStopped()), { once: true });
+});
+
 describe('Copilot bridge lease', () => {
-  it('restores the MCP target after stop and rejects MCP while Copilot runs', async () => {
+  it("keeps MCP out of the copilot's tab while it runs, not out of the others, and gives the browser back on stop", async () => {
     const { panel, gate, handler, getTab } = setup();
-    let started!: () => void;
-    const running = new Promise<void>((resolve) => { started = resolve; });
-    vi.mocked(runAgent).mockImplementation(async (_history, _prompt, _settings, deps) => {
-      started();
-      await new Promise<void>((_resolve, reject) => {
-        deps.signal.addEventListener('abort', () => reject(new AgentStopped()), { once: true });
-      });
-      return '';
-    });
+    const running = runs(untilStopped);
     const first = panel();
     const turn = first.prompt(2);
     await running;
     expect(getTab()).toBe(2);
     expect((await gate.handleMcp({ id: 'm1', type: 'browser_type', payload: {} })).error?.code).toBe('COPILOT_BUSY');
-    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'm1' }));
+    expect((await gate.handleMcp({ id: 'm2', type: 'browser_type', payload: { targetTabId: 2 } })).error?.code).toBe('COPILOT_BUSY');
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'm1' }), expect.anything());
 
     await first.send({ type: 'stop' });
     await turn;
     expect(getTab()).toBe(1);
     expect(first.events).toContainEqual({ type: 'done', stopped: true });
-    expect(await gate.handleMcp({ id: 'm2', type: 'browser_state', payload: {} })).toMatchObject({ result: { tabId: 1 } });
+    expect(await gate.handleMcp({ id: 'm3', type: 'browser_state', payload: {} })).toMatchObject({ result: { tabId: 1 } });
   });
 
-  it('does not let a second panel change the target and restores it after an error', async () => {
+  it('lets MCP work in another tab while the copilot runs', async () => {
+    const { panel, gate } = setup();
+    const running = runs(untilStopped);
+    const first = panel();
+    const turn = first.prompt(2);
+    await running;
+    expect(await gate.handleMcp({ id: 'm1', type: 'browser_type', payload: { targetTabId: 5 } })).toMatchObject({ success: true, result: { tabId: 5 } });
+    await first.send({ type: 'stop' });
+    await turn;
+  });
+
+  it('refuses a second panel in the same tab, and an error still gives the browser back', async () => {
     const { panel, getTab, tabManager } = setup();
     let fail!: (error: Error) => void;
-    let started!: () => void;
-    const running = new Promise<void>((resolve) => { started = resolve; });
-    vi.mocked(runAgent).mockImplementation(() => new Promise<string>((_resolve, reject) => {
-      fail = reject;
-      started();
-    }));
+    const running = runs(() => new Promise<string>((_resolve, reject) => { fail = reject; }));
     const first = panel();
     const second = panel();
     const turn = first.prompt(2);
     await running;
 
-    await second.prompt(3);
-    expect(getTab()).toBe(2);
-    expect(tabManager.connectTab).not.toHaveBeenCalledWith(3);
+    await second.prompt(2);
     expect(second.events).toContainEqual({ type: 'error', message: expect.stringContaining('busy') });
 
     fail(new Error('model down'));
     await turn;
     expect(getTab()).toBe(1);
+    expect(tabManager.connectTab).toHaveBeenCalledWith(1);
     expect(first.events).toContainEqual({ type: 'error', message: 'model down' });
     expect(first.events).toContainEqual({ type: 'done', stopped: false });
   });
 
+  it('runs a panel in another tab at the same time, each in its own tab', async () => {
+    const { panel, handler } = setup();
+    const firstRunning = runs(untilStopped);
+    const first = panel();
+    const firstTurn = first.prompt(2);
+    await firstRunning;
+
+    const secondRunning = runs(untilStopped);
+    const second = panel();
+    const secondTurn = second.prompt(3);
+    await secondRunning;
+    expect(handler).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'browser_state', payload: { targetTabId: 3 } }), expect.any(AbortSignal));
+
+    await first.send({ type: 'stop' });
+    await second.send({ type: 'stop' });
+    await Promise.all([firstTurn, secondTurn]);
+    expect(first.events).toContainEqual({ type: 'done', stopped: true });
+    expect(second.events).toContainEqual({ type: 'done', stopped: true });
+  });
+
+  it('refuses a panel without a tab to work in', async () => {
+    const { panel } = setup();
+    const first = panel();
+    await first.prompt(null);
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(first.events).toContainEqual({ type: 'error', message: expect.stringContaining('no tab') });
+  });
+
   it('frees the browser when the panel closes on a run that never aborts', async () => {
     const { panel, gate, getTab } = setup();
-    let started!: () => void;
-    const running = new Promise<void>((resolve) => { started = resolve; });
-    // Una herramienta colgada: el abort no la interrumpe, así que su `finally` nunca llega.
-    vi.mocked(runAgent).mockImplementation(() => {
-      started();
-      return new Promise<string>(() => {});
-    });
+    const running = runs(() => new Promise<string>(() => {}));
     const first = panel();
     void first.prompt(2);
     await running;
@@ -138,13 +179,8 @@ describe('Copilot bridge lease', () => {
 
   it('restores the previous tab once even if the hung run unwinds after the panel closed', async () => {
     const { panel, tabManager, getTab } = setup();
-    let started!: () => void;
     let finish!: (value: string) => void;
-    const running = new Promise<void>((resolve) => { started = resolve; });
-    vi.mocked(runAgent).mockImplementation(() => new Promise<string>((resolve) => {
-      started();
-      finish = resolve;
-    }));
+    const running = runs(() => new Promise<string>((resolve) => { finish = resolve; }));
     const first = panel();
     const turn = first.prompt(2);
     await running;
@@ -152,6 +188,7 @@ describe('Copilot bridge lease', () => {
     first.close();
     finish('ok');
     await turn;
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(getTab()).toBe(1);
     expect(vi.mocked(tabManager.connectTab).mock.calls.filter(([id]) => id === 1)).toHaveLength(1);
   });
@@ -174,12 +211,13 @@ describe('Copilot bridge lease', () => {
     const turn = first.prompt(2, { pinned: true });
     await running;
     expect(outcomes[0]).toEqual({ ok: false, error: expect.stringContaining('chincheta') });
-    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_switch_tab' }));
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_switch_tab' }), expect.anything());
 
     await first.send({ type: 'pin', pinned: false });
     go();
     await turn;
     expect(outcomes[1]).toMatchObject({ ok: true });
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_new_tab' }));
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ type: 'browser_new_tab' }), expect.any(AbortSignal));
+    expect(first.events).toContainEqual({ type: 'target', title: expect.any(String) });
   });
 });

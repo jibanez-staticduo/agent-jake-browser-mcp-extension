@@ -53,7 +53,6 @@ const KEEPALIVE_INTERVAL_MINUTES = 0.2; // 12 seconds
 // Singleton instances
 let wsClient: WebSocketClient | null = null;
 let tabManager: TabManager | null = null;
-let handleToolMessage: ReturnType<typeof createToolHandlers> | null = null;
 let copilotGate: ReturnType<typeof createCopilotTrafficGate> | null = null;
 let initialized: Promise<void> | null = null;
 
@@ -61,7 +60,7 @@ let initialized: Promise<void> | null = null;
 // level, so a wake-up by either event finds the listener in place.
 registerCopilotBridge(async () => {
   await initialized?.catch(() => undefined);
-  return { tabManager, handleMessage: handleToolMessage, acquireLease: () => copilotGate?.acquire() ?? null };
+  return { tabManager, acquireLease: (tabId) => copilotGate?.acquire(tabId) ?? null };
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
@@ -100,7 +99,6 @@ async function initialize(): Promise<void> {
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
-  handleToolMessage = handleMessage;
   copilotGate = createCopilotTrafficGate(tabManager, handleMessage);
   wsClient.setMessageHandler((message) => copilotGate!.handleMcp(message));
 

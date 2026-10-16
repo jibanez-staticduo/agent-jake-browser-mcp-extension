@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCopilotTrafficGate } from '@/background/agent/bridge';
+import { TIMEOUTS } from '@/constants/timeouts';
 import type { TabManager } from '@/background/tab-manager';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 
-const message: IncomingMessage = { id: 'mcp-1', type: 'browser_type', payload: { ref: '1', text: 'x' } };
+vi.mock('@/utils/logger', () => ({ log: { warn: vi.fn() } }));
+
+afterEach(() => vi.useRealTimers());
+
+const mcp = (id: string, payload: Record<string, unknown> = {}, type: IncomingMessage['type'] = 'browser_type'): IncomingMessage =>
+  ({ id, type, payload });
 
 function setup(initialTab: number | null = 1) {
   let currentTab = initialTab;
@@ -11,84 +17,170 @@ function setup(initialTab: number | null = 1) {
     getConnectedTabId: vi.fn(() => currentTab),
     connectTab: vi.fn(async (id: number) => { currentTab = id; }),
     disconnectTab: vi.fn(async () => { currentTab = null; }),
+    hasTab: vi.fn(async () => true),
   } as unknown as TabManager;
-  const handler = vi.fn(async (request: IncomingMessage): Promise<OutgoingMessage> => ({
-    id: request.id, success: true, result: { tabId: currentTab },
-  }));
-  return {
-    tabManager,
-    handler,
-    setTab(id: number | null) { currentTab = id; },
-    getTab() { return currentTab; },
-  };
+  // Routes like createToolHandlers: a call with a target connects that tab first.
+  const handler = vi.fn(async (request: IncomingMessage, _signal?: AbortSignal): Promise<OutgoingMessage> => {
+    if (typeof request.payload.targetTabId === 'number') currentTab = request.payload.targetTabId;
+    return { id: request.id, success: true, result: { tabId: currentTab } };
+  });
+  const gate = createCopilotTrafficGate(tabManager, handler);
+  return { gate, handler, tabManager, setTab(id: number | null) { currentTab = id; }, getTab: () => currentTab };
 }
 
+/** The next handler call never answers until `finish`: a frozen tab. */
+function hang(handler: ReturnType<typeof setup>['handler']) {
+  const held: { finish?: (response: OutgoingMessage) => void; signal?: AbortSignal } = {};
+  handler.mockImplementationOnce((_request, signal) => new Promise<OutgoingMessage>((resolve) => {
+    held.finish = resolve;
+    held.signal = signal;
+  }));
+  return held;
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 describe('Copilot/MCP traffic gate', () => {
-  it('rejects a panel while an MCP call is in flight', async () => {
-    const { tabManager, handler } = setup();
-    let finish!: (response: OutgoingMessage) => void;
-    handler.mockImplementation(() => new Promise<OutgoingMessage>((resolve) => { finish = resolve; }));
-    const gate = createCopilotTrafficGate(tabManager, handler);
-    const call = gate.handleMcp(message);
+  it('cuts a hung call before the server does, fences it and does not run what went stale behind it', async () => {
+    vi.useFakeTimers();
+    const { gate, handler } = setup();
+    const hung = hang(handler);
+    const first = gate.handleMcp(mcp('m1', { targetTabId: 4 }));
+    const second = gate.handleMcp(mcp('m2', { targetTabId: 5 }));
 
-    expect(gate.acquire()).toBeNull();
-    finish({ id: message.id, success: true });
-    await call;
-    const release = gate.acquire();
-    expect(release).not.toBeNull();
-    await release?.();
+    await vi.advanceTimersByTimeAsync(TIMEOUTS.TOOL_CALL);
+    expect(await first).toMatchObject({ id: 'm1', success: false, error: { code: 'TIMEOUT' } });
+    expect(hung.signal?.aborted).toBe(true);
+    expect(TIMEOUTS.TOOL_CALL).toBeLessThan(TIMEOUTS.REQUEST_TIMEOUT);
+    // m2 arrived with m1 and its own deadline ran out in the queue: whoever sent it gave up.
+    expect(await second).toMatchObject({ id: 'm2', success: false, error: { code: 'TIMEOUT' } });
+    expect(handler).toHaveBeenCalledOnce();
+
+    expect(await gate.handleMcp(mcp('m3', { targetTabId: 5 }))).toMatchObject({ success: true, result: { tabId: 5 } });
   });
 
-  it('rejects MCP and a second panel until the previous MCP tab is restored', async () => {
-    const { tabManager, handler, setTab, getTab } = setup(1);
-    const gate = createCopilotTrafficGate(tabManager, handler);
-    const release = gate.acquire();
-    expect(release).not.toBeNull();
-    expect(gate.acquire()).toBeNull();
+  it('never runs two calls at once', async () => {
+    const { gate, handler } = setup();
+    const hung = hang(handler);
+    const first = gate.handleMcp(mcp('m1', { targetTabId: 4 }));
+    const second = gate.handleMcp(mcp('m2', { targetTabId: 5 }));
+    await settle();
+    expect(handler).toHaveBeenCalledOnce();
 
+    hung.finish?.({ id: 'm1', success: true });
+    await first;
+    expect(await second).toMatchObject({ success: true, result: { tabId: 5 } });
+  });
+
+  it('lets a panel start while MCP works in another tab, and its calls wait their turn', async () => {
+    const { gate, handler } = setup(1);
+    const hung = hang(handler);
+    const mcpCall = gate.handleMcp(mcp('m1', { targetTabId: 1 }));
+    await settle();
+
+    const lease = gate.acquire(2);
+    expect(lease).not.toBeNull();
+    const state = lease!.exec('browser_state', { max: 10 });
+    await settle();
+    expect(handler).toHaveBeenCalledOnce();
+
+    hung.finish?.({ id: 'm1', success: true });
+    await mcpCall;
+    expect(await state).toMatchObject({ success: true, result: { tabId: 2 } });
+    expect(handler).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'browser_state', payload: { max: 10, targetTabId: 2 } }), expect.any(AbortSignal));
+  });
+
+  it("keeps MCP out of the copilot's tab, and only out of that one", async () => {
+    const { gate, setTab } = setup(1);
+    const lease = gate.acquire(2)!;
+    await lease.exec('browser_state', {});
+
+    expect(await gate.handleMcp(mcp('m1', { targetTabId: 2 }))).toMatchObject({ success: false, error: { code: 'COPILOT_BUSY' } });
+    expect(await gate.handleMcp(mcp('m2', { targetTabId: 3 }))).toMatchObject({ success: true, result: { tabId: 3 } });
+    // Without a target MCP acts on the connected tab: fine on 3, not on the copilot's.
+    expect(await gate.handleMcp(mcp('m3'))).toMatchObject({ success: true, result: { tabId: 3 } });
     setTab(2);
-    expect(await gate.handleMcp(message)).toEqual({
-      id: message.id, success: false,
-      error: { code: 'COPILOT_BUSY', message: expect.stringContaining('retry') },
-    });
-    expect(handler).not.toHaveBeenCalled();
+    expect(await gate.handleMcp(mcp('m4'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+    // With nothing connected it would take the active tab, the user's: likely the copilot's.
+    setTab(null);
+    expect(await gate.handleMcp(mcp('m5'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+    expect(await gate.handleMcp(mcp('m6', { tabId: 2 }, 'browser_close_tab'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+    expect(await gate.handleMcp(mcp('m7', { url: 'https://a.test/' }, 'browser_new_tab'))).toMatchObject({ success: true });
 
-    await release?.();
-    expect(tabManager.connectTab).toHaveBeenCalledWith(1);
-    expect(getTab()).toBe(1);
-    expect(await gate.handleMcp(message)).toMatchObject({ success: true, result: { tabId: 1 } });
+    await lease.release();
+    expect(await gate.handleMcp(mcp('m8', { targetTabId: 2 }))).toMatchObject({ success: true, result: { tabId: 2 } });
   });
 
-  it('lets the deploy reload through while the copilot is active, and nothing else', async () => {
-    const { tabManager, handler } = setup();
-    const gate = createCopilotTrafficGate(tabManager, handler);
-    const release = gate.acquire();
-    expect(release).not.toBeNull();
-
-    const reload: IncomingMessage = { id: 'mcp-2', type: 'browser_reload_extension', payload: {} };
-    expect(await gate.handleMcp(reload)).toMatchObject({ id: 'mcp-2', success: true });
-    expect(handler).toHaveBeenCalledWith(reload);
-    // El resto del tráfico de herramientas sigue esperando a que el copiloto termine.
-    expect(await gate.handleMcp(message)).toMatchObject({ success: false, error: { code: 'COPILOT_BUSY' } });
-
-    await release?.();
+  it('gives each panel a tab of its own', () => {
+    const { gate } = setup();
+    expect(gate.acquire(2)).not.toBeNull();
+    expect(gate.acquire(2)).toBeNull();
+    expect(gate.acquire(3)).not.toBeNull();
   });
 
-  it('restores the absence of an MCP tab and unlocks even when restore fails', async () => {
+  it('follows the copilot to the tab it switches to or opens, never into another panel', async () => {
+    const { gate, handler } = setup();
+    const lease = gate.acquire(2)!;
+    gate.acquire(9);
+
+    expect(await lease.exec('browser_switch_tab', { tabId: 9 })).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+    expect(await lease.exec('browser_switch_tab', { tabId: 7 })).toMatchObject({ success: true });
+    expect(lease.tabId()).toBe(7);
+    expect(await gate.handleMcp(mcp('m1', { targetTabId: 2 }))).toMatchObject({ success: true });
+    expect(await gate.handleMcp(mcp('m2', { targetTabId: 7 }))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+
+    handler.mockResolvedValueOnce({ id: 'n', success: true, result: { tab: { id: 8 }, loaded: true } });
+    await lease.exec('browser_new_tab', { url: 'https://b.test/' });
+    expect(handler).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'browser_new_tab', payload: { url: 'https://b.test/' } }), expect.any(AbortSignal));
+    expect(lease.tabId()).toBe(8);
+  });
+
+  it('gives the browser back as MCP had it: the tab it last came from, or none, even if that fails', async () => {
+    const { gate, tabManager, getTab } = setup(1);
+    const lease = gate.acquire(2)!;
+    await gate.handleMcp(mcp('m1', { targetTabId: 3 }));
+    await lease.exec('browser_state', {});
+    await lease.release();
+    expect(tabManager.connectTab).toHaveBeenCalledWith(3);
+    expect(getTab()).toBe(3);
+    await lease.release();
+    expect(tabManager.connectTab).toHaveBeenCalledOnce();
+
     const empty = setup(null);
-    const emptyGate = createCopilotTrafficGate(empty.tabManager, empty.handler);
-    const releaseEmpty = emptyGate.acquire();
-    empty.setTab(2);
-    await releaseEmpty?.();
+    const emptyLease = empty.gate.acquire(2)!;
+    await emptyLease.exec('browser_state', {});
+    await emptyLease.release();
     expect(empty.tabManager.disconnectTab).toHaveBeenCalledOnce();
     expect(empty.getTab()).toBeNull();
 
     const broken = setup(1);
-    const brokenGate = createCopilotTrafficGate(broken.tabManager, broken.handler);
-    const releaseBroken = brokenGate.acquire();
-    broken.setTab(2);
+    const brokenLease = broken.gate.acquire(2)!;
+    await brokenLease.exec('browser_state', {});
     vi.mocked(broken.tabManager.connectTab).mockRejectedValueOnce(new Error('tab closed'));
-    await expect(releaseBroken?.()).rejects.toThrow('tab closed');
-    expect(brokenGate.acquire()).not.toBeNull();
+    await expect(brokenLease.release()).rejects.toThrow('tab closed');
+    expect(broken.gate.acquire(2)).not.toBeNull();
+  });
+
+  it('lets the deploy reload and a bounded wait straight through a busy queue', async () => {
+    const { gate, handler } = setup();
+    const lease = gate.acquire(1)!;
+    const hung = hang(handler);
+    const click = lease.exec('browser_click', { ref: '1' });
+    await settle();
+
+    const reload = mcp('r1', {}, 'browser_reload_extension');
+    expect(await gate.handleMcp(reload)).toMatchObject({ id: 'r1', success: true });
+    expect(handler).toHaveBeenLastCalledWith(reload);
+    expect(await gate.handleMcp(mcp('w1', { time: 0 }, 'browser_wait'))).toMatchObject({ success: true });
+    // The copilot's wait does not take its tab either: it would switch it under the call in the queue.
+    expect(await lease.exec('browser_wait', { time: 0 })).toMatchObject({ success: true });
+    expect(handler).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'browser_wait', payload: { time: 0 } }));
+
+    hung.finish?.({ id: 'c', success: true });
+    await click;
+    await lease.release();
+    expect(await lease.exec('browser_state', {})).toMatchObject({ success: false, error: { code: 'COPILOT_STOPPED' } });
   });
 });

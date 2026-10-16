@@ -31,6 +31,12 @@ export const TIMEOUTS = {
    * debugger and install the WebAuthn guard run after it.
    */
   TAB_LOAD_WAIT: 20000,
+
+  /**
+   * Longest a tool call may hold the browser (ms), counted for MCP from its arrival: 2 s under
+   * REQUEST_TIMEOUT, so the extension answers TIMEOUT itself before the server cuts.
+   */
+  TOOL_CALL: 28000,
 } as const;
 
 export type TimeoutKey = keyof typeof TIMEOUTS;
