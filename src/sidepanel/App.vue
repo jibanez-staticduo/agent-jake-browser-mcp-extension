@@ -89,18 +89,12 @@ const missing = computed(() => copilotMissing(settings.value));
 const needsSetup = computed(() => missing.value.length > 0);
 const missingText = computed(() => describeMissing(settings.value));
 const controllable = computed(() => !target.value || isControllable(target.value.url));
-const blockedReason = computed(() => {
-  if (needsSetup.value) return 'Falta configurar el copiloto';
-  if (running.value) return 'Esperando al agente';
-  if (!controllable.value) return 'Esta pestaña no se puede controlar';
-  return '';
-});
 const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
 // Sin botón de enviar, el motivo por el que no se puede enviar se lee en el campo (INFRA-881).
 const placeholder = computed(() => {
   if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
   if (!controllable.value) return 'Esta pestaña no se puede controlar';
-  return running.value ? 'Escribe tu siguiente mensaje' : 'Escribe qué quieres hacer en la pestaña';
+  return running.value ? 'Dile algo ahora: se lo paso entre pasos' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
 const blocks = computed(() => blocksOf(items.value));
@@ -242,7 +236,7 @@ function connect(): chrome.runtime.Port {
 /** `text` sin escribir en el campo: el «Continuar» de un corte por pasos (INFRA-876). */
 function send(text?: string) {
   const written = (text ?? input.value).trim();
-  if ((!written && !attachments.value.length) || blockedReason.value) return;
+  if ((!written && !attachments.value.length) || needsSetup.value || !controllable.value) return;
   const turns = history();
   const images = imageParts(attachments.value);
   const files = attachments.value.filter((a) => a.kind === 'text').map((a) => a.name);
@@ -250,10 +244,15 @@ function send(text?: string) {
   input.value = '';
   attachments.value = [];
   attachError.value = '';
-  agentTab.value = null;
-  running.value = true;
   push({ kind: 'user', text: written, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
   persist();
+  // Con el agente en marcha no se espera: el mensaje entra en la conversación y se le pasa entre pasos.
+  if (running.value) {
+    connect().postMessage({ type: 'steer', prompt, images });
+    return;
+  }
+  agentTab.value = null;
+  running.value = true;
   connect().postMessage({
     type: 'prompt',
     history: turns,
@@ -668,7 +667,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
           :placeholder="placeholder" @keydown="onKey" @paste="onPaste" />
         <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
-        <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Esc para parar)</div>
+        <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Enter para decirle algo · Esc para parar)</div>
         <!-- Sin botón de enviar: Enter envía (como en Claude). Los controles son texto e iconos planos. -->
         <div class="bar">
           <button type="button" class="icon" aria-label="Adjuntar imágenes o ficheros" title="Adjuntar imágenes o ficheros de texto"

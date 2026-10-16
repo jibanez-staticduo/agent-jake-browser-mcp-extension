@@ -191,6 +191,8 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
     // La chincheta de la cabecera: con `pinned` el agente no mueve su objetivo a otra pestaña (INFRA-875).
     let pinned = false;
     const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
+    /** Lo que el usuario escribió con la ejecución en marcha; el bucle lo saca entre pasos. */
+    const steering: { text: string; images?: string[] }[] = [];
 
     const emit = (event: WorkerToPanel) => {
       try {
@@ -244,10 +246,17 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
         pinned = msg.pinned;
         return;
       }
+      if (msg.type === 'steer') {
+        // Sin ejecución en marcha no hay a quién decírselo: el panel ya lo guardó en la
+        // conversación y viaja con el siguiente `prompt` como turno de usuario.
+        if (controller) steering.push({ text: msg.prompt, images: msg.images });
+        return;
+      }
       if (msg.type !== 'prompt' || controller) return;
 
       const runController = new AbortController();
       controller = runController;
+      steering.length = 0;
       pinned = msg.pinned ?? pinned;
       let stopped = false;
       let errorMessage: string | null = null;
@@ -271,6 +280,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           emit,
           requestUser,
           signal: runController.signal,
+          takeSteering: () => steering.splice(0),
           currentTarget: async () => {
             const tabId = held.tabId();
             const tab = await chrome.tabs.get(tabId).catch(() => null);

@@ -149,6 +149,40 @@ describe('copilot agent loop', () => {
     await runAgent([], 'x', settings, deps);
     expect(bodies[0].tools.map((t) => t.function.name)).not.toContain('browser_screenshot');
   });
+
+  // El mensaje llega con la ejecución en marcha: se libera en el enésimo vaciado del bucle.
+  function steerOn(nth: number, text: string) {
+    let calls = 0;
+    let released = false;
+    return () => (++calls === nth && !released ? (released = true, [{ text }]) : []);
+  }
+
+  it('passes a message sent mid-run to the model before the next round', async () => {
+    const { deps, bodies } = makeDeps(
+      [reply(toolCall('c1', 'browser_click', { ref: '1' })), reply({ role: 'assistant', content: 'hecho' })],
+      { takeSteering: steerOn(2, 'usa el carrito, no el formulario') },
+    );
+
+    const text = await runAgent([], 'x', settings, deps);
+
+    expect(text).toBe('hecho');
+    const second = bodies[1].messages;
+    expect(second.at(-2)).toMatchObject({ role: 'tool', tool_call_id: 'c1' });
+    expect(second.at(-1)).toMatchObject({ role: 'user', content: 'usa el carrito, no el formulario' });
+  });
+
+  it('keeps the run open when the user speaks while the answer streams', async () => {
+    const { deps, bodies, fetchMock } = makeDeps(
+      [reply({ role: 'assistant', content: 'primera' }), reply({ role: 'assistant', content: 'hecho' })],
+      { takeSteering: steerOn(2, 'espera, cámbialo') },
+    );
+
+    const text = await runAgent([], 'x', settings, deps);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(text).toBe('hecho');
+    expect(bodies[1].messages.at(-1)).toMatchObject({ role: 'user', content: 'espera, cámbialo' });
+  });
 });
 
 describe('helpers', () => {

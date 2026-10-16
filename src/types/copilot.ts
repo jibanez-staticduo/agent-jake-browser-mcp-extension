@@ -103,6 +103,8 @@ export type PanelToWorker =
   | { type: 'response'; requestId: string; response: UserResponse }
   /** La chincheta de la cabecera: con `pinned` el agente no puede irse a otra pestaña (INFRA-875). */
   | { type: 'pin'; pinned: boolean }
+  /** Lo que el usuario escribe con la ejecución en marcha: entra en la conversación entre pasos. */
+  | { type: 'steer'; prompt: string; images?: string[] }
   | { type: 'stop' };
 
 export type WorkerToPanel =

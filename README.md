@@ -128,6 +128,8 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
     Preguntar, or send feedback and it re-plans.
 - **Interaction**: the agent can `ask_user` (options or free text) and keeps a live
   checklist with `update_plan`, pinned above the composer.
+- **Steering**: while a run is going, Enter does not queue — it drops your message into the
+  conversation and the loop hands it to the model before its next round (attachments included).
 - **Model selector** fed by `GET {endpoint}/models` (embeddings/audio/image filtered out).
 - Streamed answers (text and reasoning) rendered as safe Markdown (everything escaped,
   http(s) links only); tool steps collapse into "N pasos" blocks.

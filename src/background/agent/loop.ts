@@ -23,10 +23,12 @@ import { truncate } from './context';
 export const TOOL_RESULT_MAX_CHARS = 12000;
 
 const BASE_PROMPT = `You are a browser copilot living in the user's Chrome side panel.
-You act on real tabs through the browser_* tools. Every user message carries a <page_context>
-block with the target tab, the open tabs and the target's current state (interactive elements
-with [n] refs): read it before calling tools, and do not call browser_state again unless the page
-may have changed. Refs go stale after navigation or DOM changes — re-read state then.
+You act on real tabs through the browser_* tools. The first user message of a run carries a
+<page_context> block with the target tab, the open tabs and the target's current state
+(interactive elements with [n] refs): read it before calling tools, and do not call browser_state
+again unless the page may have changed. Refs go stale after navigation or DOM changes — re-read state then.
+While you work the user can send more messages without waiting: they are instructions that
+refine or override the original request, not new conversations. Adapt and keep going.
 To work on another tab, browser_switch_tab (or browser_new_tab) first; later tools act on it.
 For tasks with 3 or more steps keep a checklist with update_plan. When the request is ambiguous
 or a choice belongs to the user, ask_user instead of guessing.
@@ -77,6 +79,8 @@ export interface AgentDeps {
   currentTarget: () => Promise<{ tabId: number | null; origin: string }>;
   isOriginAllowed: (origin: string) => Promise<boolean>;
   allowOrigin: (origin: string) => Promise<void>;
+  /** Saca y vacía los mensajes que el usuario escribió con la ejecución en marcha. */
+  takeSteering?: () => { text: string; images?: string[] }[];
 }
 
 export class AgentStopped extends Error {
@@ -249,6 +253,23 @@ export async function runAgent(
     },
   ];
 
+  /**
+   * Lo que el usuario escribió con la ejecución en marcha: entra como turno de usuario normal,
+   * justo antes de la siguiente llamada al modelo. Devuelve cuántos había.
+   */
+  function drainSteering(): number {
+    const pending = deps.takeSteering?.() ?? [];
+    for (const s of pending) {
+      messages.push({
+        role: 'user',
+        content: s.images?.length
+          ? [{ type: 'text' as const, text: s.text }, ...s.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+          : s.text,
+      });
+    }
+    return pending.length;
+  }
+
   /** Meta tools are answered here and by the user; browser tools go to the handlers. */
   async function dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
     if (!agentTools(settings.vision, mode).some((tool) => tool.function.name === name)) {
@@ -317,6 +338,7 @@ export async function runAgent(
   try {
     for (let step = 1; step <= settings.maxSteps; step++) {
       checkAbort(deps.signal);
+      drainSteering();
 
       const reply = await complete(settings, mode, messages, deps);
       const calls = reply.tool_calls ?? [];
@@ -325,6 +347,8 @@ export async function runAgent(
       if (!calls.length) {
         const text = typeof reply.content === 'string' ? reply.content.trim() : '';
         deps.emit({ type: 'assistant', text });
+        // Dijo algo mientras se respondía: no se cierra la respuesta, se le hace caso (otro paso).
+        if (drainSteering()) continue;
         return text;
       }
 
