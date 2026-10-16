@@ -58,6 +58,8 @@ const input = ref('');
 const running = ref(false);
 const target = ref<Target | null>(null);
 const pinned = ref(false);
+/** Nombre de la pestaña a la que el agente se ha ido en esta conversación (chip de la cabecera). */
+const agentTab = ref<string | null>(null);
 const panel = ref<'none' | 'history'>('none');
 const view = ref<'chat' | 'options'>('chat');
 const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
@@ -206,6 +208,9 @@ function onWorker(event: WorkerToPanel) {
       settings.value.mode = event.mode;
       void saveSettings();
       break;
+    case 'target':
+      agentTab.value = event.title;
+      break;
     case 'assistant': {
       const s = streamingItem();
       if (s) {
@@ -257,6 +262,7 @@ function send(text?: string) {
   input.value = '';
   attachments.value = [];
   attachError.value = '';
+  agentTab.value = null;
   running.value = true;
   push({ kind: 'user', text: written, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
   persist();
@@ -541,24 +547,6 @@ onUnmounted(() => {
   port?.disconnect();
 });
 
-function host(url: string): string {
-  try {
-    const u = new URL(url);
-    return /^https?:$/.test(u.protocol) ? u.host || url : url;
-  } catch {
-    return url;
-  }
-}
-
-function pathOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return /^https?:$/.test(u.protocol) && u.pathname !== '/' ? u.pathname : '';
-  } catch {
-    return '';
-  }
-}
-
 function when(ts: number): string {
   return new Date(ts).toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
@@ -589,11 +577,10 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           </svg>
         </button>
       </div>
-      <!-- Una sola línea: el título de la página repite lo que ya dice la dirección (INFRA-876). -->
-      <div class="target" :title="target ? `${target.title}\n${target.url}` : ''">
-        <span class="dot" />
-        <span v-if="target" class="where"><span class="host">{{ host(target.url) }}</span><span class="path">{{ pathOf(target.url) }}</span></span>
-        <span v-else class="muted">Sin pestaña objetivo</span>
+      <!-- Solo cuando el agente se ha ido a otra pestaña: su nombre, no la URL (la línea de la URL
+           repetía la pestaña a la que está pegado el panel). -->
+      <div v-if="agentTab" class="using">
+        <span class="chip">{{ agentTab }}</span>
       </div>
     </header>
 
@@ -744,10 +731,9 @@ header {
 .quiet { border: none; background: none; padding: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
 .quiet.on { color: var(--text-primary); }
 .quiet.warn { color: var(--accent-warning); }
-.target { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, monospace); font-size: 12px; color: var(--text-secondary); }
-.where .host { font-weight: 700; color: var(--text-primary); }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
+/* La pestaña a la que el agente se ha ido, marcada como la ficha de Claude: nombre en pastilla. */
+.using { display: flex; min-width: 0; }
+.chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--accent-primary-dim); border: 1px solid var(--accent-primary); color: var(--text-primary); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
 button.pin { margin-left: auto; flex-shrink: 0; line-height: 0; min-height: 0; padding: 2px 4px; border: none; background: none; color: var(--text-secondary); }
 button.pin.on { color: var(--accent-warning); }
 .warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }

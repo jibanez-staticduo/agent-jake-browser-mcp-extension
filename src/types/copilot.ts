@@ -113,6 +113,8 @@ export type WorkerToPanel =
   | { type: 'request'; requestId: string; request: UserRequest }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'mode'; mode: CopilotMode }
+  /** El agente se ha ido a otra pestaña (switch/new_tab): su título, para marcarla en la cabecera. */
+  | { type: 'target'; title: string }
   // `limit`: el bucle se quedó sin pasos sin cerrar la respuesta; el panel ofrece «Continuar» (INFRA-876).
   | { type: 'assistant'; text: string; limit?: boolean }
   | { type: 'error'; message: string }

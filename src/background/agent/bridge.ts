@@ -134,9 +134,15 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       if (pinned && LEAVES_TAB.has(name)) {
         return { ok: false, error: 'La pestaña está chinchetada: el usuario quiere que trabajes aquí. Pídele que quite la chincheta si necesitas ir a otra.' };
       }
-      const { handleMessage } = await getDeps();
+      const { tabManager, handleMessage } = await getDeps();
       if (!handleMessage) return { ok: false, error: 'Extension not initialized yet' };
       const res = await handleMessage({ id: `copilot-${++seq}`, type: name as ToolName, payload: args });
+      // El panel sigue a su pestaña; si el agente se ha ido a otra, hay que decírselo por su nombre.
+      if (res.success && LEAVES_TAB.has(name)) {
+        const id = tabManager?.getConnectedTabId() ?? null;
+        const tab = id !== null ? await chrome.tabs.get(id).catch(() => null) : null;
+        emit({ type: 'target', title: (tab?.title || tab?.url || '').trim() || 'otra pestaña' });
+      }
       return res.success ? { ok: true, result: res.result } : { ok: false, error: res.error?.message };
     };
 
