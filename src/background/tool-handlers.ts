@@ -168,6 +168,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Snapshot: ${r?.title || 'page'}`;
     case 'browser_new_tab':
       return `New tab: ${p?.url || 'unknown'}`;
+    case 'browser_find_tab':
+      return `Find tabs "${p?.query}"`;
     case 'browser_switch_tab':
       return `Switch to tab ${p?.tabId}`;
     case 'browser_close_window':

@@ -1,5 +1,5 @@
 /**
- * Tab management tool handlers: new_tab, list_tabs, switch_tab, send_to_back, close_tab.
+ * Tab management tool handlers: new_tab, list_tabs, find_tab, switch_tab, send_to_back, close_tab.
  */
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
@@ -16,6 +16,17 @@ export function createTabHandlers(ctx: HandlerContext): HandlerMap {
     // its tab reaper closes nothing on a browser that does not say so.
     browser_list_tabs: async () => {
       return { tabs: await ctx.tabManager.listTabs(), closeById: true, closeWindow: true, windowPerSession: true };
+    },
+
+    // Search, not drive: it names no tab and attaches none, so one caller can look at the browser
+    // without moving anyone else's tab.
+    browser_find_tab: async (payload) => {
+      const { query, limit } = schemas.browser_find_tab.parse(payload);
+      const needle = query.toLowerCase();
+      const found = (await ctx.tabManager.listTabs()).filter(
+        (tab) => tab.title.toLowerCase().includes(needle) || tab.url.toLowerCase().includes(needle)
+      );
+      return { query, total: found.length, tabs: found.slice(0, limit) };
     },
 
     browser_switch_tab: async (payload) => {

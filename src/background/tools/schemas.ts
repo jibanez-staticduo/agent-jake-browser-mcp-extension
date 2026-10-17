@@ -64,6 +64,11 @@ export const schemas = {
     tabId: z.number(),
   }),
 
+  browser_find_tab: z.object({
+    query: z.string().min(1).describe('Text to look for in the title or the URL of a tab (case-insensitive)'),
+    limit: z.number().int().positive().max(50).optional().default(10),
+  }),
+
   browser_send_to_back: z.object({
     tabId: z.number().optional(),
   }),
