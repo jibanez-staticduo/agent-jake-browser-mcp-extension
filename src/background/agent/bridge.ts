@@ -30,8 +30,8 @@ type HandleMessage = (message: IncomingMessage, signal?: AbortSignal) => Promise
 const LEAVES_TAB = new Set<string>(['browser_switch_tab', 'browser_new_tab']);
 /** They touch no tab and cannot hang (a bounded sleep, the deploy's reload): no queue, no gate. */
 const UNGATED = new Set<string>(['browser_wait', 'browser_reload_extension']);
-/** They pick, list or need no tab, so the copilot's calls go out without its tab (the server's NOT_ROUTED). */
-const NOT_ROUTED = new Set<string>(['browser_new_tab', 'browser_switch_tab', 'browser_list_tabs', ...UNGATED]);
+/** They pick, list, search or need no tab, so the copilot's calls go out without its tab (the server's NOT_ROUTED). */
+const NOT_ROUTED = new Set<string>(['browser_new_tab', 'browser_switch_tab', 'browser_list_tabs', 'browser_find_tab', ...UNGATED]);
 /** Tab management that names its own tab in `tabId` (the server's NAMES_TAB). */
 const NAMES_TAB = new Set<string>(['browser_switch_tab', 'browser_close_tab', 'browser_send_to_back']);
 
