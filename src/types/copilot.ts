@@ -28,6 +28,8 @@ export interface CopilotSettings {
   vision: boolean;
   /** Panel view of a turn: 'compact' folds all its activity into one block, 'extended' leaves every step visible. */
   stepsView: 'compact' | 'extended';
+  /** MCP (streamable HTTP) del servidor emparejado: lo que anuncia entra como herramientas. Vacío: sin plugins. */
+  mcpUrl: string;
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
@@ -38,6 +40,7 @@ export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   maxSteps: 30,
   vision: false,
   stepsView: 'compact',
+  mcpUrl: '',
 };
 
 export type CopilotField = 'baseUrl' | 'apiKey' | 'model';

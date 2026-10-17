@@ -16,7 +16,7 @@ import type {
   UserResponse,
   WorkerToPanel,
 } from '@/types/copilot';
-import { agentTools, READ_ONLY_TOOLS } from './tools-catalog';
+import { agentTools, READ_ONLY_TOOLS, type FunctionTool } from './tools-catalog';
 import { isCopilotConfigured } from '@/types/copilot';
 import { truncate } from './context';
 
@@ -81,6 +81,8 @@ export interface AgentDeps {
   allowOrigin: (origin: string) => Promise<void>;
   /** Saca y vacía los mensajes que el usuario escribió con la ejecución en marcha. */
   takeSteering?: () => { text: string; images?: string[] }[];
+  /** Lo que anuncia el servidor MCP emparejado: sus plugins entran como herramientas (INFRA-909). */
+  serverTools?: () => Promise<FunctionTool[]>;
 }
 
 export class AgentStopped extends Error {
@@ -195,6 +197,7 @@ async function complete(
   mode: CopilotMode,
   messages: ChatMessage[],
   deps: AgentDeps,
+  plugins: FunctionTool[],
 ): Promise<ChatMessage> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
@@ -206,7 +209,7 @@ async function complete(
     body: JSON.stringify({
       model: settings.model,
       messages,
-      tools: agentTools(settings.vision, mode),
+      tools: agentTools(settings.vision, mode, plugins),
       tool_choice: 'auto',
       stream: true,
     }),
@@ -240,6 +243,8 @@ export async function runAgent(
 ): Promise<string> {
   if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
   let mode: CopilotMode = settings.mode;
+  // Un servidor sin plugins, caído o sin configurar no rompe el turno: el copiloto sigue con las suyas.
+  const plugins = await deps.serverTools?.().catch(() => []) ?? [];
   const context = await deps.getContext();
   const userText = `${context}\n\n${prompt}`;
   const messages: ChatMessage[] = [
@@ -272,7 +277,7 @@ export async function runAgent(
 
   /** Meta tools are answered here and by the user; browser tools go to the handlers. */
   async function dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
-    if (!agentTools(settings.vision, mode).some((tool) => tool.function.name === name)) {
+    if (!agentTools(settings.vision, mode, plugins).some((tool) => tool.function.name === name)) {
       return { ok: false, error: `Tool unavailable in ${mode} mode: ${name}` };
     }
     if (name === 'update_plan') {
@@ -340,7 +345,7 @@ export async function runAgent(
       checkAbort(deps.signal);
       drainSteering();
 
-      const reply = await complete(settings, mode, messages, deps);
+      const reply = await complete(settings, mode, messages, deps, plugins);
       const calls = reply.tool_calls ?? [];
       messages.push({ role: 'assistant', content: reply.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) });
 

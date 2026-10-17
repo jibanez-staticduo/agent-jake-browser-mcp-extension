@@ -143,6 +143,12 @@ onUnmounted(() => {
           <option value="extended">Extendida — cada paso a la vista</option>
         </select>
       </label>
+      <!-- INFRA-909: la capacidad nueva vive en el servidor; aquí solo se le dice cuál es. -->
+      <label>MCP del servidor (plugins)
+        <input v-model="draft.mcpUrl" type="url" spellcheck="false"
+          placeholder="http://127.0.0.1:8790/browser · vacío: sin plugins">
+        <span class="why">Lo que ese servidor anuncie en tools/list entra como herramienta del copiloto (solo en modo Auto). Sus browser_* se ignoran: el panel ya los ejecuta.</span>
+      </label>
       <div v-if="allowed.length" class="allowed">
         <span>Sitios con permiso permanente (modo Preguntar):</span>
         <div v-for="o in allowed" :key="o" class="origin">

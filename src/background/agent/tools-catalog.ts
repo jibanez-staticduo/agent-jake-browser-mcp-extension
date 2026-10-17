@@ -133,10 +133,27 @@ export const PRESENT_PLAN_TOOL = tool('present_plan',
 
 export const META_TOOLS = new Set(['ask_user', 'update_plan', 'present_plan']);
 
-export function agentTools(vision: boolean, mode: 'ask' | 'auto' | 'plan' = 'auto'): FunctionTool[] {
+/**
+ * Nombres que el panel ya ejecuta por su cuenta. Un servidor MCP anuncia los suyos (sus `browser_*`):
+ * con estos fuera, del servidor solo entran los plugins.
+ */
+export const LOCAL_TOOL_NAMES = new Set(
+  [...AGENT_TOOLS, SCREENSHOT_TOOL, ASK_USER_TOOL, UPDATE_PLAN_TOOL, PRESENT_PLAN_TOOL].map((t) => t.function.name),
+);
+
+/**
+ * `plugins`: lo que anuncia el servidor MCP emparejado (INFRA-909). Solo en `auto`: en `ask` y `plan`
+ * el panel solo lee la página, y un plugin puede escribir fuera de ella.
+ */
+export function agentTools(
+  vision: boolean,
+  mode: 'ask' | 'auto' | 'plan' = 'auto',
+  plugins: FunctionTool[] = [],
+): FunctionTool[] {
   const browser = vision ? [...AGENT_TOOLS, SCREENSHOT_TOOL] : AGENT_TOOLS;
   if (mode === 'plan') {
     return [...browser.filter((t) => READ_ONLY_TOOLS.has(t.function.name)), ASK_USER_TOOL, PRESENT_PLAN_TOOL];
   }
-  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
+  if (mode === 'ask') return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
+  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL, ...plugins.filter((t) => !LOCAL_TOOL_NAMES.has(t.function.name))];
 }

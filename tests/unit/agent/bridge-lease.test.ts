@@ -113,6 +113,42 @@ describe('Copilot bridge lease', () => {
     await turn;
   });
 
+  // INFRA-909: lo que anuncia el servidor son herramientas del copiloto; lo que no es suyo no toca la pestaña.
+  it('sends a plugin call to the server and never to the tab', async () => {
+    const { panel, handler } = setup();
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      [COPILOT_SETTINGS_KEY]: {
+        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: 'https://jake.test/mcp',
+      },
+    });
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: { body?: string }) => {
+      const body = JSON.parse(String(init?.body)) as { id?: number; method: string };
+      seen.push(body.method);
+      const result = body.method === 'tools/list'
+        ? { tools: [{ name: 'delegar', description: 'delegar', inputSchema: { type: 'object', properties: {} } }] }
+        : { content: [{ type: 'text', text: 'trabajo aceptado' }] };
+      return {
+        ok: true, status: 200, headers: new Headers({ 'mcp-session-id': 'sess-1' }),
+        text: async () => JSON.stringify({ jsonrpc: '2.0', id: body.id, result }),
+      };
+    }));
+
+    let outcome!: ToolOutcome;
+    const running = runs(async (deps) => {
+      await deps.serverTools!();
+      outcome = await deps.execTool('delegar', { orden: 'informe' });
+      return 'done';
+    });
+    const first = panel();
+    await first.prompt(2);
+    await running;
+
+    expect(seen).toContain('tools/call');
+    expect(outcome).toEqual({ ok: true, result: 'trabajo aceptado' });
+    expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'delegar' }), expect.anything());
+  });
+
   it('refuses a second panel in the same tab, and an error still gives the browser back', async () => {
     const { panel, getTab, tabManager } = setup();
     let fail!: (error: Error) => void;

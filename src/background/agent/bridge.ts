@@ -20,6 +20,8 @@ import {
 import { TIMEOUTS } from '@/constants/timeouts';
 import { log } from '@/utils/logger';
 import { AgentStopped, runAgent, type ToolOutcome } from './loop';
+import { LOCAL_TOOL_NAMES } from './tools-catalog';
+import { openServer, type ServerPlugin } from './mcp-server';
 import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage, signal?: AbortSignal) => Promise<OutgoingMessage>;
@@ -190,6 +192,9 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
     let lease: CopilotLease | null = null;
     // La chincheta de la cabecera: con `pinned` el agente no mueve su objetivo a otra pestaña (INFRA-875).
     let pinned = false;
+    /** Lo que anuncia el servidor MCP emparejado en este turno, y los nombres que de verdad son suyos. */
+    let plugin: ServerPlugin | null = null;
+    let pluginNames = new Set<string>();
     const pending = new Map<string, { resolve: (r: UserResponse) => void; reject: (e: Error) => void }>();
     /** Lo que el usuario escribió con la ejecución en marcha; el bucle lo saca entre pasos. */
     const steering: { text: string; images?: string[] }[] = [];
@@ -217,6 +222,8 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
       });
 
     const execTool = async (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
+      // Un plugin del servidor no toca esta pestaña: se resuelve antes que lo demás (INFRA-909).
+      if (pluginNames.has(name)) return plugin!.call(name, args);
       if (pinned && LEAVES_TAB.has(name)) {
         return { ok: false, error: 'La pestaña está chinchetada: el usuario quiere que trabajes aquí. Pídele que quite la chincheta si necesitas ir a otra.' };
       }
@@ -281,6 +288,14 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           requestUser,
           signal: runController.signal,
           takeSteering: () => steering.splice(0),
+          serverTools: async () => {
+            if (!settings.mcpUrl) return [];
+            plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal);
+            pluginNames = new Set(
+              plugin.tools.map((t) => t.function.name).filter((n) => !LOCAL_TOOL_NAMES.has(n)),
+            );
+            return plugin.tools;
+          },
           currentTarget: async () => {
             const tabId = held.tabId();
             const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -319,6 +334,8 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           errorMessage = `Could not restore the previous tab: ${(error as Error).message}`;
         }
         controller = null;
+        plugin = null;
+        pluginNames = new Set();
         pending.clear();
         if (errorMessage) emit({ type: 'error', message: errorMessage });
         emit({ type: 'done', stopped });
