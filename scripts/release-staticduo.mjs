@@ -10,6 +10,11 @@ import { zipSync, unzipSync } from 'fflate';
 import { buildUpdateFiles } from './update-files.mjs';
 
 const repo = resolve(fileURLToPath(new URL('..', import.meta.url)));
+// The source archive includes bundled fonts and exceeds Node's default 1 MiB buffer.
+export const CHILD_MAX_BUFFER = 64 * 1024 * 1024;
+export function sourceArchive() {
+  return execFileSync('git', ['archive', 'HEAD'], { cwd: repo, maxBuffer: CHILD_MAX_BUFFER });
+}
 const arg = (name) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1]; };
 const fail = (message) => { throw new Error(message); };
 const within = (base, target) => { const rel = relative(base, target); return !rel.startsWith('..') && !isAbsolute(rel); };
@@ -76,7 +81,7 @@ async function main() {
     const src = join(temp, 'src'), dist = join(temp, 'dist'); mkdirSync(src);
     if (process.argv.includes('--working-tree')) cpSync(repo, src, { recursive: true, filter: (p) => !['.git', 'node_modules', 'dist'].includes(relative(repo, p).split('/')[0]) && !relative(repo, p).split('/').some((n) => n.startsWith('.env')) });
     else {
-      const archive = execFileSync('git', ['archive', 'HEAD'], { cwd: repo });
+      const archive = sourceArchive();
       execFileSync('tar', ['-x', '-C', src], { input: archive });
     }
     // Even committed environment files must not seed the neutral artifact.
@@ -86,7 +91,7 @@ async function main() {
     for (const name of Object.keys(env)) if (name.startsWith('VITE_') || name.startsWith('AJB_UPDATE_')) delete env[name];
     Object.assign(env, { VITE_BUILD_NUMBER: String(build), VITE_BUILD_SHA: sha, VITE_LATEST_URL: latestUrl });
     if (test) env.VITE_UPDATE_PUBLIC_KEY = testPub;
-    execFileSync(join(repo, 'node_modules/.bin/vite'), ['build', '--outDir', dist, '--emptyOutDir'], { cwd: src, env, stdio: 'pipe' });
+    execFileSync(join(repo, 'node_modules/.bin/vite'), ['build', '--outDir', dist, '--emptyOutDir'], { cwd: src, env, stdio: 'pipe', maxBuffer: CHILD_MAX_BUFFER });
     rmSync(join(dist, '.vite'), { recursive: true, force: true });
     rmSync(join(dist, 'config.json'), { force: true });
     const manifestPath = join(dist, 'manifest.json'), manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
