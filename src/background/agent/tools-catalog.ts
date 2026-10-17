@@ -39,7 +39,7 @@ export const AGENT_TOOLS: FunctionTool[] = [
     'Full ARIA snapshot of the page (all frames). Expensive: use only when browser_state is not enough.'),
   tool('browser_get_text', 'Text content of an element.', { ref }, ['ref']),
   tool('browser_click', 'Click an element.', { ref }, ['ref']),
-  tool('browser_type', 'Type text into an input. Typing APPENDS to what is already there: pass clear:true to replace the current value.',
+  tool('browser_type', 'Type text into an input. Works in a BACKGROUND tab: do not switch to it first. Typing APPENDS to what is already there: pass clear:true to replace the current value. If the keys do not land, the value is set from inside the page and the answer says fallback:"native-setter".',
     { ref, text: { type: 'string' }, clear: { type: 'boolean', description: 'Clear the field first (use it unless you mean to append)' } },
     ['ref', 'text']),
   tool('browser_press_key', 'Press a key on the focused element ("Enter", "Tab", "Escape", "ArrowDown", "a").',
@@ -64,7 +64,7 @@ export const AGENT_TOOLS: FunctionTool[] = [
         },
       },
     }, ['fields']),
-  tool('browser_navigate', 'Navigate the connected tab to a URL.', { url: { type: 'string' } }, ['url']),
+  tool('browser_navigate', 'Navigate to a URL. Never drives the tab the user is looking at: with no tab connected, or only the user\'s tab auto-attached, it opens a NEW background tab, connects to it and returns its tabId. A tab you opened or switched to navigates in place.', { url: { type: 'string' } }, ['url']),
   tool('browser_go_back', 'Navigate back in history.'),
   tool('browser_go_forward', 'Navigate forward in history.'),
   tool('browser_reload', 'Reload the page.'),
@@ -72,7 +72,9 @@ export const AGENT_TOOLS: FunctionTool[] = [
   tool('browser_wait_for_element', 'Wait until an element exists.',
     { ref, timeout: { type: 'number', description: 'ms, default 10000' } }, ['ref']),
   tool('browser_list_tabs', 'List open tabs with id, url, title, active and connected flags.'),
-  tool('browser_switch_tab', 'Connect to another tab: later tools act on it.', { tabId: { type: 'number' } }, ['tabId']),
+  tool('browser_find_tab', 'Find open tabs whose title or URL contains a query (case-insensitive), by id. It reads every tab and touches none: nothing is attached or brought to the front.',
+    { query: { type: 'string' }, limit: { type: 'number', description: 'matches to return, 10 by default' } }, ['query']),
+  tool('browser_switch_tab', 'Connect to another tab: later tools act on it. It also BRINGS the tab to the front: not needed to type or click in a background tab, so use it only when the user must see that tab.', { tabId: { type: 'number' } }, ['tabId']),
   tool('browser_new_tab', 'Open a URL in a new background tab and connect to it.',
     { url: { type: 'string' }, switchTo: { type: 'boolean', description: 'Accepted for compatibility; tabs always open without focus' } }, ['url']),
   tool('browser_close_tab', 'Close the connected tab.'),
@@ -93,6 +95,7 @@ export const READ_ONLY_TOOLS = new Set([
   'browser_snapshot',
   'browser_get_text',
   'browser_list_tabs',
+  'browser_find_tab',
   'browser_switch_tab',
   'browser_wait',
   'browser_wait_for_element',
@@ -133,10 +136,29 @@ export const PRESENT_PLAN_TOOL = tool('present_plan',
 
 export const META_TOOLS = new Set(['ask_user', 'update_plan', 'present_plan']);
 
-export function agentTools(vision: boolean, mode: 'ask' | 'auto' | 'plan' = 'auto'): FunctionTool[] {
+/**
+ * Nombres que el panel ya ejecuta por su cuenta. Un servidor MCP anuncia los suyos (sus `browser_*`):
+ * con estos fuera, del servidor solo entran los plugins.
+ */
+export const INTERNAL_TOOL_NAMES = new Set(['browser_read_secret']);
+
+export const LOCAL_TOOL_NAMES = new Set(
+  [...AGENT_TOOLS, SCREENSHOT_TOOL, ASK_USER_TOOL, UPDATE_PLAN_TOOL, PRESENT_PLAN_TOOL].map((t) => t.function.name),
+);
+
+/**
+ * `plugins`: lo que anuncia el servidor MCP emparejado (INFRA-909). Solo en `auto`: en `ask` y `plan`
+ * el panel solo lee la página, y un plugin puede escribir fuera de ella.
+ */
+export function agentTools(
+  vision: boolean,
+  mode: 'ask' | 'auto' | 'plan' = 'auto',
+  plugins: FunctionTool[] = [],
+): FunctionTool[] {
   const browser = vision ? [...AGENT_TOOLS, SCREENSHOT_TOOL] : AGENT_TOOLS;
   if (mode === 'plan') {
     return [...browser.filter((t) => READ_ONLY_TOOLS.has(t.function.name)), ASK_USER_TOOL, PRESENT_PLAN_TOOL];
   }
-  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
+  if (mode === 'ask') return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
+  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL, ...plugins.filter((t) => !LOCAL_TOOL_NAMES.has(t.function.name) && !INTERNAL_TOOL_NAMES.has(t.function.name))];
 }

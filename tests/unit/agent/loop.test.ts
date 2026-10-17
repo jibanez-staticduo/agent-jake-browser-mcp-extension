@@ -67,7 +67,7 @@ describe('copilot agent loop', () => {
     const second = bodies[1].messages;
     expect(second.at(-1)).toMatchObject({ role: 'tool', tool_call_id: 'c1', content: '{"clicked":true}' });
 
-    expect(events.map((e) => e.type)).toEqual(['step', 'tool_call', 'tool_result', 'step', 'assistant']);
+    expect(events.map((e) => e.type)).toEqual(['tool_call', 'tool_result', 'assistant']);
   });
 
   it('reports tool errors to the model instead of failing', async () => {
@@ -92,14 +92,15 @@ describe('copilot agent loop', () => {
     expect(String(bodies[1].messages.at(-1)?.content)).toMatch(/^Error: /);
   });
 
-  it('stops at maxSteps', async () => {
+  it('stops at maxSteps and tells the panel to offer a continue', async () => {
     const replies = Array.from({ length: 3 }, (_, i) => reply(toolCall(`c${i}`, 'browser_state', {})));
-    const { deps, fetchMock } = makeDeps(replies);
+    const { deps, events, fetchMock } = makeDeps(replies);
 
     const text = await runAgent([], 'loop', { ...settings, maxSteps: 3 }, deps);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(text).toMatch(/Stopped after 3 steps/);
+    expect(events.at(-1)).toMatchObject({ type: 'assistant', limit: true });
   });
 
   it('aborts between tools', async () => {
@@ -147,6 +148,40 @@ describe('copilot agent loop', () => {
     const { deps, bodies } = makeDeps([reply({ role: 'assistant', content: 'ok' })]);
     await runAgent([], 'x', settings, deps);
     expect(bodies[0].tools.map((t) => t.function.name)).not.toContain('browser_screenshot');
+  });
+
+  // El mensaje llega con la ejecución en marcha: se libera en el enésimo vaciado del bucle.
+  function steerOn(nth: number, text: string) {
+    let calls = 0;
+    let released = false;
+    return () => (++calls === nth && !released ? (released = true, [{ text }]) : []);
+  }
+
+  it('passes a message sent mid-run to the model before the next round', async () => {
+    const { deps, bodies } = makeDeps(
+      [reply(toolCall('c1', 'browser_click', { ref: '1' })), reply({ role: 'assistant', content: 'hecho' })],
+      { takeSteering: steerOn(2, 'usa el carrito, no el formulario') },
+    );
+
+    const text = await runAgent([], 'x', settings, deps);
+
+    expect(text).toBe('hecho');
+    const second = bodies[1].messages;
+    expect(second.at(-2)).toMatchObject({ role: 'tool', tool_call_id: 'c1' });
+    expect(second.at(-1)).toMatchObject({ role: 'user', content: 'usa el carrito, no el formulario' });
+  });
+
+  it('keeps the run open when the user speaks while the answer streams', async () => {
+    const { deps, bodies, fetchMock } = makeDeps(
+      [reply({ role: 'assistant', content: 'primera' }), reply({ role: 'assistant', content: 'hecho' })],
+      { takeSteering: steerOn(2, 'espera, cámbialo') },
+    );
+
+    const text = await runAgent([], 'x', settings, deps);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(text).toBe('hecho');
+    expect(bodies[1].messages.at(-1)).toMatchObject({ role: 'user', content: 'espera, cámbialo' });
   });
 });
 

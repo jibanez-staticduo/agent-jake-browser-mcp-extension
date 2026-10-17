@@ -5,6 +5,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { sendMessage } from './index';
 import type { ActivityEntry, ActivityLogResponse, ActivityFilter } from '../types';
+import { usePolling } from '../composables/usePolling';
 
 export const useActivityStore = defineStore('activity', () => {
   // State
@@ -14,7 +15,6 @@ export const useActivityStore = defineStore('activity', () => {
   const modalOpen = ref(false);
 
   // Polling
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
   // Computed
   const filtered = computed<ActivityEntry[]>(() => {
@@ -71,17 +71,7 @@ export const useActivityStore = defineStore('activity', () => {
     modalOpen.value = false;
   }
 
-  function startPolling(): void {
-    refresh();
-    pollInterval = setInterval(() => refresh(), 2000);
-  }
-
-  function stopPolling(): void {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
+  const { startPolling, stopPolling } = usePolling(refresh);
 
   return {
     // State

@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 
 # Build output
 dist/
@@ -32,3 +32,5 @@ coverage/
 # built extension download artifacts
 agent-jake-browser-mcp-extension-*.zip
 dist/
+
+.company/

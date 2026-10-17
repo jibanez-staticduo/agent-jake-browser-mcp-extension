@@ -15,6 +15,19 @@ export const CONFIG = {
   // Shared secret with the server (compiled in via VITE_WS_TOKEN).
   WS_TOKEN: import.meta.env.VITE_WS_TOKEN ?? '',
 
+  // Copilot settings seeded at build time by host builds only (agent-browser-sync, until it is retired;
+  // background/provision.ts). The published build leaves them empty; the key is set in Options.
+  // The key is never in the repo: the host's sync script reads it from a local file.
+  COPILOT_BASE_URL: import.meta.env.VITE_COPILOT_BASE_URL ?? '',
+  COPILOT_API_KEY: import.meta.env.VITE_COPILOT_API_KEY ?? '',
+
+  // Build identity for the update check (vite.config.ts fills them from git).
+  BUILD_NUMBER: Number(import.meta.env.VITE_BUILD_NUMBER || 0),
+  BUILD_SHA: import.meta.env.VITE_BUILD_SHA ?? '',
+  // Where to read the newest published build. Empty: derived from the server URL; a browser
+  // whose server is local (127.0.0.1) needs it set at build time to the central one.
+  LATEST_URL: import.meta.env.VITE_LATEST_URL ?? '',
+
   // Reconnection settings
   RECONNECT_INTERVAL_MS: 5000,  // Check every 5 seconds (fixed, no backoff)
   MAX_RECONNECT_ATTEMPTS: 0,    // 0 = unlimited retries

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "Agent Jake Browser MCP",
-  "version": "2.5.0",
-  "description": "Browser automation extension for AI agents via Model Context Protocol",
+  "version": "2.6.0",
+  "description": "Control del navegador para agentes locales \u2014 DOM-first, WS local con token",
   "permissions": [
     "alarms",
     "debugger",
@@ -12,7 +12,11 @@
     "storage",
     "tabs",
     "webNavigation",
-    "activeTab"
+    "activeTab",
+    "notifications",
+    "downloads",
+    "downloads.ui",
+    "microphone"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -34,7 +38,6 @@
     }
   ],
   "action": {
-    "default_popup": "src/popup/index.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

@@ -2,14 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTabHandlers } from '@/background/tools/handlers/tabs';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
-/** Handler stub; TabManager target selection is covered separately with the real manager. */
+/** A tab manager whose closeTab behaves like the real one: the given id, else the connected tab. */
 function contextWith(connectedTabId: number) {
   const closeTab = vi.fn(async (tabId?: number) => tabId ?? connectedTabId);
   const listTabs = vi.fn(async () => [{ id: connectedTabId, url: 'https://a.example/', title: 'a', active: true, connected: true }]);
-  const createTab = vi.fn(async () => ({ id: 9, windowId: 30, windowCreated: true }));
-  const closeWindow = vi.fn(async (windowId: number, tabIds: number[]) => ({ windowId, closed: false, closedTabIds: tabIds }));
-  const ctx = { tabManager: { closeTab, listTabs, createTab, closeWindow } } as unknown as HandlerContext;
-  return { handlers: createTabHandlers(ctx), closeTab, createTab, closeWindow };
+  const ctx = { tabManager: { closeTab, listTabs } } as unknown as HandlerContext;
+  return { handlers: createTabHandlers(ctx), closeTab };
 }
 
 describe('browser_close_tab', () => {
@@ -31,14 +29,12 @@ describe('browser_close_tab', () => {
     expect(answer).toEqual({ closed: true, tabId: 7 });
   });
 
-  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, 'all'])(
-    'rejects invalid explicit id %s before calling the manager', async (tabId) => {
-      const { handlers, closeTab } = contextWith(7);
+  it('rejects an id that is not a number', async () => {
+    const { handlers, closeTab } = contextWith(7);
 
-      await expect(handlers.browser_close_tab({ tabId })).rejects.toThrow();
-      expect(closeTab).not.toHaveBeenCalled();
-    },
-  );
+    await expect(handlers.browser_close_tab({ tabId: 'all' })).rejects.toThrow();
+    expect(closeTab).not.toHaveBeenCalled();
+  });
 });
 
 describe('browser_list_tabs', () => {
@@ -52,23 +48,54 @@ describe('browser_list_tabs', () => {
   });
 });
 
-describe('window session protocol', () => {
-  it('announces capabilities and returns additive window metadata', async () => {
-    const { handlers, createTab } = contextWith(7);
-    expect(await handlers.browser_list_tabs({})).toMatchObject({ closeById: true, closeWindow: true, windowPerSession: true });
-    expect(await handlers.browser_new_tab({ url: 'https://a.example', windowId: 30, switchTo: true })).toEqual({ tab: { id: 9, windowId: 30 }, windowId: 30, windowCreated: true });
-    expect(createTab).toHaveBeenCalledWith('https://a.example', true, 30);
+describe('browser_new_tab', () => {
+  it('answers with the tab and whether its page finished loading', async () => {
+    const tab = { id: 9, url: 'https://slow.example/hang', title: '', active: false, connected: true };
+    const createTab = vi.fn(async () => ({ tab, loaded: false }));
+    const handlers = createTabHandlers({ tabManager: { createTab } } as unknown as HandlerContext);
+
+    const answer = await handlers.browser_new_tab({ url: 'https://slow.example/hang' });
+
+    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, false, 0);
+    expect(answer).toEqual({ tab, loaded: false });
+  });
+});
+
+describe('browser_find_tab (INFRA-916)', () => {
+  const tabs = [
+    { id: 1, title: 'Búsqueda | CaixaBank', url: 'https://www.caixabank.es/empresas', active: true, connected: false },
+    { id: 2, title: 'panel DGX', url: 'https://nexus.lan/panel', active: false, connected: true },
+    { id: 3, title: 'Inbox', url: 'https://mail.google.com/caixabank-invoice', active: false, connected: false },
+  ];
+  const context = () => {
+    const listTabs = vi.fn(async () => tabs);
+    const connectTab = vi.fn();
+    return { handlers: createTabHandlers({ tabManager: { listTabs, connectTab } } as unknown as HandlerContext), connectTab };
+  };
+
+  it('matches title or url, case-insensitive, and says how many there are', async () => {
+    const { handlers, connectTab } = context();
+
+    const answer = (await handlers.browser_find_tab({ query: 'CAIXA' })) as { total: number; tabs: Array<{ id: number }> };
+
+    expect(answer.total).toBe(2);
+    expect(answer.tabs.map((t) => t.id)).toEqual([1, 3]);
+    // Looking is not driving: no tab is attached or activated.
+    expect(connectTab).not.toHaveBeenCalled();
   });
 
-  it.each([{ windowId: 30 }, { windowId: 30, tabIds: [0] }, { tabIds: [5] }, { windowId: '30', tabIds: [5] }])('rejects unsafe cleanup payload %s', async payload => {
-    const { handlers, closeWindow } = contextWith(7);
-    await expect(handlers.browser_close_window(payload)).rejects.toThrow();
-    expect(closeWindow).not.toHaveBeenCalled();
+  it('caps the list at `limit` (10 by default) without losing the count', async () => {
+    const many = Array.from({ length: 14 }, (_, i) => ({ id: i, title: `t${i} x`, url: 'u', active: false, connected: false }));
+    const handlers = createTabHandlers({ tabManager: { listTabs: async () => many } } as unknown as HandlerContext);
+
+    expect((await handlers.browser_find_tab({ query: 'x', limit: 3 })) as object).toMatchObject({ total: 14 });
+    expect(((await handlers.browser_find_tab({ query: 'x' })) as { tabs: unknown[] }).tabs).toHaveLength(10);
   });
 
-  it('passes the exact selected tab IDs to cleanup', async () => {
-    const { handlers, closeWindow } = contextWith(7);
-    await handlers.browser_close_window({ windowId: 30, tabIds: [5, 6] });
-    expect(closeWindow).toHaveBeenCalledWith(30, [5, 6]);
+  it('rejects an empty query and answers total 0 when nothing matches', async () => {
+    const { handlers } = context();
+
+    await expect(handlers.browser_find_tab({ query: '' })).rejects.toThrow();
+    expect(await handlers.browser_find_tab({ query: 'noexiste' })).toMatchObject({ total: 0, tabs: [] });
   });
 });

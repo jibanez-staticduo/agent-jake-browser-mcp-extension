@@ -72,7 +72,8 @@ test('fresh authenticated install pairs and reconnects without console errors', 
     worker.on('console', observe);
     const extensionId = new URL(worker.url()).host;
     const popup = await context.newPage();
-    await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+    await popup.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await popup.getByRole('button', { name: /^Opciones/ }).click();
     await expect.poll(() => otp).not.toBe('');
     await expect(popup.getByRole('button', { name: 'Esperando' })).toBeVisible();
     // A rejected upgrade catches browser-generated errors even before observers attach.
@@ -80,13 +81,14 @@ test('fresh authenticated install pairs and reconnects without console errors', 
     expect(authorizedUpgrades).toBe(0);
     approved = true;
     await expect.poll(() => authorizedUpgrades).toBe(1);
-    await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+    await expect(popup.locator('.mcp-indicator .indicator-value')).toHaveText('CONECTADO');
     const deviceName = 'Fedora QA & Chrome <personal>';
     await popup.getByLabel('Nombre del equipo / navegador').fill(deviceName);
-    await popup.getByRole('button', { name: 'Guardar', exact: true }).click();
+    await popup.getByRole('button', { name: 'Guardar servidor', exact: true }).click();
     await expect.poll(() => labels.at(-1)).toBe(deviceName);
     await popup.reload();
-    await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+    await popup.getByRole('button', { name: /^Opciones/ }).click();
+    await expect(popup.locator('.mcp-indicator .indicator-value')).toHaveText('CONECTADO');
     await expect(popup.getByLabel('Nombre del equipo / navegador')).toHaveValue(deviceName);
     const countBeforeReload = authorizedUpgrades;
     const reload = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'saveServerConfig', payload: {} }));
@@ -95,7 +97,7 @@ test('fresh authenticated install pairs and reconnects without console errors', 
     sockets.clients.forEach(socket => socket.close(1001, 'fixture restart'));
     await expect.poll(() => authorizedUpgrades, { timeout: 15000 }).toBe(countBeforeReload + 2);
     expect(labels.at(-1)).toBe(deviceName);
-    await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+    await expect(popup.locator('.mcp-indicator .indicator-value')).toHaveText('CONECTADO');
     expect(unauthorizedUpgrades).toBe(0);
     expect(errors).toEqual([]);
     expect(diagnostics.some(message => message.includes(token))).toBe(false);

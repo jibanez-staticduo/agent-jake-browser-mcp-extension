@@ -24,7 +24,20 @@ import {
   startPairing,
 } from './pairing';
 import { log } from '@/utils/logger';
+import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
+import { disablePanelByDefault, openPanelForTab } from './panel-open';
+import {
+  UPDATE_ALARM,
+  UPDATE_NOTIFICATION_ID,
+  UPDATE_PERIOD_MINUTES,
+  UPDATE_STATE_KEY,
+  checkForUpdate,
+  chromeUpdateDeps,
+  latestUrlFor,
+  type UpdateState,
+} from './update-check';
+import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, restoreDownloadUi } from './self-update';
 import {
   buildDisplayUrl,
   getEffectiveConfig,
@@ -42,7 +55,6 @@ const KEEPALIVE_INTERVAL_MINUTES = 0.2; // 12 seconds
 // Singleton instances
 let wsClient: WebSocketClient | null = null;
 let tabManager: TabManager | null = null;
-let handleToolMessage: ReturnType<typeof createToolHandlers> | null = null;
 let copilotGate: ReturnType<typeof createCopilotTrafficGate> | null = null;
 let initialized: Promise<void> | null = null;
 
@@ -50,17 +62,20 @@ let initialized: Promise<void> | null = null;
 // level, so a wake-up by either event finds the listener in place.
 registerCopilotBridge(async () => {
   await initialized?.catch(() => undefined);
-  return { tabManager, handleMessage: handleToolMessage, acquireLease: () => copilotGate?.acquire() ?? null };
+  return { tabManager, acquireLease: (tabId) => copilotGate?.acquire(tabId) ?? null };
 });
 
 chrome.commands.onCommand.addListener((command, tab) => {
-  // No await before open(): the shortcut's user gesture must still be live.
-  if (command === 'open-copilot' && tab?.windowId !== undefined) {
-    chrome.sidePanel.open({ windowId: tab.windowId }).catch((error) => {
-      log.warn('[Copilot] Could not open side panel:', error);
-    });
-  }
+  if (command === 'open-copilot') openPanelForTab(chrome.sidePanel, tab ?? {});
 });
+
+// El botón de la barra abre el panel él mismo: con `openPanelOnActionClick` Chrome lo abre en todas
+// las pestañas de la ventana, y el panel es de la pestaña que lo abrió (INFRA-875).
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch((error) => {
+  log.warn('[Copilot] Could not set the panel behavior:', error);
+});
+disablePanelByDefault(chrome.sidePanel);
+chrome.action.onClicked.addListener((tab) => openPanelForTab(chrome.sidePanel, tab));
 
 /**
  * Initialize the extension.
@@ -86,7 +101,6 @@ async function initialize(): Promise<void> {
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
-  handleToolMessage = handleMessage;
   copilotGate = createCopilotTrafficGate(tabManager, handleMessage);
   wsClient.setMessageHandler((message) => copilotGate!.handleMcp(message));
 
@@ -102,17 +116,11 @@ async function initialize(): Promise<void> {
 }
 
 /**
- * Start or stop the keep-alive alarm based on whether a tab is connected.
- * The alarm prevents the service worker from going to sleep.
+ * Keep the service worker awake. The alarm runs ALWAYS: without it MV3 sleeps after ~30s, takes the
+ * WebSocket down with it, and the agent sees "Extension not connected" with no way to wake it —
+ * there is no UI to poke when the MCP client is a headless session.
  */
 async function updateKeepAliveAlarm(): Promise<void> {
-  const tabId = tabManager?.getConnectedTabId();
-
-  // The alarm runs ALWAYS. Without it the MV3 service worker sleeps after ~30s,
-  // takes the WebSocket down with it, and the agent sees "Extension not
-  // connected" with no way to wake it — there is no UI to poke when the MCP
-  // client is a headless session.
-  void tabId;
   const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
   if (!existing) {
     await chrome.alarms.create(KEEPALIVE_ALARM, {
@@ -123,9 +131,59 @@ async function updateKeepAliveAlarm(): Promise<void> {
 }
 
 /**
+ * New-version check (update-check.ts): when the browser starts, after an install or reload of
+ * the extension, and every UPDATE_PERIOD_MINUTES.
+ */
+async function runUpdateCheck(): Promise<void> {
+  try {
+    const config = await getEffectiveConfig();
+    const state = await checkForUpdate(latestUrlFor(config), chromeUpdateDeps());
+    if (state?.available) log.info(`[Update] ${state.latest?.version} published; running ${state.current.version}`);
+    const result = await maybeSelfUpdate(state);
+    if (result) log.info(`[SelfUpdate] ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
+  } catch (error) {
+    log.warn('[Update] check failed:', error);
+  }
+}
+
+// On every service-worker start: after a self-update reload, drop the files the new build no longer ships.
+void cleanupAfterUpdate(chromeSelfUpdateDeps()).catch((e) => log.warn('[SelfUpdate] cleanup failed:', e));
+void restoreDownloadUi(chromeSelfUpdateDeps()).catch((e) => log.warn('[SelfUpdate] could not restore the downloads UI:', e));
+
+async function ensureUpdateAlarm(): Promise<void> {
+  if (!await chrome.alarms.get(UPDATE_ALARM)) {
+    await chrome.alarms.create(UPDATE_ALARM, { delayInMinutes: UPDATE_PERIOD_MINUTES, periodInMinutes: UPDATE_PERIOD_MINUTES });
+  }
+}
+
+/** Copilot endpoint/key seeded by the build (provision.ts); runs on install, reload and browser start. */
+function runProvision(): void {
+  provisionCopilot(buildProvision(), chromeProvisionStorage()).catch((error) => {
+    log.warn('[Provision] copilot settings not seeded:', error);
+  });
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  runProvision();
+  void ensureUpdateAlarm();
+  void runUpdateCheck();
+});
+
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  if (notificationId !== UPDATE_NOTIFICATION_ID) return;
+  const state = (await chrome.storage.local.get(UPDATE_STATE_KEY))[UPDATE_STATE_KEY] as UpdateState | undefined;
+  if (state?.downloadUrl) await chrome.tabs.create({ url: state.downloadUrl });
+  await chrome.notifications.clear(notificationId);
+});
+
+/**
  * Handle keep-alive alarm - triggers connection check.
  */
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === UPDATE_ALARM) {
+    void runUpdateCheck();
+    return;
+  }
   if (alarm.name === KEEPALIVE_ALARM) {
     log.debug('[KeepAlive] Alarm fired - checking connection');
     wsClient?.sendHeartbeat();
@@ -134,32 +192,26 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 /**
- * Try to connect to browser-mcp if we have a connected tab.
+ * Keep the WebSocket up whether or not a tab is attached: tools that do not touch the DOM
+ * (list_tabs, navigate, new_tab) must work, and each command's tab attaches on demand.
  */
 async function tryConnect(): Promise<void> {
   if (!wsClient) return;
 
-  const tabId = tabManager?.getConnectedTabId();
   const wsConnected = wsClient?.isConnected();
-  log.debug(`[Loop] tryConnect - tabId: ${tabId}, wsConnected: ${wsConnected}`);
+  log.debug(`[Loop] tryConnect - wsConnected: ${wsConnected}`);
 
-  // Keep the WebSocket up connected tab or not: tools that do not touch the DOM
-  // (list_tabs, navigate, new_tab) must work, and the tab gets attached on the
-  // first command that needs it (see ensureTabId in tools/utils.ts).
-  void tabId;
-
-  // Wait for credentials without repeating the capability probe on each alarm.
-  if (wsClient.isReconnecting() || wsClient.isAwaitingToken()) {
-    log.debug('[Loop] Connection in progress or waiting for credentials, skipping');
+  // Skip if ws-client already has a reconnect scheduled
+  if (wsClient.isReconnecting()) {
+    log.debug('[Loop] Reconnect already scheduled, skipping');
     return;
   }
 
   if (!wsConnected) {
     log.info('[Loop] Not connected, attempting WebSocket connect...');
     try {
-      if (await wsClient.connect()) {
-        log.info('[Loop] Connected to browser-mcp');
-      }
+      if (!await wsClient.connect()) return;
+      log.info('[Loop] Connected to browser-mcp');
     } catch (error) {
       log.warn(`[Loop] Connect failed: ${(error as Error).message}`);
     }
@@ -226,27 +278,18 @@ async function handlePopupMessage(message: {
 
   switch (action) {
     case 'getStatus': {
-      // Ensure tabManager is initialized before accessing
+      // Which tabs the agent drives is a property of each tab (`connected`), not of the browser.
       const tabs = tabManager ? await tabManager.listTabs() : [];
       return {
         connected: wsClient?.isConnected() || false,
-        awaitingToken: wsClient?.isAwaitingToken() || false,
-        tabId: tabManager?.getConnectedTabId() || null,
         tabs,
       };
     }
 
     case 'getCdpStatus': {
-      if (!tabManager) {
-        return {
-          connectedTabId: null,
-          debuggerAttached: false,
-          canExecuteCdp: false,
-          lastCdpError: 'CDP_NOT_READY: Tab manager not initialized',
-        };
-      }
-
-      return await tabManager.getCdpStatus();
+      const tabId = (payload as { tabId?: number } | undefined)?.tabId;
+      if (tabId !== undefined && (!Number.isSafeInteger(tabId) || tabId <= 0)) throw new Error('Tab ID must be a positive integer');
+      return tabManager?.getCdpStatus(tabId);
     }
 
     case 'getServerConfig': {
@@ -264,10 +307,10 @@ async function handlePopupMessage(message: {
           : '',
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
-        label: cfg.label ?? '',
+        label: cfg.label,
         connected: wsClient?.isConnected() || false,
-        awaitingToken: wsClient?.isAwaitingToken() || false,
         pairing: getPairingInfo(),
+        awaitingToken: wsClient?.isAwaitingToken() || false,
       };
     }
 
@@ -283,9 +326,7 @@ async function handlePopupMessage(message: {
       if (typeof token === 'string') {
         await setToken(token.trim());
       }
-      if (typeof label === 'string') {
-        await setLabel(label);
-      }
+      if (typeof label === "string") await setLabel(label);
       // Reconnect immediately so the new URL/token take effect.
       cancelPairing();
       wsClient?.disconnect();
@@ -295,7 +336,6 @@ async function handlePopupMessage(message: {
         success: true,
         connected: wsClient?.isConnected() || false,
         effectiveUrl: buildDisplayUrl(cfg),
-        label: cfg.label ?? '',
       };
     }
 
@@ -319,51 +359,23 @@ async function handlePopupMessage(message: {
       return { success: true };
     }
 
-    case 'connectMcp': {
-      if (!tabManager?.getConnectedTabId()) {
-        return { success: false, error: 'Pick a tab before connecting MCP' };
-      }
-
-      wsClient?.resetReconnectAttempts();
-      await wsClient?.connect();
-      await updateKeepAliveAlarm();
-      return {
-        success: true,
-        connected: wsClient?.isConnected() || false,
-        awaitingToken: wsClient?.isAwaitingToken() || false,
-      };
-    }
-
-    case 'disconnectMcp': {
-      wsClient?.disconnect();
-      return { success: true };
-    }
-
+    // No tab is needed to connect MCP: each command binds the tab of its own session.
     case 'toggleMcp': {
       if (wsClient?.isConnected()) {
         wsClient.disconnect();
         return { success: true, connected: false };
       }
 
-      if (!tabManager?.getConnectedTabId()) {
-        return { success: false, connected: false, error: 'Pick a tab before connecting MCP' };
-      }
-
       wsClient?.resetReconnectAttempts();
-      await wsClient?.connect();
+      const connected = await wsClient?.connect() ?? false;
       await updateKeepAliveAlarm();
-      return {
-        success: true,
-        connected: wsClient?.isConnected() || false,
-        awaitingToken: wsClient?.isAwaitingToken() || false,
-      };
+      return { success: connected, connected };
     }
 
+    // Letting go of one tab leaves the other sessions and the WebSocket alone.
     case 'disconnectTab': {
-      await tabManager?.disconnectTab();
-      wsClient?.disconnect();
-      // Stop keep-alive alarm
-      await updateKeepAliveAlarm();
+      const { tabId } = payload as { tabId: number };
+      await tabManager?.disconnectTab(tabId);
       return { success: true };
     }
 
@@ -396,26 +408,26 @@ async function handlePopupMessage(message: {
  */
 chrome.runtime.onInstalled.addListener((details) => {
   log.info(`Extension installed: ${details.reason}`);
+  runProvision();
+  void ensureUpdateAlarm();
+  void runUpdateCheck();
 });
 
 /**
- * Handle debugger detach.
- * Attempts to reattach if it wasn't user-initiated.
+ * Handle debugger detach for ONE tab: clean up that tab and reattach it if the drop was not the
+ * user's. The tabs other sessions drive are not touched (INFRA-907).
  */
 chrome.debugger.onDetach.addListener(async (source, reason) => {
-  logDebuggerDetached(source.tabId, reason);
+  const tabId = source.tabId;
+  if (!tabId) return;
+  logDebuggerDetached(tabId, reason);
 
-  // Mark debugger as detached in TabManager
-  tabManager?.markDebuggerDetached();
-
-  // If it's our connected tab and reason isn't user-initiated, try to reattach
-  const connectedTabId = tabManager?.getConnectedTabId();
-  if (source.tabId === connectedTabId && reason !== 'canceled_by_user') {
+  if (tabManager?.markDebuggerDetached(tabId) && reason !== 'canceled_by_user') {
     // Small delay to let Chrome settle
     await new Promise(resolve => setTimeout(resolve, 500));
 
     try {
-      await tabManager?.reattachDebugger();
+      await tabManager.reattachDebugger(tabId);
       log.info('[onDetach] Debugger reattached successfully');
     } catch (error) {
       log.error('[onDetach] Failed to reattach debugger:', error);
@@ -425,19 +437,18 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
 });
 
 /**
- * Re-apply live connection guard UI after the connected tab reloads/navigates.
+ * Re-apply the live connection guard UI on the tab that reloaded or navigated, when we drive it.
  */
 chrome.tabs.onUpdated.addListener((updatedTabId, changeInfo) => {
   if (changeInfo.status !== 'complete') {
     return;
   }
 
-  const connectedTabId = tabManager?.getConnectedTabId();
-  if (!connectedTabId || connectedTabId !== updatedTabId) {
+  if (!tabManager?.drivenTabIds().includes(updatedTabId)) {
     return;
   }
 
-  tabManager?.reapplyLiveConnectionUi().catch((error) => {
+  tabManager.reapplyLiveConnectionUi(updatedTabId).catch((error) => {
     log.warn('[onUpdated] Failed to re-apply live connection UI:', error);
   });
 });
@@ -456,7 +467,7 @@ initialized.catch(error => {
 (globalThis as Record<string, unknown>).__debug = {
   getStatus: () => ({
     wsConnected: wsClient?.isConnected(),
-    tabId: tabManager?.getConnectedTabId(),
+    drivenTabs: tabManager?.drivenTabIds(),
     reconnectAttempts: (wsClient as unknown as { reconnectAttempts?: number })?.reconnectAttempts,
   }),
   forceConnect: () => wsClient?.connect(),

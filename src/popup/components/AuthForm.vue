@@ -178,7 +178,7 @@ function handleKeydown(e: KeyboardEvent) {
 .btn-signin {
   width: 100%;
   padding: 14px 20px;
-  background: linear-gradient(135deg, var(--accent-primary), #00a8cc);
+  background: var(--accent-primary);
   border: none;
   border-radius: var(--radius-md);
   color: var(--bg-deepest);

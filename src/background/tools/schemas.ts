@@ -5,28 +5,40 @@
 
 import { z } from 'zod';
 
+/**
+ * An element is named by a ref from browser_state/snapshot or by a CSS selector: the MCP
+ * server advertises both for every tool that acts on one element, so both must work here.
+ */
+const target = {
+  ref: z.string().optional().describe('Element reference from snapshot (e.g., s1e42)'),
+  selector: z.string().optional().describe('CSS selector (top frame)'),
+};
+const hasTarget = (d: { ref?: string; selector?: string }) => Boolean(d.ref || d.selector);
+const targetRequired = { message: 'Either ref or selector must be provided' };
+
 export const schemas = {
   browser_navigate: z.object({
     url: z.string().url(),
+    // networkidle is accepted and treated as load: the extension does not measure network idleness.
+    waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle']).default('load'),
   }),
 
-  browser_click: z.object({
-    ref: z.string().describe('Element reference from snapshot (e.g., s1e42)'),
-    selector: z.string().optional().describe('CSS selector fallback'),
-  }),
+  browser_click: z.object({ ...target }).refine(hasTarget, targetRequired),
+
+  // INFRA-585: click the element that starts a passkey ceremony (enroll an agent passkey, or sign in with one).
+  browser_passkey: z.object({
+    ...target,
+    mode: z.enum(['enroll', 'use']),
+  }).refine(hasTarget, targetRequired),
 
   browser_type: z.object({
-    ref: z.string().min(1).optional(),
-    selector: z.string().min(1).optional(),
+    ...target,
     text: z.string(),
     clear: z.boolean().optional().default(false),
     secret: z.boolean().optional().default(false),
-  }).refine((d) => d.ref || d.selector, { message: 'ref or selector is required' }),
+  }).refine(hasTarget, targetRequired),
 
-  browser_hover: z.object({
-    ref: z.string(),
-    selector: z.string().optional(),
-  }),
+  browser_hover: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   browser_drag: z
     .object({
@@ -48,6 +60,7 @@ export const schemas = {
 
   browser_press_key: z.object({
     key: z.string().describe('Key name like "Enter", "Tab", "ArrowDown", or "a"'),
+    ...target, // optional here: the element to focus before the key
   }),
 
   browser_wait: z.object({
@@ -56,7 +69,7 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
-    switchTo: z.boolean().optional().default(false), // Compatibility: ignored; never activates.
+    switchTo: z.boolean().optional().default(false),
     windowId: z.number().int().positive().optional(),
   }),
 
@@ -64,12 +77,13 @@ export const schemas = {
     tabId: z.number(),
   }),
 
-  browser_send_to_back: z.object({
-    tabId: z.number().optional(),
+  browser_find_tab: z.object({
+    query: z.string().min(1).describe('Text to look for in the title or the URL of a tab (case-insensitive)'),
+    limit: z.number().int().positive().max(50).optional().default(10),
   }),
 
-  browser_close_tab: z.object({
-    tabId: z.number().int().positive().optional(),
+  browser_send_to_back: z.object({
+    tabId: z.number().optional(),
   }),
 
   browser_close_window: z.object({
@@ -77,27 +91,25 @@ export const schemas = {
     tabIds: z.array(z.number().int().positive()),
   }),
 
-  browser_get_text: z.object({
-    ref: z.string(),
+  browser_close_tab: z.object({
+    tabId: z.number().int().positive().optional(),
   }),
 
-  browser_get_attribute: z.object({
-    ref: z.string(),
-    attribute: z.string(),
-  }),
+  browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),
+
+  browser_read_secret: z.object({ ...target, regex: z.string().min(1).max(256).optional() })
+    .refine((d) => hasTarget(d) || d.regex !== undefined, { message: 'Either ref, selector or regex must be provided' }),
+
+  browser_get_attribute: z.object({ ...target, attribute: z.string() }).refine(hasTarget, targetRequired),
 
   browser_wait_for_element: z.object({
-    ref: z.string(),
+    ...target,
     timeout: z.number().optional().default(10000),
-  }),
+  }).refine(hasTarget, targetRequired),
 
-  browser_highlight: z.object({
-    ref: z.string(),
-  }),
+  browser_highlight: z.object({ ...target }).refine(hasTarget, targetRequired),
 
-  browser_is_visible: z.object({
-    ref: z.string(),
-  }),
+  browser_is_visible: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   browser_evaluate: z.object({
     code: z.string().describe('JavaScript code to evaluate via CDP (CSP-safe)'),

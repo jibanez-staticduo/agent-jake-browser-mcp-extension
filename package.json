@@ -1,6 +1,6 @@
 {
   "name": "agent-jake-browser-mcp-extension",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Browser automation extension for AI agents via Model Context Protocol",
   "type": "module",
   "scripts": {
@@ -38,7 +38,9 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.3",
+    "fflate": "^0.8.3",
     "pinia": "^3.0.4",
+    "re2js": "2.8.6",
     "sharp": "^0.34.5",
     "vue": "^3.5.27",
     "zod": "^4.3.5"

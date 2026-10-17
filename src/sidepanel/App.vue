@@ -6,10 +6,11 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import {
-  COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
+  copilotMissing,
+  type CopilotField,
   isCopilotConfigured,
   type ChatTurn,
   type CopilotMode,
@@ -19,14 +20,22 @@ import {
   type WorkerToPanel,
 } from '@/types/copilot';
 import { renderMarkdown } from './markdown';
+import { imageParts, promptWithFiles, readAttachment, transcribe, type Attachment } from './attachments';
+import ModelPicker from './ModelPicker.vue';
+import { explainError, isControllable, missingText as describeMissing } from './setup';
+import OptionsView from './OptionsView.vue';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
+  blocksOf,
+  chatOfScope,
   currentChatId,
   deleteChat,
   listChats,
   newChat,
   saveChat,
+  scopeOf,
+  setCurrentChat,
   type Chat,
   type Item,
 } from './chats';
@@ -35,6 +44,7 @@ interface Target {
   id: number;
   title: string;
   url: string;
+  groupId?: number;
 }
 
 const MODES: { id: CopilotMode; label: string; hint: string }[] = [
@@ -47,41 +57,47 @@ const chat = ref<Chat>(newChat());
 const chats = ref<Chat[]>([]);
 const input = ref('');
 const running = ref(false);
-const step = ref(0);
 const target = ref<Target | null>(null);
 const pinned = ref(false);
-const panel = ref<'none' | 'settings' | 'history'>('none');
+/** Nombre de la pestaña a la que el agente se ha ido en esta conversación (chip de la cabecera). */
+const agentTab = ref<string | null>(null);
+const panel = ref<'none' | 'history'>('none');
+const view = ref<'chat' | 'options'>('chat');
 const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
 const models = ref<string[]>([]);
 const modelsError = ref('');
-const allowed = ref<string[]>([]);
+const modelsLoading = ref(false);
+/** Result of the last model listing, shown under the endpoint in Opciones («Guardar y probar»). */
+const check = ref<{ state: 'idle' | 'ok' | 'error'; text: string }>({ state: 'idle', text: '' });
 const planOpen = ref(true);
 const log = ref<HTMLElement | null>(null);
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const attachments = ref<Attachment[]>([]);
+const attachError = ref('');
+const fileInput = ref<HTMLInputElement | null>(null);
+const recording = ref(false);
+const transcribing = ref(false);
+let recorder: MediaRecorder | null = null;
 
 let port: chrome.runtime.Port | null = null;
 let windowId: number | null = null;
 
 const items = computed(() => chat.value.items);
 const plan = computed(() => chat.value.plan);
-const needsSetup = computed(() => !isCopilotConfigured(settings.value));
-const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
-const modelOptions = computed(() =>
-  models.value.includes(settings.value.model) ? models.value : [settings.value.model, ...models.value]);
-/** A run of tool calls and silent reasoning, shown collapsed as one "N pasos" block. */
-type Block = { key: number; item: Item } | { key: number; steps: Item[] };
-
-const blocks = computed<Block[]>(() => {
-  const out: Block[] = [];
-  items.value.forEach((item, i) => {
-    const quiet = item.kind === 'tool' || (item.kind === 'assistant' && item.interim && !item.text.trim());
-    const last = out[out.length - 1];
-    if (quiet && last && 'steps' in last) last.steps.push(item);
-    else if (quiet) out.push({ key: i, steps: [item] });
-    else out.push({ key: i, item });
-  });
-  return out;
+/** One rule for «what is missing» (types/copilot.ts): chat notice, Opciones summary and amber dot. */
+const missing = computed(() => copilotMissing(settings.value));
+const needsSetup = computed(() => missing.value.length > 0);
+const missingText = computed(() => describeMissing(settings.value));
+const controllable = computed(() => !target.value || isControllable(target.value.url));
+const keysHelp = 'Enter envía · Shift+Enter salto de línea · Shift+Tab cambia de modo · Esc para · Alt+J abre el panel';
+// Sin botón de enviar, el motivo por el que no se puede enviar se lee en el campo (INFRA-881).
+const placeholder = computed(() => {
+  if (needsSetup.value) return 'Falta configurar el copiloto: abre Opciones';
+  if (!controllable.value) return 'Esta pestaña no se puede controlar';
+  return running.value ? 'Dile algo ahora: se lo paso entre pasos' : 'Escribe qué quieres hacer en la pestaña';
 });
+const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
+const blocks = computed(() => blocksOf(items.value, settings.value.stepsView !== 'extended'));
 
 function stepsLabel(steps: Item[]): string {
   const tools = steps.filter((s) => s.kind === 'tool');
@@ -91,12 +107,20 @@ function stepsLabel(steps: Item[]): string {
   return `${n} ${n === 1 ? 'paso' : 'pasos'}${names ? ` · ${names}` : ''}${failed ? ` · ${failed} con error` : ''}`;
 }
 
-const waiting = computed(() => items.value.some((i) => i.kind === 'request' && !i.answered));
-
 function history(): ChatTurn[] {
   return items.value
     .filter((i) => i.kind === 'user' || (i.kind === 'assistant' && !i.interim && i.text))
-    .map((i) => ({ role: i.kind as ChatTurn['role'], content: i.text }));
+    .map((i) => ({
+      role: i.kind as ChatTurn['role'],
+      // Un turno de usuario con imágenes adjuntas viaja con sus partes, como las capturas del agente.
+      content:
+        i.kind === 'user' && i.images?.length
+          ? [
+              { type: 'text' as const, text: i.text },
+              ...i.images.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+            ]
+          : i.text,
+    }));
 }
 
 function persist() {
@@ -128,9 +152,6 @@ function closeStreaming(interim: boolean) {
 
 function onWorker(event: WorkerToPanel) {
   switch (event.type) {
-    case 'step':
-      step.value = event.step;
-      break;
     case 'delta': {
       const s = streamingItem();
       if (s) s.text += event.text;
@@ -167,7 +188,10 @@ function onWorker(event: WorkerToPanel) {
       break;
     case 'mode':
       settings.value.mode = event.mode;
-      void saveSettings(false);
+      void saveSettings();
+      break;
+    case 'target':
+      agentTab.value = event.title;
       break;
     case 'assistant': {
       const s = streamingItem();
@@ -175,8 +199,9 @@ function onWorker(event: WorkerToPanel) {
         s.text = event.text || s.text;
         s.streaming = false;
         s.interim = false;
+        s.limit = event.limit;
       } else {
-        push({ kind: 'assistant', text: event.text || '(sin respuesta)' });
+        push({ kind: 'assistant', text: event.text || '(sin respuesta)', ...(event.limit ? { limit: true } : {}) });
       }
       break;
     }
@@ -188,7 +213,6 @@ function onWorker(event: WorkerToPanel) {
       closeStreaming(false);
       for (const i of items.value) if (i.kind === 'request' && !i.answered) i.answered = 'cancelled';
       running.value = false;
-      step.value = 0;
       if (event.stopped) push({ kind: 'info', text: 'Parado.' });
       persist();
       break;
@@ -209,22 +233,111 @@ function connect(): chrome.runtime.Port {
   return port;
 }
 
-function send() {
-  const prompt = input.value.trim();
-  if (!prompt || running.value || needsSetup.value) return;
+/** `text` sin escribir en el campo: el «Continuar» de un corte por pasos (INFRA-876). */
+function send(text?: string) {
+  const written = (text ?? input.value).trim();
+  if ((!written && !attachments.value.length) || needsSetup.value || !controllable.value) return;
   const turns = history();
+  const images = imageParts(attachments.value);
+  const files = attachments.value.filter((a) => a.kind === 'text').map((a) => a.name);
+  const prompt = promptWithFiles(written, attachments.value);
   input.value = '';
-  running.value = true;
-  push({ kind: 'user', text: prompt });
+  attachments.value = [];
+  attachError.value = '';
+  push({ kind: 'user', text: written, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) });
   persist();
+  // Con el agente en marcha no se espera: el mensaje entra en la conversación y se le pasa entre pasos.
+  if (running.value) {
+    connect().postMessage({ type: 'steer', prompt, images });
+    return;
+  }
+  agentTab.value = null;
+  running.value = true;
   connect().postMessage({
     type: 'prompt',
     history: turns,
     prompt,
     targetTabId: target.value?.id ?? null,
+    pinned: pinned.value,
     mode: settings.value.mode,
     model: settings.value.model,
+    images,
   });
+}
+
+function pickFiles() {
+  fileInput.value?.click();
+}
+
+async function addFiles(files: File[]) {
+  const rejected: string[] = [];
+  for (const file of files) {
+    const read = await readAttachment(file);
+    if ('error' in read) rejected.push(read.error);
+    else attachments.value.push(read);
+  }
+  attachError.value = rejected.join(' · ');
+}
+
+async function onFiles(e: Event) {
+  const field = e.target as HTMLInputElement;
+  const chosen = Array.from(field.files ?? []);
+  field.value = '';
+  await addFiles(chosen);
+}
+
+/** Ctrl+V con una imagen en el portapapeles: entra como adjunto, igual que con el botón +. */
+async function onPaste(e: ClipboardEvent) {
+  const files = Array.from(e.clipboardData?.files ?? []);
+  if (!files.length) return;
+  // Solo imagen en el portapapeles: se traga el pegado (el textarea no pinta nada).
+  // Con texto además, el texto entra normal y la imagen se añade como adjunto.
+  if (!e.clipboardData?.getData('text')) e.preventDefault();
+  await addFiles(files);
+}
+
+function removeAttachment(index: number) {
+  attachments.value.splice(index, 1);
+}
+
+/** Dictado: graba, lo transcribe el Whisper de casa y deja el texto en el campo, editable antes de enviar. */
+async function toggleMic() {
+  if (recorder) {
+    recorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks: Blob[] = [];
+    const rec = new MediaRecorder(stream);
+    rec.ondataavailable = (e) => {
+      if (e.data.size) chunks.push(e.data);
+    };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      recorder = null;
+      recording.value = false;
+      const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+      if (!blob.size) return;
+      transcribing.value = true;
+      try {
+        const said = await transcribe(blob, settings.value);
+        input.value = input.value.trim() ? `${input.value.trim()} ${said}` : said;
+        await nextTick();
+        textarea.value?.focus();
+      } catch (error) {
+        attachError.value = (error as Error).message;
+      } finally {
+        transcribing.value = false;
+      }
+    };
+    rec.start();
+    recorder = rec;
+    recording.value = true;
+    attachError.value = '';
+  } catch (error) {
+    attachError.value = `No pude grabar (${(error as Error).name}): el panel necesita permiso de micrófono.`;
+  }
 }
 
 function respond(item: Item, response: UserResponse, label: string) {
@@ -244,8 +357,15 @@ function cycleMode() {
 
 function setMode(mode: CopilotMode) {
   settings.value.mode = mode;
-  void saveSettings(false);
+  void saveSettings();
 }
+
+function onModeSelect(e: Event) {
+  setMode((e.target as HTMLSelectElement).value as CopilotMode);
+}
+
+/** Lo que hace el modo elegido; el chip lo dice en el tooltip (antes ocupaba media pantalla). */
+const modeHint = computed(() => MODES.find((m) => m.id === settings.value.mode)?.hint ?? '');
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -261,7 +381,8 @@ function onKey(e: KeyboardEvent) {
 
 async function startNewChat() {
   if (running.value) return;
-  chat.value = newChat();
+  chat.value = { ...newChat(), scope: target.value ? scopeOf(target.value) : undefined };
+  await setCurrentChat(chat.value.id);
   panel.value = 'none';
   await nextTick();
   textarea.value?.focus();
@@ -275,28 +396,42 @@ async function openHistory() {
 function openChat(c: Chat) {
   if (running.value) return;
   chat.value = JSON.parse(JSON.stringify(c)) as Chat;
+  void setCurrentChat(c.id);
   panel.value = 'none';
   void scroll();
 }
 
-async function removeChat(c: Chat) {
-  await deleteChat(c.id);
+const undoable = ref<Chat | null>(null);
+
+async function undoRemove() {
+  if (!undoable.value) return;
+  await saveChat(undoable.value);
   chats.value = await listChats();
-  if (c.id === chat.value.id) chat.value = newChat();
+  undoable.value = null;
 }
 
-async function saveSettings(close = true) {
+async function removeChat(c: Chat) {
+  undoable.value = JSON.parse(JSON.stringify(c)) as Chat;
+  await deleteChat(c.id);
+  chats.value = await listChats();
+  if (c.id === chat.value.id) {
+    chat.value = { ...newChat(), scope: target.value ? scopeOf(target.value) : undefined };
+    await setCurrentChat(chat.value.id);
+  }
+}
+
+async function saveSettings(next?: CopilotSettings) {
+  if (next) settings.value = next;
   if (!isCopilotConfigured(settings.value)) return;
   await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: { ...settings.value } });
-  if (close) {
-    panel.value = 'none';
-    void loadModels();
-  }
+  if (next) void loadModels();
 }
 
 async function loadModels() {
   modelsError.value = '';
+  check.value = { state: 'idle', text: '' };
   if (!isCopilotConfigured(settings.value)) return;
+  modelsLoading.value = true;
   try {
     const base = settings.value.baseUrl.trim().replace(/\/+$/, '');
     const res = await fetch(`${base}/models`, {
@@ -305,56 +440,78 @@ async function loadModels() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as { data?: { id: string }[] };
     models.value = chatModels((data.data ?? []).map((m) => m.id));
+    check.value = { state: 'ok', text: `Conecta: ${models.value.length} modelos de chat disponibles.` };
   } catch (error) {
-    modelsError.value = `No pude listar modelos: ${(error as Error).message}`;
+    const msg = (error as Error).message;
+    modelsError.value = /HTTP 40[13]/.test(msg) ? 'La key no vale.' : `No pude listar modelos: ${msg}.`;
+    check.value = { state: 'error', text: /HTTP 40[13]/.test(msg) ? 'El endpoint responde pero la API key no vale.' : `No llego al endpoint (${msg}).` };
+  } finally {
+    modelsLoading.value = false;
   }
 }
 
 function onModelChange() {
-  void saveSettings(false);
+  void saveSettings();
 }
 
-async function loadAllowed() {
-  const stored = await chrome.storage.local.get(COPILOT_ALLOWED_ORIGINS_KEY);
-  allowed.value = Array.isArray(stored[COPILOT_ALLOWED_ORIGINS_KEY]) ? stored[COPILOT_ALLOWED_ORIGINS_KEY] as string[] : [];
+const focusField = ref<CopilotField | null>(null);
+
+/** «Abrir Opciones»: lands on the first missing field (Opciones scrolls to it and focuses it). */
+function openOptions() {
+  panel.value = 'none';
+  focusField.value = missing.value[0] ?? null;
+  view.value = 'options';
 }
 
-async function forgetOrigin(origin: string) {
-  allowed.value = allowed.value.filter((o) => o !== origin);
-  await chrome.storage.local.set({ [COPILOT_ALLOWED_ORIGINS_KEY]: allowed.value });
-}
-
-async function toggleSettings() {
-  panel.value = panel.value === 'settings' ? 'none' : 'settings';
-  if (panel.value === 'settings') await loadAllowed();
-}
-
-async function refreshTarget() {
-  if (pinned.value || windowId === null) return;
+/**
+ * The panel belongs to the tab that opened it (INFRA-875): it is never re-pointed at whichever tab
+ * you happen to click on. Chrome hides this instance when you leave the tab and shows it again when
+ * you come back, so the target is decided once, here.
+ */
+async function bindOwnTab() {
+  if (windowId === null) return;
   const [tab] = await chrome.tabs.query({ active: true, windowId });
-  target.value = tab?.id ? { id: tab.id, title: tab.title || '', url: tab.url || '' } : null;
+  target.value = tab?.id ? { id: tab.id, title: tab.title || '', url: tab.url || '', groupId: tab.groupId } : null;
+  await followScope();
 }
 
-const onActivated = (info: chrome.tabs.OnActivatedInfo) => {
-  if (info.windowId === windowId) void refreshTarget();
-};
+/** La chincheta: congelar la pestaña. Se comunica al service worker porque es él quien ejecuta las herramientas. */
+function togglePin() {
+  pinned.value = !pinned.value;
+  connect().postMessage({ type: 'pin', pinned: pinned.value });
+}
+
+/** One conversation per tab (or per tab group): follow the target's scope when it changes. */
+async function followScope() {
+  if (running.value || !target.value) return;
+  const scope = scopeOf(target.value);
+  if (!scope || chat.value.scope === scope) return;
+  const saved = await chatOfScope(scope);
+  chat.value = saved ? (JSON.parse(JSON.stringify(saved)) as Chat) : { ...newChat(), scope };
+  for (const i of chat.value.items) {
+    if (i.kind === 'request' && !i.answered) i.answered = 'cancelled';
+    i.streaming = false;
+  }
+  void scroll();
+}
+
 const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
-  if (target.value?.id === tabId) target.value = { id: tabId, title: tab.title || '', url: tab.url || '' };
-};
-const onRemoved = (tabId: number) => {
   if (target.value?.id === tabId) {
-    pinned.value = false;
-    void refreshTarget();
+    target.value = { id: tabId, title: tab.title || '', url: tab.url || '', groupId: tab.groupId };
+    void followScope();
   }
 };
 
+// The service worker may seed the settings (provision.ts) after the panel is open.
+const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+  const next = changes[COPILOT_SETTINGS_KEY]?.newValue as Partial<CopilotSettings> | undefined;
+  if (area === 'local' && next) settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...next };
+};
+
 onMounted(async () => {
-  // ?windowId=N: the panel runs detached in its own window and follows N's active tab.
-  const detached = Number(new URLSearchParams(location.search).get('windowId'));
-  windowId = detached || ((await chrome.windows.getCurrent()).id ?? null);
+  windowId = (await chrome.windows.getCurrent()).id ?? null;
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
   settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
-  if (needsSetup.value) panel.value = 'settings';
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -364,28 +521,18 @@ onMounted(async () => {
       i.streaming = false;
     }
   }
-  await refreshTarget();
+  await bindOwnTab();
   void loadModels();
   void scroll();
-  chrome.tabs.onActivated.addListener(onActivated);
   chrome.tabs.onUpdated.addListener(onUpdated);
-  chrome.tabs.onRemoved.addListener(onRemoved);
+  chrome.storage.onChanged.addListener(onStorage);
 });
 
 onUnmounted(() => {
-  chrome.tabs.onActivated.removeListener(onActivated);
   chrome.tabs.onUpdated.removeListener(onUpdated);
-  chrome.tabs.onRemoved.removeListener(onRemoved);
+  chrome.storage.onChanged.removeListener(onStorage);
   port?.disconnect();
 });
-
-function host(url: string): string {
-  try {
-    return new URL(url).host || url;
-  } catch {
-    return url;
-  }
-}
 
 function when(ts: number): string {
   return new Date(ts).toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -396,51 +543,45 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
 
 <template>
   <div class="panel">
+    <OptionsView v-if="view === 'options'" class="grow" :settings="settings" :focus-field="focusField" :check="check"
+      @back="view = 'chat'" @save="saveSettings" />
+    <template v-else>
     <header>
-      <div class="target" :title="target?.url">
-        <span class="dot" :class="{ pinned }" />
-        <span class="title">{{ target ? target.title || host(target.url) : 'Sin pestaña' }}</span>
-        <span class="host">{{ target ? host(target.url) : '' }}</span>
+      <div class="top">
+        <button type="button" class="quiet" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
+          @click="startNewChat">Nueva</button>
+        <button type="button" class="quiet" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
+        <button type="button" class="quiet" :class="{ on: view === 'options', warn: needsSetup }"
+          :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
+          @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
+        <!-- Chincheta: arriba a la derecha; lo único que hace es no dejar que el agente se mueva de esta pestaña. -->
+        <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
+          :title="pinned ? 'Quitar la chincheta: dejar que el agente cambie de pestaña' : 'Chincheta: que el agente no se mueva de esta pestaña'"
+          @click="togglePin">
+          <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" fill="currentColor">
+            <path d="M5.6 1.6h4.8l-.9 4.6 2.2 1.7v1.3H4.3V7.9l2.2-1.7z" />
+            <path d="M7.3 9.9h1.4l.4 4.5H6.9z" />
+          </svg>
+        </button>
       </div>
-      <div class="actions">
-        <button class="icon" :class="{ on: pinned }" :title="pinned ? 'Seguir la pestaña activa' : 'Fijar esta pestaña'"
-          @click="pinned = !pinned; refreshTarget()">📌</button>
-        <button class="icon" title="Nueva conversación" :disabled="running" @click="startNewChat">✚</button>
-        <button class="icon" :class="{ on: panel === 'history' }" title="Conversaciones" @click="openHistory">🕘</button>
-        <button class="icon" :class="{ on: panel === 'settings' }" title="Ajustes" @click="toggleSettings">⚙</button>
+      <!-- Solo cuando el agente se ha ido a otra pestaña: su nombre, no la URL (la línea de la URL
+           repetía la pestaña a la que está pegado el panel). -->
+      <div v-if="agentTab" class="using">
+        <span class="chip">{{ agentTab }}</span>
       </div>
     </header>
 
-    <form v-if="panel === 'settings'" class="drawer settings" @submit.prevent="saveSettings()">
-      <label>Endpoint (OpenAI-compatible)<input v-model="settings.baseUrl" placeholder="https://…/v1"></label>
-      <label>API key<input v-model="settings.apiKey" type="password" autocomplete="off"></label>
-      <div class="row">
-        <label>Pasos máx.<input v-model.number="settings.maxSteps" type="number" min="1" max="100"></label>
-        <label class="check"><input v-model="settings.vision" type="checkbox"> Visión (capturas al modelo)</label>
-      </div>
-      <div v-if="allowed.length" class="allowed">
-        <span>Sitios con permiso permanente (modo Preguntar):</span>
-        <div v-for="o in allowed" :key="o" class="origin">{{ o }} <button type="button" class="icon" @click="forgetOrigin(o)">✕</button></div>
-      </div>
-      <button type="submit" :disabled="needsSetup">Guardar</button>
-    </form>
-
-    <div v-else-if="panel === 'history'" class="drawer history">
+    <div v-if="panel === 'history'" class="drawer history">
+      <p v-if="undoable" class="muted">Conversación borrada. <button type="button" class="link" @click="undoRemove">Deshacer</button></p>
       <p v-if="!chats.length" class="muted">No hay conversaciones guardadas.</p>
       <div v-for="c in chats" :key="c.id" class="chat-row" :class="{ current: c.id === chat.id }">
-        <button class="link" @click="openChat(c)">{{ c.title }}</button>
+        <button class="link title" @click="openChat(c)">{{ c.title }}</button>
         <span class="muted">{{ when(c.updatedAt) }}</span>
-        <button class="icon" title="Borrar" @click="removeChat(c)">🗑</button>
+        <button class="link del" :aria-label="`Borrar ${c.title}`" @click="removeChat(c)">Borrar</button>
       </div>
     </div>
 
     <main ref="log" class="log">
-      <div v-if="!items.length" class="empty">
-        <p>Pide algo sobre esta página u otras pestañas.</p>
-        <p class="muted">El agente ve la pestaña objetivo (URL, título y elementos) en cada mensaje.
-          <b>Preguntar</b> pide permiso antes de actuar, <b>Auto</b> actúa solo y <b>Plan</b> propone un plan antes de tocar nada
-          (Shift+Tab cambia de modo).</p>
-      </div>
       <template v-for="(block, b) in blocks" :key="block.key">
         <details v-if="'steps' in block" class="steps" :open="running && b === blocks.length - 1">
           <summary>{{ stepsLabel(block.steps) }}</summary>
@@ -449,27 +590,48 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
               <summary><span :class="item.ok === undefined ? 'pending' : item.ok ? 'ok' : 'ko'">●</span> {{ item.text }}</summary>
               <pre>{{ item.detail }}</pre>
             </details>
-            <details v-else-if="item.reasoning" class="item reasoning">
-              <summary>razonamiento</summary>
-              <pre>{{ item.reasoning }}</pre>
-            </details>
+            <div v-else class="item assistant interim">
+              <details v-if="item.reasoning" class="reasoning">
+                <summary>razonamiento</summary>
+                <pre>{{ item.reasoning }}</pre>
+              </details>
+              <div v-if="item.text" class="md" v-html="renderMarkdown(item.text)" />
+            </div>
           </template>
         </details>
         <template v-else>
-          <div v-if="block.item.kind === 'user'" class="item user">{{ block.item.text }}</div>
+          <div v-if="block.item.kind === 'user'" class="item user">
+            <span v-if="block.item.text">{{ block.item.text }}</span>
+            <span v-if="block.item.files?.length" class="files-line">{{ block.item.files.join(' · ') }}</span>
+            <span v-if="block.item.images?.length" class="thumbs">
+              <img v-for="(src, t) in block.item.images" :key="t" :src="src" alt="imagen adjunta">
+            </span>
+          </div>
           <div v-else-if="block.item.kind === 'assistant'" class="item assistant" :class="{ interim: block.item.interim }">
             <details v-if="block.item.reasoning" class="reasoning">
               <summary>razonamiento</summary>
               <pre>{{ block.item.reasoning }}</pre>
             </details>
-            <div class="md" v-html="renderMarkdown(block.item.text)" /><span v-if="block.item.streaming" class="caret">▍</span>
+            <template v-if="block.item.limit">
+              <p class="limit">Sin respuesta cerrada: se acabaron los {{ settings.maxSteps }} pasos.</p>
+              <button type="button" class="link" :disabled="running" title="Darle otra ronda de pasos a esta conversación"
+                @click="send('Continúa donde lo dejaste.')">Continuar</button>
+            </template>
+            <template v-else>
+              <div class="md" v-html="renderMarkdown(block.item.text)" /><span v-if="block.item.streaming" class="caret">▍</span>
+            </template>
           </div>
           <RequestCard v-else-if="block.item.kind === 'request' && block.item.request" :request="block.item.request"
             :answered="block.item.answered" @respond="(r, label) => respond(block.item, r, label)" />
+          <div v-else-if="block.item.kind === 'error' && explainError(block.item.text)" class="notice err" role="alert">
+            <strong>{{ explainError(block.item.text)!.title }}</strong>
+            <span>{{ explainError(block.item.text)!.why }}</span>
+            <button v-if="explainError(block.item.text)!.action === 'options'" type="button" @click="openOptions">Abrir Opciones</button>
+            <details><summary>Detalle técnico</summary><pre>{{ block.item.text }}</pre></details>
+          </div>
           <div v-else class="item" :class="block.item.kind">{{ block.item.text }}</div>
         </template>
       </template>
-      <div v-if="running && !waiting" class="item info">Trabajando… paso {{ step || 1 }}/{{ settings.maxSteps }}</div>
     </main>
 
     <section v-if="plan.length" class="plan">
@@ -482,58 +644,94 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
     </section>
 
     <footer>
-      <textarea ref="textarea" v-model="input" rows="3"
-        placeholder="Escribe un prompt · Enter envía · Shift+Enter salto · Shift+Tab modo"
-        :disabled="needsSetup" @keydown="onKey" />
-      <div class="toolbar">
-        <div class="modes" role="radiogroup">
-          <button v-for="m in MODES" :key="m.id" type="button" class="mode" :class="[m.id, { on: settings.mode === m.id }]"
-            :title="m.hint" @click="setMode(m.id)">{{ m.label }}</button>
+      <div v-if="needsSetup" class="notice" role="alert">
+        <strong>Falta configurar el copiloto</strong>
+        <span>{{ missingText }} Mientras tanto puedes ir escribiendo, pero no se envía.</span>
+        <button type="button" @click="openOptions">Abrir Opciones</button>
+      </div>
+      <div v-else-if="!controllable" class="notice" role="status">
+        <strong>Esta pestaña no se puede controlar</strong>
+        <span>El agente no puede actuar en páginas del navegador ni de extensiones. Abre una página web y elígela como objetivo.</span>
+      </div>
+      <div class="composer" :title="keysHelp">
+        <div v-if="attachments.length" class="files">
+          <span v-for="(a, i) in attachments" :key="i" class="file">
+            <img v-if="a.kind === 'image'" :src="a.data" :alt="a.name">
+            <span v-else class="kind" aria-hidden="true">≡</span>
+            <span class="name" :title="a.name">{{ a.name }}</span>
+            <button type="button" :aria-label="`Quitar ${a.name}`" @click="removeAttachment(i)">×</button>
+          </span>
         </div>
-        <select v-model="settings.model" class="model" :title="modelsError || 'Modelo'" @change="onModelChange">
-          <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
-        </select>
-        <button v-if="running" class="stop" @click="stop">Stop</button>
-        <button v-else class="send" :disabled="!input.trim() || needsSetup" @click="send">↑</button>
+        <p v-if="attachError" class="attach-err" role="alert">{{ attachError }}</p>
+        <input ref="fileInput" type="file" multiple hidden @change="onFiles">
+        <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
+          :placeholder="placeholder" @keydown="onKey" @paste="onPaste" />
+        <div v-if="transcribing" class="waiting" role="status">Transcribiendo el audio…</div>
+        <div v-else-if="running" class="waiting" role="status">Esperando al agente… (Enter para decirle algo · Esc para parar)</div>
+        <!-- Sin botón de enviar: Enter envía (como en Claude). Los controles son texto e iconos planos. -->
+        <div class="bar">
+          <button type="button" class="icon" aria-label="Adjuntar imágenes o ficheros" title="Adjuntar imágenes o ficheros de texto"
+            @click="pickFiles">+</button>
+          <label class="mode" :title="modeHint">
+            <select :value="settings.mode" aria-label="Modo del agente" @change="onModeSelect">
+              <option v-for="m in MODES" :key="m.id" :value="m.id">{{ m.label }}</option>
+            </select>
+            <span aria-hidden="true">▾</span>
+          </label>
+          <div class="right">
+            <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+              @update:model-value="onModelChange" @options="openOptions" />
+            <button type="button" class="icon mic" :class="{ on: recording }" :disabled="transcribing"
+              :aria-label="recording ? 'Parar de grabar' : 'Dictar por micrófono'"
+              :title="recording ? 'Parar de grabar' : 'Dictar: se transcribe y lo puedes editar antes de enviar'"
+              @click="toggleMic">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+              </svg>
+            </button>
+            <button v-if="running" type="button" class="quiet" title="Parar la respuesta (Esc)" @click="stop">Parar</button>
+          </div>
+        </div>
       </div>
     </footer>
+    </template>
   </div>
 </template>
 
 <style>
 html, body { margin: 0; height: 100%; }
-body {
+html body {
   background: var(--bg-deepest);
   color: var(--text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 13px;
+  font-size: 14px;
 }
 #app { height: 100%; }
 </style>
 
 <style scoped>
 .panel { display: flex; flex-direction: column; height: 100%; }
+.grow { flex: 1; overflow-y: auto; }
 header {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border-default); background: var(--bg-deep);
 }
-.target { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
-.target .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.target .host { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-success); flex-shrink: 0; }
-.dot.pinned { background: var(--accent-warning); }
-.actions { display: flex; gap: 2px; }
-button {
-  background: var(--accent-primary-dim); color: var(--text-primary); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit;
-}
-button:disabled { opacity: 0.4; cursor: default; }
-button.icon { background: none; border: none; padding: 4px 6px; opacity: 0.6; }
-button.icon.on, button.icon:hover:not(:disabled) { opacity: 1; }
-button.link { background: none; border: none; padding: 0; text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-button.stop { background: var(--accent-danger-dim); border-color: var(--accent-danger); }
+.top { display: flex; align-items: center; gap: 18px; }
+/* Los tres accesos son texto discreto, no tres pastillas: la cabecera no compite con la conversación. */
+.quiet { border: none; background: none; padding: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.quiet.on { color: var(--text-primary); }
+.quiet.warn { color: var(--accent-warning); }
+/* La pestaña a la que el agente se ha ido, marcada como la ficha de Claude: nombre en pastilla. */
+.using { display: flex; min-width: 0; }
+.chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--accent-primary-dim); border: 1px solid var(--accent-primary); color: var(--text-primary); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+button.pin { margin-left: auto; flex-shrink: 0; line-height: 0; min-height: 0; padding: 2px 4px; border: none; background: none; color: var(--text-secondary); }
+button.pin.on { color: var(--accent-warning); }
+.warn-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-warning); margin-left: 6px; }
+button.link.del { flex: none; color: var(--accent-danger); }
+button.link { text-align: left; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 0; }
+button.link.title { color: var(--text-primary); }
 .muted { color: var(--text-secondary); }
-.drawer { padding: 10px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
+.drawer { padding: 12px 18px; border-bottom: 1px solid var(--border-default); background: var(--bg-surface); max-height: 45%; overflow-y: auto; }
 .settings { display: flex; flex-direction: column; gap: 8px; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); flex: 1; }
 .settings label.check { flex-direction: row; align-items: center; gap: 6px; }
@@ -544,16 +742,13 @@ button.stop { background: var(--accent-danger-dim); border-color: var(--accent-d
 .chat-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 6px; }
 .chat-row.current { background: var(--bg-elevated); }
 .chat-row .muted { font-size: 11px; white-space: nowrap; }
-input, textarea, select {
-  background: var(--bg-deep); color: var(--text-primary); border: 1px solid var(--border-default);
-  border-radius: 6px; padding: 6px 8px; font: inherit;
-}
-.log { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-.empty { text-align: center; margin-top: 30px; line-height: 1.6; padding: 0 10px; }
-.item { word-break: break-word; line-height: 1.5; }
-.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--accent-primary-dim); padding: 6px 10px; border-radius: 10px; max-width: 85%; }
+.log { flex: 1; overflow-y: auto; padding: 22px max(22px, calc((100% - 640px) / 2)); display: flex; flex-direction: column; gap: 18px; }
+.item { word-break: break-word; line-height: 1.7; }
+.item.user { white-space: pre-wrap; align-self: flex-end; background: var(--clay-soft); border: 1px solid var(--border-default); padding: 10px 16px; border-radius: var(--radius-lg); max-width: 85%; }
 .item.assistant.interim { color: var(--text-secondary); }
-.md :deep(p) { margin: 0 0 6px; }
+/* Corte por pasos (INFRA-876): se cambia el texto interno del bucle por una línea y un botón. */
+.limit { margin: 0 0 10px; color: var(--text-secondary); }
+.md :deep(p) { margin: 0 0 10px; }
 .md :deep(p:last-child) { margin-bottom: 0; }
 .md :deep(ul), .md :deep(ol) { margin: 4px 0; padding-left: 20px; }
 .md :deep(code) { font-family: var(--font-mono, monospace); background: var(--bg-elevated); padding: 1px 4px; border-radius: 4px; font-size: 12px; }
@@ -571,25 +766,45 @@ input, textarea, select {
 .steps > .item { margin: 3px 0 0 6px; }
 .item.tool { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary); }
 .item.tool summary { cursor: pointer; }
-.item.tool pre { margin: 4px 0 0 14px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; }
+.item.tool pre { margin: 4px 0 0 14px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow-y: auto; background: var(--bg-surface); padding: 6px; border-radius: var(--radius-sm); }
 .item.error { color: var(--accent-danger); white-space: pre-wrap; }
 .item.info { color: var(--text-secondary); font-style: italic; }
 .ok { color: var(--accent-success); }
 .ko { color: var(--accent-danger); }
 .pending { color: var(--accent-warning); }
-.plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 4px 10px 6px; max-height: 30%; overflow-y: auto; }
-.plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; }
-.plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.plan { border-top: 1px solid var(--border-default); background: var(--bg-deep); padding: 8px 18px 10px; max-height: 30%; overflow-y: auto; }
+.plan-head { background: none; border: none; padding: 2px 0; font-weight: 600; width: 100%; text-align: left; font-family: var(--font-serif); font-size: 15px; }
+.plan ul { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .plan li.done { color: var(--text-secondary); text-decoration: line-through; }
 .plan li.in_progress { color: var(--accent-primary); font-weight: 600; }
-footer { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border-default); }
-footer textarea { resize: none; }
-.toolbar { display: flex; align-items: center; gap: 6px; }
-.modes { display: flex; border: 1px solid var(--border-default); border-radius: 6px; overflow: hidden; }
-.mode { border: none; border-radius: 0; background: none; padding: 4px 8px; color: var(--text-secondary); }
-.mode.on.ask { background: var(--accent-warning-dim); color: var(--text-primary); }
-.mode.on.auto { background: var(--accent-success-dim); color: var(--text-primary); }
-.mode.on.plan { background: var(--accent-secondary-dim); color: var(--text-primary); }
-.model { flex: 1; min-width: 0; padding: 4px 6px; }
-.send { font-weight: 700; }
+/* Sin línea sobre el campo: partía el panel en dos y no aportaba nada (INFRA-883). */
+footer { display: flex; flex-direction: column; gap: 10px; padding: 12px 18px 18px; }
+.notice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; border-left: 3px solid var(--accent-warning); background: var(--bg-surface); border-radius: var(--radius-sm); }
+.notice span { color: var(--text-secondary); }
+.notice.err { margin: 0; border-left-color: var(--accent-danger); }
+.notice pre { white-space: pre-wrap; word-break: break-all; margin: 4px 0 0; font-size: 11px; }
+.notice summary { cursor: pointer; color: var(--text-secondary); font-size: 11px; }
+.waiting { padding: 2px 4px; color: var(--text-secondary); font-size: 12px; }
+.right { display: flex; align-items: center; gap: 14px; margin-left: auto; min-width: 0; }
+.composer { display: flex; flex-direction: column; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-deep); padding: 10px; gap: 8px; box-shadow: var(--shadow-pop); }
+.composer:focus-within { border-color: var(--accent-primary); }
+.composer textarea { resize: none; border: none; background: none; outline: none; padding: 8px 6px; }
+.bar { display: flex; align-items: center; gap: 14px; min-width: 0; flex-wrap: nowrap; }
+.bar > :first-child { min-width: 0; }
+/* Pie plano (INFRA-881): sin bordes ni rellenos; el modo es un desplegable de texto, como en Claude. */
+.mode { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.mode select { appearance: none; field-sizing: content; min-height: 0; border: none; background: none; padding: 0; font: inherit; color: var(--text-primary); cursor: pointer; }
+/* Adjuntos (INFRA-857): «+» y micro como iconos, y los elegidos en chips encima del campo. */
+.icon { display: inline-flex; align-items: center; min-height: 24px; padding: 0; border: none; background: none; line-height: 1; font-size: 16px; color: var(--text-secondary); flex-shrink: 0; }
+.icon.mic.on { color: var(--accent-primary); }
+.files { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 0; }
+.file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill); background: var(--bg-surface); font-size: 12px; }
+.file img { width: 22px; height: 22px; object-fit: cover; border-radius: 4px; }
+.file .kind { color: var(--text-secondary); }
+.file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.file button { border: none; background: none; padding: 0 2px; color: var(--text-secondary); font-size: 14px; line-height: 1; }
+.attach-err { margin: 4px 4px 0; color: var(--accent-danger); font-size: 12px; }
+.files-line { display: block; margin-top: 6px; color: var(--text-secondary); font-size: 12px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.thumbs img { max-width: 120px; max-height: 120px; border-radius: var(--radius-sm); border: 1px solid var(--border-default); }
 </style>

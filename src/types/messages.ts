@@ -23,10 +23,12 @@ export type ToolName =
   // New tools (improvements)
   | 'browser_new_tab'
   | 'browser_list_tabs'
+  | 'browser_find_tab'
   | 'browser_switch_tab'
   | 'browser_send_to_back'
   | 'browser_close_tab'
   | 'browser_close_window'
+  | 'browser_read_secret'
   | 'browser_get_text'
   | 'browser_get_attribute'
   | 'browser_is_visible'
@@ -37,12 +39,14 @@ export type ToolName =
   | 'browser_iframe_eval'
   | 'browser_iframe_click'
   | 'browser_pdf'
+  | 'browser_reload_extension'
   | 'browser_upload_file'
   | 'browser_network_requests'
   | 'browser_network_request'
   | 'browser_cdp'
   | 'browser_drop'
-  | 'browser_fill_form';
+  | 'browser_fill_form'
+  | 'browser_passkey';
 
 // Messages from browser-mcp server
 export interface IncomingMessage {

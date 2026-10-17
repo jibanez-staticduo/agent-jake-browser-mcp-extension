@@ -1,30 +1,42 @@
 /**
  * Navigation tool handlers: navigate, go_back, go_forward, reload.
  */
+import { TIMEOUTS } from '@/constants/timeouts';
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
 
 export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_navigate: async (payload) => {
-      const { url } = schemas.browser_navigate.parse(payload);
-      const tabId = ctx.tabManager.getConnectedTabId();
+      const { url, waitUntil } = schemas.browser_navigate.parse(payload);
+      const tabId = ctx.tabManager.routedTabId();
 
-      if (!tabId) {
-        throw new Error('No tab connected');
+      // The agent never drives the tab the user is looking at: when the call names no tab of its
+      // own, or names the user's own bound by auto-attach, the URL opens in a NEW background tab
+      // (same path as browser_new_tab, WebAuthn guard first) that becomes the call's tab. A tab the
+      // agent opened or chose itself keeps navigating in place.
+      if (!tabId || ctx.tabManager.isAutoAttached()) {
+        const { tab, loaded } = await ctx.tabManager.createTab(url, true, false);
+        return { navigated: url, loaded, tabId: tab.id, openedNewTab: true };
       }
 
-      await chrome.tabs.update(tabId, { url });
-      await ctx.tabManager.waitForTabLoad(tabId);
+      // networkidle = load: the extension does not measure network idleness.
+      const loaded = await ctx.tabManager.waitForNextTabLoad(
+        tabId,
+        () => chrome.tabs.update(tabId, { url }),
+        TIMEOUTS.TAB_LOAD_WAIT,
+        waitUntil === 'domcontentloaded' ? 'domcontentloaded' : 'load',
+      );
 
-      return { navigated: url };
+      // loaded:false = the page was still loading when the wait ran out; the tab is fine.
+      return { navigated: url, loaded };
     },
 
     browser_go_back: async () => {
       await ctx.tabManager.sendDebuggerCommand('Page.navigateToHistoryEntry', {
         entryId: -1,
       });
-      const tabId = ctx.tabManager.getConnectedTabId();
+      const tabId = ctx.tabManager.currentTabId();
       if (tabId) {
         await chrome.tabs.goBack(tabId);
       }
@@ -32,7 +44,7 @@ export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_go_forward: async () => {
-      const tabId = ctx.tabManager.getConnectedTabId();
+      const tabId = ctx.tabManager.currentTabId();
       if (tabId) {
         await chrome.tabs.goForward(tabId);
       }
@@ -40,12 +52,9 @@ export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
     },
 
     browser_reload: async () => {
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (tabId) {
-        await chrome.tabs.reload(tabId);
-        await ctx.tabManager.waitForTabLoad(tabId);
-      }
-      return { success: true };
+      const tabId = ctx.tabManager.currentTabId();
+      const loaded = tabId ? await ctx.tabManager.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)) : false;
+      return { success: true, loaded };
     },
   };
 }

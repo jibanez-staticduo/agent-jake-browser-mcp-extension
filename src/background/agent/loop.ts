@@ -16,17 +16,19 @@ import type {
   UserResponse,
   WorkerToPanel,
 } from '@/types/copilot';
-import { agentTools, READ_ONLY_TOOLS } from './tools-catalog';
+import { agentTools, READ_ONLY_TOOLS, type FunctionTool } from './tools-catalog';
 import { isCopilotConfigured } from '@/types/copilot';
 import { truncate } from './context';
 
 export const TOOL_RESULT_MAX_CHARS = 12000;
 
 const BASE_PROMPT = `You are a browser copilot living in the user's Chrome side panel.
-You act on real tabs through the browser_* tools. Every user message carries a <page_context>
-block with the target tab, the open tabs and the target's current state (interactive elements
-with [n] refs): read it before calling tools, and do not call browser_state again unless the page
-may have changed. Refs go stale after navigation or DOM changes — re-read state then.
+You act on real tabs through the browser_* tools. The first user message of a run carries a
+<page_context> block with the target tab, the open tabs and the target's current state
+(interactive elements with [n] refs): read it before calling tools, and do not call browser_state
+again unless the page may have changed. Refs go stale after navigation or DOM changes — re-read state then.
+While you work the user can send more messages without waiting: they are instructions that
+refine or override the original request, not new conversations. Adapt and keep going.
 To work on another tab, browser_switch_tab (or browser_new_tab) first; later tools act on it.
 For tasks with 3 or more steps keep a checklist with update_plan. When the request is ambiguous
 or a choice belongs to the user, ask_user instead of guessing.
@@ -77,6 +79,10 @@ export interface AgentDeps {
   currentTarget: () => Promise<{ tabId: number | null; origin: string }>;
   isOriginAllowed: (origin: string) => Promise<boolean>;
   allowOrigin: (origin: string) => Promise<void>;
+  /** Saca y vacía los mensajes que el usuario escribió con la ejecución en marcha. */
+  takeSteering?: () => { text: string; images?: string[] }[];
+  /** Lo que anuncia el servidor MCP emparejado: sus plugins entran como herramientas (INFRA-909). */
+  serverTools?: () => Promise<FunctionTool[]>;
 }
 
 export class AgentStopped extends Error {
@@ -191,6 +197,7 @@ async function complete(
   mode: CopilotMode,
   messages: ChatMessage[],
   deps: AgentDeps,
+  plugins: FunctionTool[],
 ): Promise<ChatMessage> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
@@ -202,7 +209,7 @@ async function complete(
     body: JSON.stringify({
       model: settings.model,
       messages,
-      tools: agentTools(settings.vision, mode),
+      tools: agentTools(settings.vision, mode, plugins),
       tool_choice: 'auto',
       stream: true,
     }),
@@ -231,19 +238,46 @@ export async function runAgent(
   prompt: string,
   settings: CopilotSettings,
   deps: AgentDeps,
+  /** Imágenes que el usuario adjuntó a este mensaje (INFRA-857): mismo formato que las capturas. */
+  images: string[] = [],
 ): Promise<string> {
-  if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint and model before using Copilot.');
+  if (!isCopilotConfigured(settings)) throw new Error('Configure a valid endpoint, API key and model before using Copilot.');
   let mode: CopilotMode = settings.mode;
+  // Un servidor sin plugins, caído o sin configurar no rompe el turno: el copiloto sigue con las suyas.
+  const plugins = await deps.serverTools?.().catch(() => []) ?? [];
   const context = await deps.getContext();
+  const userText = `${context}\n\n${prompt}`;
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt(mode) },
     ...history.map((t) => ({ role: t.role, content: t.content })),
-    { role: 'user', content: `${context}\n\n${prompt}` },
+    {
+      role: 'user',
+      content: images.length
+        ? [{ type: 'text' as const, text: userText }, ...images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+        : userText,
+    },
   ];
+
+  /**
+   * Lo que el usuario escribió con la ejecución en marcha: entra como turno de usuario normal,
+   * justo antes de la siguiente llamada al modelo. Devuelve cuántos había.
+   */
+  function drainSteering(): number {
+    const pending = deps.takeSteering?.() ?? [];
+    for (const s of pending) {
+      messages.push({
+        role: 'user',
+        content: s.images?.length
+          ? [{ type: 'text' as const, text: s.text }, ...s.images.map((url) => ({ type: 'image_url' as const, image_url: { url } }))]
+          : s.text,
+      });
+    }
+    return pending.length;
+  }
 
   /** Meta tools are answered here and by the user; browser tools go to the handlers. */
   async function dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
-    if (!agentTools(settings.vision, mode).some((tool) => tool.function.name === name)) {
+    if (!agentTools(settings.vision, mode, plugins).some((tool) => tool.function.name === name)) {
       return { ok: false, error: `Tool unavailable in ${mode} mode: ${name}` };
     }
     if (name === 'update_plan') {
@@ -309,15 +343,17 @@ export async function runAgent(
   try {
     for (let step = 1; step <= settings.maxSteps; step++) {
       checkAbort(deps.signal);
-      deps.emit({ type: 'step', step });
+      drainSteering();
 
-      const reply = await complete(settings, mode, messages, deps);
+      const reply = await complete(settings, mode, messages, deps, plugins);
       const calls = reply.tool_calls ?? [];
       messages.push({ role: 'assistant', content: reply.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) });
 
       if (!calls.length) {
         const text = typeof reply.content === 'string' ? reply.content.trim() : '';
         deps.emit({ type: 'assistant', text });
+        // Dijo algo mientras se respondía: no se cierra la respuesta, se le hace caso (otro paso).
+        if (drainSteering()) continue;
         return text;
       }
 
@@ -363,7 +399,8 @@ export async function runAgent(
     throw error;
   }
 
+  // Sin contador en pantalla: el corte se avisa aquí y el panel pone el botón de continuar (INFRA-876).
   const text = `Stopped after ${settings.maxSteps} steps without a final answer.`;
-  deps.emit({ type: 'assistant', text });
+  deps.emit({ type: 'assistant', text, limit: true });
   return text;
 }

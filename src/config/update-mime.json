@@ -1,0 +1,3 @@
+{ "js": "text/javascript", "mjs": "text/javascript", "json": "application/json", "html": "text/html", "css": "text/css",
+  "png": "image/png", "svg": "image/svg+xml", "ico": "image/x-icon", "webp": "image/webp", "woff": "font/woff",
+  "woff2": "font/woff2", "ttf": "font/ttf", "map": "application/json", "txt": "text/plain" }

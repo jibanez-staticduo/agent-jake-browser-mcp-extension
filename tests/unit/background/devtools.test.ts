@@ -1,25 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { pageEvents } from '@/background/page-events';
+import { PageEventLog } from '@/background/page-events';
 import { createDevtoolsHandlers } from '@/background/tools/handlers/devtools';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
+/** What the call's pinned tab manager gives a devtools handler: one tab, its own captured events. */
+const events = new PageEventLog();
 const sendDebuggerCommand = vi.fn();
-const handlers = createDevtoolsHandlers({ tabManager: { sendDebuggerCommand } } as unknown as HandlerContext);
+const handlers = createDevtoolsHandlers({
+  tabManager: { tabId: () => Promise.resolve(101), eventsFor: () => events, sendDebuggerCommand },
+} as unknown as HandlerContext);
 
 beforeEach(() => {
-  pageEvents.reset();
+  events.reset();
   sendDebuggerCommand.mockReset();
 });
 
 describe('browser_network_request redirect bodies', () => {
   it('does not return the final hop body for an earlier redirect hop', async () => {
-    pageEvents.handle('Network.requestWillBeSent', { requestId: 'same', request: { url: 'https://example.test/start', hasPostData: true } });
-    pageEvents.handle('Network.requestWillBeSent', {
+    events.handle('Network.requestWillBeSent', { requestId: 'same', request: { url: 'https://example.test/start', hasPostData: true } });
+    events.handle('Network.requestWillBeSent', {
       requestId: 'same',
       redirectResponse: { status: 302, headers: { location: '/final' } },
       request: { url: 'https://example.test/final' },
     });
-    pageEvents.handle('Network.responseReceived', { requestId: 'same', response: { status: 200, mimeType: 'text/plain' } });
+    events.handle('Network.responseReceived', { requestId: 'same', response: { status: 200, mimeType: 'text/plain' } });
     sendDebuggerCommand.mockImplementation(async (method: string) =>
       method === 'Network.getResponseBody' ? { body: 'final-body', base64Encoded: false } : { postData: 'final-post' });
 
@@ -39,7 +43,7 @@ describe('browser_network_request redirect bodies', () => {
   });
 
   it('redacts sensitive headers regardless of casing without changing captured data', async () => {
-    pageEvents.handle('Network.requestWillBeSent', { requestId: 'auth', request: {
+    events.handle('Network.requestWillBeSent', { requestId: 'auth', request: {
       url: 'https://user:password@example.test/reset/path-secret?token=secret#fragment', headers: {
         cOoKiE: 'session=secret', AUTHORIZATION: 'Bearer secret', 'Proxy-Authorization': 'Basic secret',
         'X-Session-ID': 'secret', 'x-AuThToKeN': 'secret', 'X-Access-Key': 'secret',
@@ -47,12 +51,12 @@ describe('browser_network_request redirect bodies', () => {
         Accept: 'application/json', 'Content-Length': '42',
       },
     } });
-    pageEvents.handle('Network.responseReceived', { requestId: 'auth', response: { status: 200, headers: {
+    events.handle('Network.responseReceived', { requestId: 'auth', response: { status: 200, headers: {
       'sEt-CoOkIe': 'session=secret; HttpOnly', 'Content-Type': 'application/json; boundary=secret',
       Location: 'https://other.test/?code=location-secret', 'Cache-Control': 'max-age=60, private',
     } } });
 
-    const index = pageEvents.networkRequests()[0].index;
+    const index = events.networkRequests()[0].index;
     const result = await handlers.browser_network_request({ index }) as Record<string, unknown>;
     expect(result.requestHeaders).toEqual({
       cOoKiE: '[REDACTED]', AUTHORIZATION: '[REDACTED]', 'Proxy-Authorization': '[REDACTED]',
@@ -68,7 +72,7 @@ describe('browser_network_request redirect bodies', () => {
     expect(list.requests[0].url).toBe('https://example.test');
     expect(JSON.stringify(result)).not.toContain('secret');
     expect(JSON.stringify(list)).not.toContain('secret');
-    expect(pageEvents.networkRequest(index)?.requestHeaders.cOoKiE).toBe('session=secret');
+    expect(events.networkRequest(index)?.requestHeaders.cOoKiE).toBe('session=secret');
     expect(result).not.toHaveProperty('requestBody');
     expect(result).not.toHaveProperty('responseBody');
     expect(sendDebuggerCommand).not.toHaveBeenCalled();

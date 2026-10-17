@@ -15,21 +15,23 @@ const serverState = computed(() => status.status.connected ? 'connected' : 'disc
 // Tab connection state from status store
 const tabConnected = computed(() => status.hasConnectedTab);
 const tabTitle = computed(() => {
-  const tab = status.connectedTab;
-  if (!tab) return 'No tab';
+  const tabs = status.connectedTabs;
+  if (tabs.length > 1) return `${tabs.length} pestañas`;
+  const tab = tabs[0];
+  if (!tab) return 'Sin pestaña';
   return tab.title.length > 18 ? tab.title.slice(0, 18) + '…' : tab.title;
 });
 
 // Server status text
-const mcpTitle = computed(() => serverConnected.value ? 'Click to disconnect MCP' : 'Click to connect MCP');
+const mcpTitle = computed(() => serverConnected.value ? 'Pulsa para desconectar el MCP' : 'Pulsa para conectar el MCP');
 
 const serverStatusText = computed(() => {
   switch (serverState.value) {
-    case 'connected': return 'ONLINE';
-    case 'connecting': return 'SYNC';
-    case 'reconnecting': return 'RETRY';
-    case 'failed': return 'ERROR';
-    default: return 'OFFLINE';
+    case 'connected': return 'CONECTADO';
+    case 'connecting': return 'CONECTANDO';
+    case 'reconnecting': return 'REINTENTANDO';
+    case 'failed': return 'ERROR DE CONEXIÓN';
+    default: return 'SIN CONEXIÓN';
   }
 });
 </script>
@@ -59,16 +61,16 @@ const serverStatusText = computed(() => {
     <div
       class="indicator tab-indicator"
       :class="{ active: tabConnected, clickable: tabConnected }"
-      @click="tabConnected && status.focusTab()"
+      @click="status.connectedTab && status.focusTab(status.connectedTab.id)"
     >
       <div class="indicator-ring">
         <div class="indicator-core"></div>
         <div class="indicator-pulse"></div>
       </div>
       <div class="indicator-info">
-        <span class="indicator-label">TAB</span>
+        <span class="indicator-label">PESTAÑA</span>
         <span class="indicator-value" :class="{ connected: tabConnected }">
-          {{ tabConnected ? tabTitle : 'Pick a tab' }}
+          {{ tabConnected ? tabTitle : 'Sin elegir' }}
         </span>
       </div>
       <div class="indicator-line"></div>
@@ -292,9 +294,8 @@ button.indicator {
   font-size: 11px;
   font-weight: 500;
   color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: color 0.2s ease;
 }
 

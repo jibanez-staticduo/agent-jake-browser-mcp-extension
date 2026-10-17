@@ -9,6 +9,7 @@ import {
   getElementByRef,
   formatSnapshotAsText,
 } from './aria-tree';
+import { showCursor } from './cursor';
 import {
   buildSelector,
   findElement,
@@ -21,7 +22,9 @@ import type { ContentScriptRequest, ContentScriptResponse, Coordinates } from '@
 import { TIMEOUTS, getHighlightCSS } from '@/constants';
 import { CONFIG } from '@/types/config';
 import { generateCompactState, formatCompactState, findCompact } from './compact-state';
-import { handleDispatchDrop, handleFillField } from './form-actions';
+import { handleClearField, handleDispatchDrop, handleFieldLength, handleFillField, handleSetFieldText } from './form-actions';
+
+import { readSecret } from './read-secret';
 
 // Visual highlight overlay
 let highlightOverlay: HTMLDivElement | null = null;
@@ -81,6 +84,10 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
     case 'getText':
       return handleGetText(payload as { selector: string });
 
+    case 'readSecret':
+      try { return readSecret(payload as Parameters<typeof readSecret>[0]); }
+      catch { return { ok: false, code: 'SECRET_NO_MATCH' }; }
+
     case 'getAttribute':
       return handleGetAttribute(payload as { selector: string; attribute: string });
 
@@ -89,6 +96,9 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
     case 'waitForElement':
       return handleWaitForElement(payload as { selector: string; timeout?: number });
+
+    case 'cursor':
+      return showCursor(payload as Parameters<typeof showCursor>[0]);
 
     case 'highlight':
       return handleHighlight(payload as { selector: string });
@@ -119,6 +129,15 @@ async function handleRequest(request: ContentScriptRequest): Promise<unknown> {
 
     case 'fillField':
       return handleFillField(payload as Parameters<typeof handleFillField>[0]);
+
+    case 'fieldLength':
+      return handleFieldLength(payload as { selector: string });
+
+    case 'setFieldText':
+      return handleSetFieldText(payload as { selector: string; text: string; kept: number });
+
+    case 'clearField':
+      return handleClearField(payload as { selector: string });
 
     default:
       throw new Error(`Unknown action: ${action}`);

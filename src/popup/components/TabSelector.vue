@@ -21,11 +21,12 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
 
 <template>
   <div class="tab-selector">
-    <div class="section-title">Connect to Tab</div>
+    <div class="section-title">Pestaña de las sesiones MCP</div>
+    <p class="tab-help">No es la del copiloto: esa se elige en la barra del chat («Fijar»). Esta es la pestaña conectada que usan las sesiones MCP cuando no piden otra.</p>
 
     <div class="tab-list">
       <div v-if="status.sortedTabs.length === 0" class="empty-state">
-        No valid tabs available
+        No hay pestañas disponibles
       </div>
 
       <!-- When connected, only show the connected tab -->
@@ -34,10 +35,10 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
           v-for="tab in status.sortedTabs.filter(t => t.connected)"
           :key="tab.id"
           class="tab-item active"
-          @click="status.focusTab()"
+          @click="status.focusTab(tab.id)"
         >
-          <div class="tab-checkmark" @click.stop="status.disconnectTab()">✓</div>
-          <span class="tab-title">{{ tab.title || 'Untitled' }}</span>
+          <div class="tab-checkmark" @click.stop="status.disconnectTab(tab.id)">✓</div>
+          <span class="tab-title">{{ tab.title || 'Sin título' }}</span>
         </div>
       </template>
 
@@ -54,8 +55,8 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
             :src="tab.favIconUrl || defaultFavicon"
             @error="($event.target as HTMLImageElement).src = defaultFavicon"
           >
-          <span class="tab-title">{{ truncate(tab.title || 'Untitled', 30) }}</span>
-          <span v-if="tab.active" class="current-badge">CURRENT</span>
+          <span class="tab-title">{{ truncate(tab.title || 'Sin título', 30) }}</span>
+          <span v-if="tab.active" class="current-badge">ACTUAL</span>
         </div>
       </template>
     </div>
@@ -156,5 +157,10 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
   border-radius: 20px;
   font-weight: 500;
   text-transform: uppercase;
+}
+.tab-help {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
 }
 </style>

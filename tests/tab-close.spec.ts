@@ -48,7 +48,7 @@ test('closeById closes only the requested tab and rejects invalid IDs', async ()
   try {
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const popup = await context.newPage();
-    await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/popup/index.html`);
+    await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/sidepanel/index.html`);
     const configured = await popup.evaluate(async serverUrl => chrome.runtime.sendMessage({
       action: 'saveServerConfig', payload: { serverUrl, token: '' },
     }), origin.replace('http:', 'ws:'));
@@ -77,8 +77,8 @@ test('closeById closes only the requested tab and rejects invalid IDs', async ()
     expect(closed).toMatchObject({ success: true, result: { closed: true, tabId: otherId } });
     await expect.poll(() => otherPage.isClosed()).toBe(true);
     expect(connectedPage.isClosed()).toBe(false);
-    expect((await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'getStatus' }))).tabId).toBe(connectedId);
-    const legacy = await request('browser_close_tab', {});
+    expect((await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'getStatus' }))).tabs.find((tab: any) => tab.id === connectedId).connected).toBe(true);
+    const legacy = await request('browser_close_tab', { targetTabId: connectedId });
     expect(legacy).toMatchObject({ success: true, result: { closed: true, tabId: connectedId } });
     await expect.poll(() => connectedPage.isClosed()).toBe(true);
   } finally {
