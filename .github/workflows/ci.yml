@@ -1,0 +1,22 @@
+name: Product CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  extension:
+    runs-on: ${{ vars.AGENT_BROWSER_CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+      - run: npm run build
+      - run: bash scripts/check-deltas.sh

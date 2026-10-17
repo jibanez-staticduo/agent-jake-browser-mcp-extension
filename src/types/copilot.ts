@@ -5,6 +5,8 @@
 
 export const COPILOT_PORT = 'copilot';
 export const COPILOT_SETTINGS_KEY = 'copilotSettings';
+/** SHA-256 hashes of what background/provision.ts last seeded ({ baseUrl, apiKey }), to tell a user edit from a stale seed. */
+export const COPILOT_PROVISIONED_KEY = 'copilotProvisioned';
 export const COPILOT_ALLOWED_ORIGINS_KEY = 'copilotAllowedOrigins';
 
 /**
@@ -24,33 +26,61 @@ export interface CopilotSettings {
   maxSteps: number;
   /** Offer browser_screenshot and send the image back to the model. */
   vision: boolean;
+  /** Panel view of a turn: 'compact' folds all its activity into one block, 'extended' leaves every step visible. */
+  stepsView: 'compact' | 'extended';
+  /** MCP (streamable HTTP) del servidor emparejado: lo que anuncia entra como herramientas. Vacío: sin plugins. */
+  mcpUrl: string;
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   baseUrl: '',
   apiKey: '',
-  model: 'tooling',
+  model: 'qwen38-flash-next',
   mode: 'ask',
   maxSteps: 30,
   vision: false,
+  stepsView: 'compact',
+  mcpUrl: '',
 };
+
+export type CopilotField = 'baseUrl' | 'apiKey' | 'model';
+
+function isLoopback(url: URL): boolean {
+  return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+}
+
+/**
+ * What is still missing before the copilot can run. The single source for the worker, the chat
+ * notice, the Opciones summary and the amber dot. The key is optional only for a loopback endpoint.
+ */
+export function copilotMissing(settings: CopilotSettings): CopilotField[] {
+  const missing: CopilotField[] = [];
+  let loopback = false;
+  try {
+    const url = new URL(String(settings.baseUrl).trim());
+    loopback = isLoopback(url);
+    const safe = !url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
+    if (!safe) missing.push('baseUrl');
+  } catch {
+    missing.push('baseUrl');
+  }
+  if (!loopback && !(typeof settings.apiKey === 'string' && settings.apiKey.trim())) missing.push('apiKey');
+  if (typeof settings.model !== 'string' || !settings.model.trim()) missing.push('model');
+  return missing;
+}
 
 /** Shared by the panel and worker: no browser data is sent before setup. */
 export function isCopilotConfigured(settings: CopilotSettings): boolean {
-  if (typeof settings.baseUrl !== 'string' || typeof settings.model !== 'string' || !settings.model.trim()) return false;
-  try {
-    const url = new URL(settings.baseUrl.trim());
-    const loopback = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
-    return !url.username && !url.password && (url.protocol === 'https:' || (url.protocol === 'http:' && loopback));
-  } catch {
-    return false;
-  }
+  return copilotMissing(settings).length === 0;
 }
+
+/** OpenAI-style content part: a turn is text, or text plus the images the user attached (INFRA-857). */
+export type ChatPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
 
 /** One finished turn of the visible conversation (tool traffic stays in the worker). */
 export interface ChatTurn {
   role: 'user' | 'assistant';
-  content: string;
+  content: string | ChatPart[];
 }
 
 export type PlanStatus = 'pending' | 'in_progress' | 'done';
@@ -73,12 +103,17 @@ export type UserResponse =
   | { kind: 'plan'; decision: 'reject'; feedback: string };
 
 export type PanelToWorker =
-  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; mode: CopilotMode; model: string }
+  | { type: 'prompt'; history: ChatTurn[]; prompt: string; targetTabId: number | null; pinned?: boolean;
+      mode: CopilotMode; model: string;
+      /** data URLs of the images attached to this prompt (INFRA-857). */ images?: string[] }
   | { type: 'response'; requestId: string; response: UserResponse }
+  /** La chincheta de la cabecera: con `pinned` el agente no puede irse a otra pestaña (INFRA-875). */
+  | { type: 'pin'; pinned: boolean }
+  /** Lo que el usuario escribe con la ejecución en marcha: entra en la conversación entre pasos. */
+  | { type: 'steer'; prompt: string; images?: string[] }
   | { type: 'stop' };
 
 export type WorkerToPanel =
-  | { type: 'step'; step: number }
   | { type: 'delta'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_call'; id: string; name: string; args: Record<string, unknown> }
@@ -86,6 +121,9 @@ export type WorkerToPanel =
   | { type: 'request'; requestId: string; request: UserRequest }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'mode'; mode: CopilotMode }
-  | { type: 'assistant'; text: string }
+  /** El agente se ha ido a otra pestaña (switch/new_tab): su título, para marcarla en la cabecera. */
+  | { type: 'target'; title: string }
+  // `limit`: el bucle se quedó sin pasos sin cerrar la respuesta; el panel ofrece «Continuar» (INFRA-876).
+  | { type: 'assistant'; text: string; limit?: boolean }
   | { type: 'error'; message: string }
   | { type: 'done'; stopped: boolean };

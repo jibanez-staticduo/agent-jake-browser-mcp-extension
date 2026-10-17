@@ -29,7 +29,8 @@ for (const source of ['config.json', 'manual'] as const) {
       });
       const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
       const popup = await context.newPage();
-      await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/popup/index.html`);
+      await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/sidepanel/index.html`);
+      await popup.getByRole('button', { name: /^Opciones/ }).click();
       await expect.poll(() => requests.length).toBe(1);
       if (source === 'manual') {
         const configured = await popup.evaluate(serverUrl => chrome.runtime.sendMessage({
@@ -41,7 +42,7 @@ for (const source of ['config.json', 'manual'] as const) {
       const status = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'getServerConfig' }));
       expect(status).toMatchObject({ source, connected: true, awaitingToken: false, hasToken: false });
       expect(requests.every(url => !new URL(url, 'http://localhost').searchParams.has('token'))).toBe(true);
-      await expect(popup.locator('.conn-state')).toHaveText('CONECTADO');
+      await expect(popup.locator('.mcp-indicator .indicator-value')).toHaveText('CONECTADO');
     } finally {
       await context?.close();
       server.clients.forEach(socket => socket.terminate());
@@ -80,7 +81,8 @@ test('WS-only fallback leaves token authentication enforced by the handshake', a
     });
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const popup = await context.newPage();
-    await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/popup/index.html`);
+    await popup.goto(`chrome-extension://${new URL(worker.url()).host}/src/sidepanel/index.html`);
+      await popup.getByRole('button', { name: /^Opciones/ }).click();
     await expect.poll(() => openServer.clients.size).toBe(1);
     const wsUrl = `ws://127.0.0.1:${protectedPort}/ws`;
     const failed = await popup.evaluate(serverUrl => chrome.runtime.sendMessage({

@@ -66,7 +66,7 @@ test('secret typing keeps values out of replies, diagnostics and storage', async
     });
     const extensionId = new URL(worker.url()).host;
     const popup = await context.newPage();
-    await popup.goto(`chrome-extension://${extensionId}/src/popup/index.html`);
+    await popup.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
     const configured = await popup.evaluate(async serverUrl => chrome.runtime.sendMessage({
       action: 'saveServerConfig', payload: { serverUrl, token: '' },
     }), `ws://127.0.0.1:${port}`);
@@ -85,29 +85,30 @@ test('secret typing keeps values out of replies, diagnostics and storage', async
       catch { return false; }
     }, tabId)).toBe(true);
 
-    const reply = await request('browser_type', { selector: '#password', text: fakeSecret, clear: true, secret: true });
+    const routedRequest = (type: string, payload: Record<string, unknown>) => request(type, { ...payload, targetTabId: tabId });
+    const reply = await routedRequest('browser_type', { selector: '#password', text: fakeSecret, clear: true, secret: true });
     expect(reply.success).toBe(true);
     expect(reply.result).toMatchObject({ typed: true, cleared: true, verified: true, length: fakeSecret.length });
     expect(await page.locator('#password').inputValue()).toBe(fakeSecret);
 
-    const consoleReply = await request('browser_get_console_logs', { all: true });
+    const consoleReply = await routedRequest('browser_get_console_logs', { all: true });
     expect(consoleReply.success).toBe(true);
     expect(consoleReply.result.logs).toEqual([]);
 
-    const failure = await request('browser_type', { selector: `[data-missing="${fakeSecret}"]`, text: fakeSecret, secret: true });
+    const failure = await routedRequest('browser_type', { selector: `[data-missing="${fakeSecret}"]`, text: fakeSecret, secret: true });
     expect(failure.success).toBe(false);
     expect(JSON.stringify(failure)).not.toContain(fakeSecret);
-    const ordinary = await request('browser_type', { selector: '#name', text: 'Ordinary text', clear: true });
+    const ordinary = await routedRequest('browser_type', { selector: '#name', text: 'Ordinary text', clear: true });
     expect(ordinary.success).toBe(true);
     expect(ordinary.result.typed).toBe('Ordinary text');
     expect(await page.locator('#name').inputValue()).toBe('Ordinary text');
 
-    const snapshot = await request('browser_snapshot', {});
+    const snapshot = await routedRequest('browser_snapshot', {});
     expect(snapshot.success).toBe(true);
     const nameRef = String(snapshot.result.snapshot).match(/\[(s\d+e\d+)\|[^\]]*#name[^\]]*\]/)?.[1];
     // Ref lookup is also covered by unit tests; require the real snapshot shape here.
     expect(nameRef).toBeTruthy();
-    const byRef = await request('browser_type', { ref: nameRef!, text: fakeSecret, clear: true, secret: true });
+    const byRef = await routedRequest('browser_type', { ref: nameRef!, text: fakeSecret, clear: true, secret: true });
     expect(byRef.success).toBe(true);
     expect(await page.locator('#name').inputValue()).toBe(fakeSecret);
 
@@ -120,7 +121,7 @@ test('secret typing keeps values out of replies, diagnostics and storage', async
     const storage = await worker.evaluate(async () => JSON.stringify(await chrome.storage.local.get(null)));
     expect(storage).not.toContain(fakeSecret);
 
-    const newTab = await request('browser_new_tab', { url: fixtureUrl, switchTo: true });
+    const newTab = await routedRequest('browser_new_tab', { url: fixtureUrl, switchTo: true });
     expect(newTab.success).toBe(true);
     expect(newTab.result.tab).toMatchObject({ url: fixtureUrl, connected: true });
     expect(Number.isSafeInteger(newTab.result.tab.id)).toBe(true);

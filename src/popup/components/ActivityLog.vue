@@ -12,12 +12,12 @@ const activity = useActivityStore();
 <template>
   <div class="activity-section">
     <div class="activity-header">
-      <div class="section-title">Activity</div>
+      <div class="section-title">Actividad</div>
       <div class="activity-actions">
-        <button class="activity-btn" title="Clear" @click="activity.clear">
-          Clear
+        <button class="activity-btn" title="Borrar la actividad" @click="activity.clear">
+          Borrar
         </button>
-        <button class="activity-btn" title="Refresh" @click="activity.refresh()">
+        <button class="activity-btn" title="Actualizar" @click="activity.refresh()">
           ↻
         </button>
       </div>
@@ -25,7 +25,7 @@ const activity = useActivityStore();
 
     <div class="activity-log">
       <div v-if="activity.activities.length === 0" class="empty-state">
-        No activity yet...
+        Aún no hay actividad.
       </div>
       <ActivityEntryComponent
         v-for="entry in activity.activities"
@@ -39,7 +39,7 @@ const activity = useActivityStore();
       class="activity-see-more"
       @click="activity.openModal"
     >
-      See More ({{ activity.total }} total)
+      Ver más ({{ activity.total }} en total)
     </button>
   </div>
 </template>

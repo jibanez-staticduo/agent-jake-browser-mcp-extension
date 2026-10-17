@@ -261,6 +261,13 @@ describe('security boundaries', () => {
     expect(deps.fetch).not.toHaveBeenCalled();
   });
 
+  it('rejects a remote endpoint without a key, before reading browser data', async () => {
+    const getContext = vi.fn(async () => 'private page');
+    const { deps } = setup([], [], { getContext });
+    await expect(runAgent([], 'go', { ...base, apiKey: '' }, deps)).rejects.toThrow(/Configure/);
+    expect(getContext).not.toHaveBeenCalled();
+  });
+
   it('ships with no external endpoint', () => {
     expect(DEFAULT_COPILOT_SETTINGS.baseUrl).toBe('');
   });

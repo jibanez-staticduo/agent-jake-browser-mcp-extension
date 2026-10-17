@@ -5,7 +5,6 @@ import { schemas } from '@/background/tools/schemas';
 import { log, withSecretLogging, isSecretLogging } from '@/utils/logger';
 import { WebSocketClient } from '@/background/ws-client';
 import { TabManager } from '@/background/tab-manager';
-import { pageEvents } from '@/background/page-events';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
 const SECRET = 'FAKE-private-typing-91';
@@ -20,9 +19,9 @@ const chromeFake = {
 vi.stubGlobal('chrome', chromeFake);
 function context(navigated = false): HandlerContext {
   return {
-    tabManager: { getConnectedTabId: () => 1, sendDebuggerCommand: vi.fn().mockResolvedValue({}) },
-    resolveRef: vi.fn().mockResolvedValue({ frameId: 3, selector: '#fake' }),
-    sendToContent: vi.fn(async (action) => action === 'getElementCoordinates' ? { x: 1, y: 2 } : action === 'getFieldLength' ? { exists: true, length: SECRET.length } : {}),
+    tabManager: { tabId: async () => 1, sendDebuggerCommand: vi.fn().mockResolvedValue({}) },
+    resolveTarget: vi.fn(async (element) => ({ frameId: element.ref ? 3 : 0, selector: '#fake' })),
+    sendToContent: vi.fn(async (action) => action === 'getElementCoordinates' ? { x: 1, y: 2 } : action === 'getFieldLength' ? { exists: true, length: SECRET.length } : action === 'fieldLength' ? { length: SECRET.length } : {}),
     waitForStableOrNavigation: vi.fn().mockResolvedValue({ navigated, newUrl: `https://fake.test/${SECRET}` }),
     dispatchMouseEventTyped: vi.fn(), dispatchKeyEventTyped: vi.fn(),
   } as unknown as HandlerContext;
@@ -41,6 +40,11 @@ describe('secret typing boundaries', () => {
   });
   it('routes a selector to frame zero and preserves normal typing output', async () => {
     const ctx = context();
+    const content = ctx.sendToContent;
+    let measures = 0;
+    ctx.sendToContent = vi.fn(async (action, payload, frameId) => action === 'fieldLength'
+      ? { length: measures++ === 0 ? 0 : 'normal'.length } as never
+      : content(action, payload, frameId));
     expect(await createInteractionHandlers(ctx).browser_type({ selector: '#fake', text: 'normal' })).toEqual({ typed: 'normal', cleared: false });
     expect(ctx.sendToContent).toHaveBeenCalledWith('scrollIntoView', { selector: '#fake' }, 0);
   });
@@ -67,6 +71,19 @@ describe('secret typing boundaries', () => {
     expect(capture.mock.calls.at(-1)).toContain('normal diagnostic');
     capture.mockRestore();
   });
+  it.each([3, 2])('verifies appended secret text using UTF-16 length (initial=%s)', async (initialLength) => {
+    const ctx = context();
+    const original = ctx.sendToContent;
+    let measured = false;
+    ctx.sendToContent = async (action, payload, frameId) => {
+      if (action === 'fieldLength') return { length: initialLength === 2 ? 1 : 3 } as never;
+      if (action === 'getFieldLength') { const length = measured ? initialLength + SECRET.length : initialLength; measured = true; return { exists: true, length } as never; }
+      return original(action, payload, frameId);
+    };
+    const result = await createInteractionHandlers(ctx).browser_type({ selector: '#fake', text: SECRET, clear: false, secret: true });
+    expect(result).toMatchObject({ typed: true, cleared: false, verified: true, length: initialLength + SECRET.length });
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+  });
   it('keeps overlapping secret operations redacted until both finish', async () => {
     let release!: () => void;
     const pending = withSecretLogging(() => new Promise<void>(resolve => { release = resolve; }));
@@ -83,25 +100,26 @@ describe('secret typing boundaries', () => {
       throw new Error(SECRET);
     });
     const manager = new TabManager();
-    (manager as any).connectedTabId = 1;
+    (manager as any).session(1).debuggerAttached = true;
     await withSecretLogging(async () => {
-      await expect(manager.sendDebuggerCommand('Input.dispatchKeyEvent', { key: SECRET })).rejects.toThrow(SECRET);
+      await expect(manager.sendDebuggerCommand(1, 'Input.dispatchKeyEvent', { key: SECRET })).rejects.toThrow(SECRET);
     });
     expect(JSON.stringify([(manager as any).lastCdpError, capture.mock.calls])).not.toContain(SECRET);
     capture.mockRestore();
   });
   it('keeps debugger event waiters functional while discarding captured secret events', async () => {
     const manager = new TabManager();
-    (manager as any).connectedTabId = 1;
-    (manager as any).captureEvents = true;
-    pageEvents.reset();
-    const waiting = manager.waitForDebuggerEvent<{ frameId: string }>('Page.fileChooserOpened', 1000);
+    (manager as any).session(1).debuggerAttached = true;
+    (manager as any).session(1).captureEvents = true;
+    const events = manager.eventsFor(1);
+    events.reset();
+    const waiting = manager.waitForDebuggerEvent<{ frameId: string }>(1, 'Page.fileChooserOpened', 1000);
     await withSecretLogging(async () => {
       await (manager as any).handleDebuggerEvent({ tabId: 1 }, 'Runtime.consoleAPICalled', { type: 'warning', args: [{ value: SECRET.slice(0, 5) }] });
       await (manager as any).handleDebuggerEvent({ tabId: 1 }, 'Page.fileChooserOpened', { frameId: 'frame-1' });
       await expect(waiting).resolves.toEqual({ frameId: 'frame-1' });
     });
-    expect(pageEvents.consoleMessages({ all: true })).toEqual([]);
+    expect(events.consoleMessages({ all: true })).toEqual([]);
   });
   it('never returns a remote exception or logs payload through the real dispatcher', async () => {
     const capture = vi.spyOn(console, 'error').mockImplementation(() => {});

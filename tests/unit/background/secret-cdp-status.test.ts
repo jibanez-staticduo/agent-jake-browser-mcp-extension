@@ -12,12 +12,12 @@ describe('secret CDP status boundary', () => {
       throw new Error(fakeSecret);
     }) } });
     const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 1;
+    (manager as any).session(1).debuggerAttached = true;
     let release!: () => void;
     const pending = withSecretLogging(() => new Promise<void>(resolve => { release = resolve; }));
     try {
       expect(isSecretLogging()).toBe(true);
-      const status = await manager.getCdpStatus();
+      const status = await manager.getCdpStatus(1);
       expect(status).toMatchObject({ canExecuteCdp: false, lastCdpError: 'Secret operation CDP failure' });
       expect(JSON.stringify(status)).not.toContain(fakeSecret);
     } finally {
@@ -25,6 +25,6 @@ describe('secret CDP status boundary', () => {
       await pending;
     }
     expect(isSecretLogging()).toBe(false);
-    expect(await manager.getCdpStatus()).toMatchObject({ canExecuteCdp: false, lastCdpError: fakeSecret });
+    expect(await manager.getCdpStatus(1)).toMatchObject({ canExecuteCdp: false, lastCdpError: fakeSecret });
   });
 });

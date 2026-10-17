@@ -5,7 +5,6 @@
  * fill_form act on refs the same way interaction.ts does: the ref says which frame,
  * and the order goes to that frame's content script.
  */
-import { pageEvents } from '../../page-events';
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap } from './types';
 
@@ -61,19 +60,21 @@ export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_get_console_logs: async (payload) => {
       const { types, level, all, clear } = schemas.browser_get_console_logs.parse(payload);
-      const logs = pageEvents.consoleMessages({ types, level, all }).map((m) => ({
+      const events = ctx.tabManager.eventsFor(await ctx.tabManager.tabId());
+      const logs = events.consoleMessages({ types, level, all }).map((m) => ({
         type: m.type,
         text: m.text,
         timestamp: m.timestamp,
         ...(m.location ? { location: m.location } : {}),
       }));
-      if (clear) pageEvents.clearConsole();
+      if (clear) events.clearConsole();
       return { logs };
     },
 
     browser_network_requests: async (payload) => {
       const { includeStatic, all, filter } = schemas.browser_network_requests.parse(payload);
-      const requests = pageEvents.networkRequests({ includeStatic, all, filter }).map((e) => ({
+      const events = ctx.tabManager.eventsFor(await ctx.tabManager.tabId());
+      const requests = events.networkRequests({ includeStatic, all, filter }).map((e) => ({
         index: e.index,
         method: e.method,
         url: redactUrl(e.url),
@@ -86,7 +87,7 @@ export function createDevtoolsHandlers(ctx: HandlerContext): HandlerMap {
 
     browser_network_request: async (payload) => {
       const { index, part, maxBodyChars } = schemas.browser_network_request.parse(payload);
-      const e = pageEvents.networkRequest(index);
+      const e = ctx.tabManager.eventsFor(await ctx.tabManager.tabId()).networkRequest(index);
       if (!e) throw new Error(`No request [${index}] in the buffer (see browser_network_requests)`);
 
       const wantHeaders = (p: string) => !part || part === p;

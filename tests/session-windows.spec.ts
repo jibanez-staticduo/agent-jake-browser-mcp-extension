@@ -49,7 +49,7 @@ test('session windows survive extension reload and preserve user tabs without ch
   };
   try {
     let worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
-    const popupUrl = `chrome-extension://${new URL(worker.url()).host}/src/popup/index.html`;
+    const popupUrl = `chrome-extension://${new URL(worker.url()).host}/src/sidepanel/index.html`;
     let popup = await context.newPage();
     await popup.goto(popupUrl);
     await popup.evaluate(async serverUrl => chrome.runtime.sendMessage({ action: 'saveServerConfig', payload: { serverUrl, token: '' } }), origin.replace('http:', 'ws:'));
@@ -70,7 +70,7 @@ test('session windows survive extension reload and preserve user tabs without ch
     expect(second).toMatchObject({ success: true, result: { windowId: agentWindow, windowCreated: false } });
     const secondId = second.result.tab.id;
     expect(await worker.evaluate(async id => (await chrome.tabs.get(id)).active, secondId)).toBe(false);
-    const screenshot = await request('browser_screenshot', {});
+    const screenshot = await request('browser_screenshot', { targetTabId: secondId });
     expect(screenshot.success).toBe(true);
     expect(screenshot.result.image).toMatch(/^data:image\/png;base64,/);
     expect(await worker.evaluate(async id => (await chrome.tabs.get(id)).active, secondId)).toBe(false);

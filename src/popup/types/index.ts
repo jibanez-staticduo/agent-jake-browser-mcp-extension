@@ -30,7 +30,6 @@ export interface TabInfo {
 
 export interface Status {
   connected: boolean;
-  tabId: number | null;
   tabs: TabInfo[];
 }
 

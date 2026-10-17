@@ -3,12 +3,15 @@
  * Delegates to categorized handler modules.
  */
 
-import type { TabManager } from './tab-manager';
+import type { CallTab, TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
 import { log, withSecretLogging } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
+import { redactPayload, redactResult } from './redact';
 import { getKeyDefinition } from '@/constants/keys';
 import { createToolContext } from './tools/utils';
+import { SECRET_ERRORS } from './tools/handlers/queries';
+import type { SecretCode } from '@/content/read-secret';
 import type { HandlerContext } from './tools/handlers';
 import {
   createNavigationHandlers,
@@ -21,22 +24,26 @@ import {
 } from './tools/handlers';
 
 /**
- * Build a HandlerContext from a TabManager.
+ * Build a HandlerContext from the call's pinned tab manager.
  * Extends ToolContext with typed mouse/key event wrappers.
  */
-function buildHandlerContext(tabManager: TabManager): HandlerContext {
-  const ctx = createToolContext(tabManager);
+function buildHandlerContext(call: CallTab): HandlerContext {
+  const ctx = createToolContext(call);
 
   return {
     ...ctx,
 
     async dispatchMouseEventTyped(type, x, y, button = 'left', clickCount = 1) {
+      // INFRA-855: the drawn pointer glides on the move and ripples on the press.
+      if (type === 'mouseMoved') void ctx.sendToContent('cursor', { kind: 'move', x, y }).catch(() => {});
+      if (type === 'mousePressed') void ctx.sendToContent('cursor', { kind: 'click', x, y }).catch(() => {});
       await ctx.dispatchMouseEvent(type, x, y, button, clickCount);
     },
 
     async dispatchKeyEventTyped(type, key, text?) {
+      if (type === 'char') void ctx.sendToContent('cursor', { kind: 'type' }).catch(() => {});
       const keyDef = getKeyDefinition(key);
-      await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+      await call.sendDebuggerCommand('Input.dispatchKeyEvent', {
         type,
         key: keyDef.key,
         code: keyDef.code,
@@ -48,54 +55,148 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
 }
 
 /**
- * Follow the server's session tab without activating it; strip routing metadata before parsing.
+ * The MCP server names the tab of the calling session in every command (`targetTabId`); the
+ * copilot's lease knows its own. Take that tab out of the payload and give the call the tab it
+ * works in — from here on no handler chooses a tab, which is what let one session act on
+ * another's (INFRA-907).
  */
 export async function routeToTargetTab(
-  tabManager: Pick<TabManager, 'getConnectedTabId' | 'hasTab' | 'connectTab'>,
+  tabManager: Pick<TabManager, 'connectTab' | 'hasTab'>,
   payload: unknown,
-): Promise<unknown> {
-  if (!payload || typeof payload !== 'object' || !Object.prototype.hasOwnProperty.call(payload, 'targetTabId')) return payload;
+): Promise<{ tabId: number | null; payload: unknown }> {
+  if (!payload || typeof payload !== 'object') return { tabId: null, payload };
   const { targetTabId, ...rest } = payload as Record<string, unknown>;
-  if (typeof targetTabId !== 'number' || !Number.isSafeInteger(targetTabId) || targetTabId <= 0) {
-    const invalid = new Error('targetTabId must be a positive integer');
-    invalid.name = 'INVALID_TARGET_TAB_ID';
-    throw invalid;
-  }
-  // Check before connectTab can release the tab another session currently uses.
+  if (targetTabId === undefined) return { tabId: null, payload: rest };
+  if (typeof targetTabId !== 'number' || !Number.isSafeInteger(targetTabId) || targetTabId <= 0) throw new Error('targetTabId must be a positive integer');
   if (!await tabManager.hasTab(targetTabId)) {
-    const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists`);
+    const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
     gone.name = 'TAB_GONE';
     throw gone;
   }
-  if (tabManager.getConnectedTabId() !== targetTabId) await tabManager.connectTab(targetTabId);
-  return rest;
+  await tabManager.connectTab(targetTabId);
+  return { tabId: targetTabId, payload: rest };
 }
 
-/** Create tool handlers bound to a tab manager. */
-export function createToolHandlers(tabManager: TabManager) {
-  const ctx = buildHandlerContext(tabManager);
+/** Pinned methods that act now, so the call's tab must already be resolved when they are used. */
+const SYNC_PINNED = new Set<PropertyKey>([
+  'beginFileChooser', 'endFileChooser', 'startNewTabDetection', 'stopNewTabDetection',
+  'isAutoAttached', 'reapplyLiveConnectionUi',
+]);
 
-  const handlers: Record<string, (payload: unknown) => Promise<unknown>> = {
-    ...createNavigationHandlers(ctx),
-    ...createInteractionHandlers(ctx),
-    ...createQueryHandlers(ctx),
-    ...createStateHandlers(ctx),
-    ...createTabHandlers(ctx),
-    ...createUtilityHandlers(ctx),
-    ...createDevtoolsHandlers(ctx),
+/** Pinned methods that name a tab only when the caller gives one (close this tab, send this back). */
+const OPTIONAL_PINNED = new Set<PropertyKey>(['closeTab', 'sendTabToBack']);
+
+/** Pinned methods that may resolve the call's tab themselves (binding the tab in front if none). */
+const ASYNC_PINNED = new Set<PropertyKey>(['sendDebuggerCommand', 'waitForDebuggerEvent', 'runPasskeyCeremony']);
+
+/**
+ * The TabManager pinned to one call's tab (see `CallTab`): a handler cannot name another session's
+ * tab because it does not name any. When the server named none, the first tool that needs a tab
+ * binds the tab in front as the USER's own — auto-attached, so navigating tools refuse to drive it.
+ *
+ * `fence` is the gate's cut: naming the tab is part of holding the browser, so a call that lost it
+ * cannot even reach the content script of the tab another call is using now.
+ */
+export function pinnedToTab(tabManager: TabManager, routed: number | null, fence = new AbortController().signal): CallTab {
+  let resolved: number | null = routed;
+  let binding: Promise<number> | null = null;
+  const tabId = (): Promise<number> => {
+    fence.throwIfAborted();
+    if (resolved !== null) return Promise.resolve(resolved);
+    binding ??= (async () => {
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!active?.id) throw new Error('No active tab to attach to');
+      await tabManager.connectTab(active.id, active.url, { autoAttached: true });
+      resolved = active.id;
+      return resolved;
+    })();
+    return binding;
+  };
+  const currentTab = (): number => {
+    if (resolved === null) throw new Error('No tab connected');
+    return resolved;
   };
 
+  return new Proxy(tabManager, {
+    get(target, prop) {
+      if (prop === 'tabId') return tabId;
+      if (prop === 'routedTabId') return () => routed;
+      if (prop === 'currentTabId') return () => resolved;
+      const value = Reflect.get(target, prop);
+      if (typeof value !== 'function') return value;
+      if (SYNC_PINNED.has(prop)) return (...args: unknown[]) => value.apply(target, [currentTab(), ...args]);
+      if (OPTIONAL_PINNED.has(prop)) return (tab?: number, ...args: unknown[]) => value.apply(target, [tab ?? currentTab(), ...args]);
+      if (ASYNC_PINNED.has(prop)) return async (...args: unknown[]) => value.apply(target, [await tabId(), ...args]);
+      return value.bind(target);
+    },
+  }) as unknown as CallTab;
+}
+
+/** What a cut call may still do from its catch/finally: let go of what it took, never act. */
+const LETTING_GO = new Set<PropertyKey>(['stopNewTabDetection', 'endFileChooser']);
+
+/**
+ * The TabManager as one call sees it: once the gate cuts the call (agent/bridge.ts) every method
+ * that acts throws, so a handler that wakes up late — a frozen tab finally answering its content
+ * script, 16-10 — cannot act on the tab another call is using by then.
+ */
+function fencedTabManager(tabManager: TabManager, signal: AbortSignal): TabManager {
+  return new Proxy(tabManager, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const lettingGo = LETTING_GO.has(prop) || (prop === 'setFileChooserInterception' && args[1] === false);
+        if (!lettingGo) signal.throwIfAborted();
+        return value.apply(target, args);
+      };
+    },
+  });
+}
+
+/**
+ * Create tool handlers bound to a tab manager.
+ */
+export function createToolHandlers(browser: TabManager) {
+  function handlersFor(call: CallTab): Record<string, (payload: unknown) => Promise<unknown>> {
+    const ctx = buildHandlerContext(call);
+    return {
+      ...createNavigationHandlers(ctx),
+      ...createInteractionHandlers(ctx),
+      ...createQueryHandlers(ctx),
+      ...createStateHandlers(ctx),
+      ...createTabHandlers(ctx),
+      ...createUtilityHandlers(ctx),
+      ...createDevtoolsHandlers(ctx),
+
+      // Reload this extension from disk (unpacked build just replaced by a deploy). Answer first,
+      // reload right after: the socket drops and the new service worker reconnects on its own.
+      // Deploys call it through the server's loopback-only POST /extension/reload, so no Chrome
+      // debugging port, screen or human is needed to roll out a new build.
+      browser_reload_extension: async () => {
+        setTimeout(() => chrome.runtime.reload(), 300);
+        return { reloading: true, version: chrome.runtime.getManifest().version };
+      },
+    };
+  }
+
   /**
-   * Handle incoming message from WebSocket.
+   * Handle one call (from the WebSocket or the copilot). `signal` is the gate's cut: when it
+   * aborts, nothing this call left running touches the browser again.
    */
-  return async function handleMessage(message: IncomingMessage): Promise<OutgoingMessage> {
+  return async function handleMessage(message: IncomingMessage, signal = new AbortController().signal): Promise<OutgoingMessage> {
     const { id, type, payload } = message;
+    const readingSecret = type === 'browser_read_secret';
+    const secret = type === 'browser_type' && (payload as { secret?: unknown } | undefined)?.secret === true;
+    const execute = async (): Promise<OutgoingMessage> => {
     const startTime = performance.now();
-    const secret = type === 'browser_type' && payload?.secret === true;
+    const tabManager = fencedTabManager(browser, signal);
 
     log.debug(`[Tool] Received: ${type} (id: ${id})`);
 
     try {
+      const routed = await routeToTargetTab(tabManager, payload);
+      const handlers = handlersFor(pinnedToTab(tabManager, routed.tabId, signal));
       const handler = handlers[type];
       if (!handler) {
         logError('unknown_tool', `Unknown tool: ${type}`);
@@ -109,12 +210,11 @@ export function createToolHandlers(tabManager: TabManager) {
         };
       }
 
-      const execute = async () => handler(await routeToTargetTab(tabManager, payload));
-      const result = await (secret ? withSecretLogging(execute) : execute());
+      const result = await handler(routed.payload);
       const durationMs = Math.round(performance.now() - startTime);
 
-      const description = secret ? 'Type secret' : getToolDescription(type, payload, result);
-      logTool(type, description, true, durationMs);
+      const description = getToolDescription(type, payload, result);
+      logTool(type, secret ? "Secret typing completed" : description, true, durationMs, (secret || readingSecret) ? undefined : { payload: redactPayload(payload, type), result: redactResult(type, result) });
 
       log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
 
@@ -125,20 +225,27 @@ export function createToolHandlers(tabManager: TabManager) {
       };
     } catch (error) {
       const durationMs = Math.round(performance.now() - startTime);
-      const errorMessage = secret ? 'Secret typing failed' : (error as Error).message;
-      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${errorMessage} in ${durationMs}ms`);
+      if (readingSecret) {
+        const name = (error as Error)?.name;
+        const code: SecretCode = Object.hasOwn(SECRET_ERRORS, name) ? name as SecretCode : 'SECRET_NO_MATCH';
+        error = Object.assign(new Error(SECRET_ERRORS[code]()), { name: code });
+      }
+      const safeError = secret ? new Error('Secret typing failed') : error as Error;
+      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${safeError.message} in ${durationMs}ms`);
 
-      logTool(type, errorMessage, false, durationMs);
+      logTool(type, safeError.message, false, durationMs);
 
       return {
         id,
         success: false,
         error: {
-          code: secret ? 'EXECUTION_ERROR' : (error as Error).name || 'EXECUTION_ERROR',
-          message: errorMessage,
+          code: secret ? 'EXECUTION_ERROR' : safeError.name || 'EXECUTION_ERROR',
+          message: safeError.message,
         },
       };
     }
+    };
+    return (secret || readingSecret) ? withSecretLogging(execute) : execute();
   };
 }
 
@@ -155,6 +262,7 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
     case 'browser_click':
       return `Click on "${p?.ref || p?.selector}"`;
     case 'browser_type':
+      if (p?.secret) return `Type secret into "${p?.ref || p?.selector}"`;
       return `Type "${String(p?.text || '').slice(0, 20)}${(String(p?.text || '').length > 20) ? '...' : ''}"`;
     case 'browser_hover':
       return `Hover on "${p?.ref || p?.selector}"`;
@@ -168,10 +276,10 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Snapshot: ${r?.title || 'page'}`;
     case 'browser_new_tab':
       return `New tab: ${p?.url || 'unknown'}`;
+    case 'browser_find_tab':
+      return `Find tabs "${p?.query}"`;
     case 'browser_switch_tab':
       return `Switch to tab ${p?.tabId}`;
-    case 'browser_close_window':
-      return `Close window ${p?.windowId}`;
     case 'browser_close_tab':
       return 'Close tab';
     case 'browser_evaluate':
@@ -198,6 +306,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Drop on "${p?.ref || p?.selector}"`;
     case 'browser_fill_form':
       return `Fill form (${((p?.fields as unknown[]) ?? []).length} fields)`;
+    case 'browser_passkey':
+      return `Passkey ${p?.mode} on "${p?.ref || p?.selector}"`;
     case 'browser_select_option':
       return `Select option in "${p?.ref || p?.selector}"`;
     case 'browser_pdf':

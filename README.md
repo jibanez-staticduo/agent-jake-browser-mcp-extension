@@ -140,7 +140,7 @@ and [storage session lifetime](https://developer.chrome.com/docs/extensions/refe
 ## Copilot side panel
 
 A Claude-style chat in Chrome's side panel whose agent acts on your tabs, without any MCP
-client: open it with **Alt+J** (or "Abrir copiloto" in the popup), type a prompt, and the
+client: open it with the toolbar button or **Alt+J**, type a prompt, and the
 agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 - **Sees the page by default**: every prompt carries a `<page_context>` block with the
@@ -155,6 +155,8 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
     Preguntar, or send feedback and it re-plans.
 - **Interaction**: the agent can `ask_user` (options or free text) and keeps a live
   checklist with `update_plan`, pinned above the composer.
+- **Steering**: while a run is going, Enter does not queue — it drops your message into the
+  conversation and the loop hands it to the model before its next round (attachments included).
 - **Model selector** fed by `GET {endpoint}/models` (embeddings/audio/image filtered out).
 - Streamed answers (text and reasoning) rendered as safe Markdown (everything escaped,
   http(s) links only); tool steps collapse into "N pasos" blocks.
@@ -188,15 +190,45 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
 
 6. The extension icon should appear in your toolbar
 
+### Instalación con autoactualización (Descargas/agent-jake-browser)
+
+La build que publica el CI (`scripts/publicar.sh`, tras cada merge a `main`) está firmada (Ed25519). Una extensión
+instalada en `~/Downloads/agent-jake-browser/` se reescribe sola desde ella y se recarga; no hace falta volver a
+cargarla ni desplegar nada por navegador. Detalle del mecanismo en `ARCHITECTURE.md` («Autoactualización»).
+
+Condiciones (si no se cumplen, avisa una vez y no toca nada):
+
+- La carpeta es exactamente `Descargas/agent-jake-browser` (la ruta de descargas por defecto de Chrome).
+- **Modo desarrollador** activado en `chrome://extensions` (sin él, tras recargar la extensión queda deshabilitada).
+- **«Preguntar dónde guardar cada archivo» desactivado** en los ajustes de Chrome (Descargas); con él activado Chrome cancela las descargas.
+
+Migración (una vez por navegador):
+
+1. Bajar el zip de `https://browser-mcp.lan.e-dani.com/download` y descomprimirlo en `~/Downloads/agent-jake-browser/`.
+2. Quitar la extensión vieja en `chrome://extensions` y «Cargar descomprimida» esa carpeta. No hay `key` en el manifest: el id lo fija la carpeta y no cambia entre actualizaciones.
+3. Token en Opciones (o pairing): lo pone el usuario, la build no lo lleva. El zip de `/download` ya trae un `config.json` con la URL del pod (lo inyecta el servidor), así que x86 y MacBook Air (`wss://browser-mcp.lan.e-dani.com/ws`) solo necesitan el token. Un navegador que habla con un servidor LOCAL (Mac de CloudBlue, `ws://127.0.0.1:8765`) debe borrar `config.json` de la carpeta tras descomprimir (los valores por defecto de la build son 127.0.0.1:8765) o fijar la URL en Opciones.
+4. Copiloto: endpoint y key en Opciones (la build neutra ya no los siembra).
+5. En el pod, actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
+
+Prueba manual con Chrome desechable: `node scripts/e2e-self-update.mjs` (y `--tamper`, `--prompt`).
+
 ## Usage
 
 1. **Login** - Click the extension icon and enter your credentials to authenticate with the Laravel backend
 
 2. **Connect to Server** - The extension automatically connects to Reverb WebSocket on successful login
 
-3. **Select a Tab** - Choose a browser tab to automate from the popup
+3. **Select a Tab** - Choose a browser tab to automate from Opciones in the side panel
 
-4. **Monitor Status** - The popup shows connection state and activity log
+4. **Monitor Status** - Opciones shows connection state and activity log
+
+### Agent tabs stay in the background
+
+- `browser_new_tab` opens in the background, and the agent works in it (click, type, snapshot) without bringing it forward: **no `browser_switch_tab` is needed to type**. `browser_switch_tab` does bring the tab to the front.
+- `browser_navigate` never drives the tab you are looking at. With no tab connected, or when the only connected tab is the one auto-attached from your active tab, it opens a **new background tab**, connects to it and returns its `tabId`. A tab the agent opened or switched to navigates in place.
+- If CDP keys do not reach a field, `browser_type` sets the value from inside the page (native setter + `input`/`change`) and answers `fallback: "native-setter"`; it never echoes a `secret` text.
+- Exception: a passkey ceremony (`browser_passkey`) activates the tab on purpose, because Chrome requires focus for WebAuthn.
+- Real-Chrome check: `node scripts/e2e-background-tab.mjs` (Playwright's Chromium, own profile and ports).
 
 ### Network inspection
 
@@ -259,7 +291,7 @@ src/
 │   ├── activity-log.ts      # Action logging to Chrome storage
 │   ├── connection-state.ts  # Connection state with backoff
 │   └── tools/               # Tool schemas & utilities
-├── popup/                   # Vue 3 popup UI
+├── popup/                   # Vue components and stores reused by the side panel's Opciones view
 │   ├── App.vue              # Root component
 │   ├── main.ts              # Vue app initialization
 │   ├── components/          # UI components

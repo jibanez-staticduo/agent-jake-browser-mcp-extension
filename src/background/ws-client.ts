@@ -266,7 +266,7 @@ export class WebSocketClient {
     try {
       const message = JSON.parse(data) as IncomingMessage;
       messageId = message.id;
-      secret = message.type === 'browser_type' && message.payload?.secret === true;
+      secret = message.type === 'browser_read_secret' || (message.type === 'browser_type' && message.payload?.secret === true);
       log.info('[WS] Received message:', message.type, message.id);
 
       if (!this.messageHandler) {

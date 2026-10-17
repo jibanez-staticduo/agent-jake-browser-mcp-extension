@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Copia versionada en este fork del subset de aserciones de
+# ~/mcp-servers/agent-browser/scripts/check-deltas.sh que le toca a la extension
+# (deltas 2, 2b y 3-16). Ruling CTO DGX-309: el script compartido NO se mueve ni
+# se cambia (lo usa el timer systemd de producción); esta copia está adaptada
+# a un checkout de un solo repo, con rutas relativas a la raíz del repo.
+# Un auto-update que revierta cualquiera de estos es un FALLO, no un exito.
+set -u
+cd "$(dirname "$0")/.."
+fail=0
+chk() { # chk <descripcion> <comando grep...>
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then echo "  ok    $desc"; else echo "  FALLO $desc"; fail=1; fi
+}
+not() { local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then echo "  FALLO $desc"; fail=1; else echo "  ok    $desc"; fi
+}
+chk "2 default extension es 127.0.0.1"              grep -q "VITE_WS_HOST ?? '127.0.0.1'" src/types/config.ts
+not "2b el host de terceros no volvio (en codigo)"   bash -c "grep -v '^[[:space:]]*//' src/types/config.ts | grep -q agent-browser.staticduo.com"
+not "3 permiso identity retirado"                   grep -q '"identity"' manifest.json
+chk "4 keep-alive sin condicion de pestana"         bash -c "! grep -q 'alarms.clear(KEEPALIVE_ALARM)' src/background/index.ts"
+# INFRA-907: quien auto-engancha la pestana en frente es la llamada (su CallTab), no utils.ts.
+chk "5 auto-enganche de la pestana activa"          grep -q "lastFocusedWindow" src/background/tool-handlers.ts
+chk "6 sonda del content script"                    grep -q "Receiving end does not exist" src/background/tools/utils.ts
+chk "7 browser_state DOM-first"                     test -f src/content/compact-state.ts
+chk "8 all_frames activo"                           grep -q '"all_frames": true' manifest.json
+# upstream #8 movio el token de ws-client.ts a src/config/runtime.ts
+# (ajb.token ?? CONFIG.WS_TOKEN, lo manda buildWsUrl). La funcionalidad sigue:
+# se comprueba ahi, no en el fichero viejo.
+chk "9 token soportado en el cliente WS"            grep -q WS_TOKEN src/config/runtime.ts
+# El servidor cierra por id las pestañas inactivas del agente: ignorar el id cerraba la conectada.
+chk "10 browser_close_tab cierra el tabId pedido"   bash -c 'grep -q "schemas.browser_close_tab.parse" src/background/tools/handlers/tabs.ts && grep -q "closeById: true" src/background/tools/handlers/tabs.ts'
+chk "11 guard de WebAuthn (sin diálogo nativo, 1Password fijado)" bash -c 'grep -q "WebAuthn.addVirtualAuthenticator" src/background/tab-manager.ts && grep -q "export function pinWebAuthn" src/background/tab-manager.ts && grep -q "pinWebAuthnInFrames" src/background/tab-manager.ts'
+chk "12 ref o selector en las herramientas de elemento" grep -q "resolveTarget" src/background/tools/utils.ts
+chk "13 foco emulado: la entrada llega a pestañas en segundo plano" grep -q "Emulation.setFocusEmulationEnabled" src/background/tab-manager.ts
+chk "14 cada comando va a la pestaña de su sesión (targetTabId)" grep -q "routeToTargetTab(tabManager, payload)" src/background/tool-handlers.ts
+chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "UPDATE_PERIOD_MINUTES = 30" src/background/update-check.ts && grep -q "onStartup" src/background/index.ts'
+# INFRA-421: el botón de la barra abre el side panel (sin popup) y la provisión del copiloto corre al arrancar.
+# INFRA-875: lo abre solo en la pestaña que lo pidió (`open({ tabId })`) y el resto de pestañas no tienen
+# panel (`disablePanelByDefault`): con `side_panel.default_path` en el manifest, sin eso Chrome lo muestra en
+# todas las de la ventana y te persigue al cambiar.
+chk "16 el botón abre el side panel de su pestaña, sin popup" bash -c 'grep -q "open({ tabId" src/background/panel-open.ts && grep -q "disablePanelByDefault(chrome.sidePanel)" src/background/index.ts && ! grep -q default_popup manifest.json'
+chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
+# El dictado del panel es getUserMedia desde una página de extensión: sin el permiso declarado, NotAllowedError.
+chk "16c el panel puede dictar (permiso microphone)"    grep -q '"microphone"' manifest.json
+# Autoactualización: motor, permisos de descargas y clave pública fijada.
+chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
+# INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
+chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
+# INFRA-907: el debugger es por pestana (un TabSession por pestana manejada). No debe volver
+# "la pestana conectada" del navegador: con una sola, el comando de una sesion soltaba la pestana
+# de otra, y por eso la cola global era la que evitaba pisarse.
+chk "19 el debugger es por pestana" bash -c 'grep -q "new Map<number, TabSession>()" src/background/tab-manager.ts'
+not "19b no hay pestana conectada unica"            grep -rq "getConnectedTabId" src/
+
+exit $fail
