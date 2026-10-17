@@ -6,6 +6,10 @@
  */
 
 :root {
+  /* Los popups y controles del sistema (ventana del <select>, scrollbars) siguen al tema:
+     sin esto Chrome pinta el desplegable en claro sobre la UI oscura. */
+  color-scheme: light dark;
+
   /* Canvas and surfaces (light = default) */
   --bg-deepest: #f5f4ed;
   --bg-deep: #faf9f5;

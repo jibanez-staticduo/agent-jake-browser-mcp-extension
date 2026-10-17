@@ -50,7 +50,8 @@ button.link {
 }
 
 input,
-textarea {
+textarea,
+select {
   font: inherit;
   color: var(--text-primary);
   background: var(--bg-deep);
