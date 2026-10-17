@@ -147,7 +147,7 @@ onUnmounted(() => {
       <label>MCP del servidor (plugins)
         <input v-model="draft.mcpUrl" type="url" spellcheck="false"
           placeholder="http://127.0.0.1:8790/browser · vacío: sin plugins">
-        <span class="why">Lo que ese servidor anuncie en tools/list entra como herramienta del copiloto (solo en modo Auto). Sus browser_* se ignoran: el panel ya los ejecuta.</span>
+        <span class="why">Lo que ese servidor anuncie en tools/list entra como herramienta del copiloto (solo en modo Auto). Las que el panel ya ejecuta se ignoran por nombre; las demás actúan sobre los navegadores del servidor, no sobre esta pestaña.</span>
       </label>
       <div v-if="allowed.length" class="allowed">
         <span>Sitios con permiso permanente (modo Preguntar):</span>
