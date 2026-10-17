@@ -26,6 +26,8 @@ export interface CopilotSettings {
   maxSteps: number;
   /** Offer browser_screenshot and send the image back to the model. */
   vision: boolean;
+  /** Panel view of a turn: 'compact' folds all its activity into one block, 'extended' leaves every step visible. */
+  stepsView: 'compact' | 'extended';
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
@@ -35,6 +37,7 @@ export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   mode: 'ask',
   maxSteps: 30,
   vision: false,
+  stepsView: 'compact',
 };
 
 export type CopilotField = 'baseUrl' | 'apiKey' | 'model';

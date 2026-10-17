@@ -97,7 +97,7 @@ const placeholder = computed(() => {
   return running.value ? 'Dile algo ahora: se lo paso entre pasos' : 'Escribe qué quieres hacer en la pestaña';
 });
 const planDone = computed(() => plan.value.filter((s) => s.status === 'done').length);
-const blocks = computed(() => blocksOf(items.value));
+const blocks = computed(() => blocksOf(items.value, settings.value.stepsView !== 'extended'));
 
 function stepsLabel(steps: Item[]): string {
   const tools = steps.filter((s) => s.kind === 'tool');

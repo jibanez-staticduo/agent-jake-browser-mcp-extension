@@ -137,6 +137,12 @@ onUnmounted(() => {
         <label>Pasos máx.<input v-model.number="draft.maxSteps" type="number" min="1" max="100"></label>
         <label class="check"><input v-model="draft.vision" type="checkbox"> Visión (capturas al modelo)</label>
       </div>
+      <label>Vista de pasos
+        <select v-model="draft.stepsView">
+          <option value="compact">Compacta — un bloque por turno</option>
+          <option value="extended">Extendida — cada paso a la vista</option>
+        </select>
+      </label>
       <div v-if="allowed.length" class="allowed">
         <span>Sitios con permiso permanente (modo Preguntar):</span>
         <div v-for="o in allowed" :key="o" class="origin">

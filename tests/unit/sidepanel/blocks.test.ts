@@ -20,6 +20,19 @@ describe('blocksOf', () => {
     expect('item' in blocks[2] && blocks[2].item.text).toBe('Los MX son estos.');
   });
 
+  it('extended view (Opciones) puts visible narration back outside the blocks', () => {
+    const blocks = blocksOf([
+      { kind: 'assistant', text: '', reasoning: 'pienso', interim: true },
+      tool('1'),
+      narration('Voy a abrir el detalle.'),
+      tool('2'),
+    ], false);
+    expect(blocks).toHaveLength(3);
+    expect('steps' in blocks[0] && blocks[0].steps).toHaveLength(2);
+    expect('item' in blocks[1] && blocks[1].item.text).toBe('Voy a abrir el detalle.');
+    expect('steps' in blocks[2]).toBe(true);
+  });
+
   it('a turn without tool calls stays visible as its own block', () => {
     const blocks = blocksOf([{ kind: 'assistant', text: 'hola' }]);
     expect(blocks).toHaveLength(1);

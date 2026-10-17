@@ -60,11 +60,12 @@ export function titleOf(items: Item[]): string {
 /** A turn's quiet run — tool calls and the narration between them — shown collapsed as one «N pasos» block. */
 export type Block = { key: number; item: Item } | { key: number; steps: Item[] };
 
-/** Group each turn's activity (reasoning, narration and tool calls) into one block; the final answer stays its own (INFRA-898). */
-export function blocksOf(items: Item[]): Block[] {
+/** Group each turn's activity (reasoning, narration and tool calls) into one block; the final answer stays its own (INFRA-898).
+ * `compact` false (Opciones → vista extendida, INFRA-906): visible narration splits the blocks, as before. */
+export function blocksOf(items: Item[], compact = true): Block[] {
   const out: Block[] = [];
   items.forEach((item, i) => {
-    const quiet = item.kind === 'tool' || (item.kind === 'assistant' && item.interim);
+    const quiet = item.kind === 'tool' || (item.kind === 'assistant' && item.interim && (compact || !item.text.trim()));
     const last = out[out.length - 1];
     if (quiet && last && 'steps' in last) last.steps.push(item);
     else if (quiet) out.push({ key: i, steps: [item] });
