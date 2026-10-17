@@ -114,15 +114,11 @@ export function createMockActivities(): ActivityEntry[] {
   ];
 }
 
-export function createMockStatus(connected: boolean, tabId: number | null): Status {
+export function createMockStatus(connected: boolean, drivenTabIds: number[]): Status {
   const tabs = MOCK_TABS.map(t => ({
     ...t,
-    connected: connected && t.id === tabId,
+    connected: connected && drivenTabIds.includes(t.id),
   }));
 
-  return {
-    connected,
-    tabId,
-    tabs,
-  };
+  return { connected, tabs };
 }

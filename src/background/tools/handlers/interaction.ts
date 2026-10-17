@@ -15,8 +15,7 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
 
   async function clickElement(element: { ref?: string; selector?: string }) {
     const ref = element.ref ?? element.selector;
-    const tabId = ctx.tabManager.getConnectedTabId();
-    if (!tabId) throw new Error('No tab connected');
+    const tabId = await ctx.tabManager.tabId();
 
     const initialTab = await chrome.tabs.get(tabId);
     const initialUrl = initialTab.url || '';
@@ -94,8 +93,7 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
       const { text, clear, ...element } = schemas.browser_type.parse(payload);
       // browser_fill_secret arrives flagged `secret`: the answer (and the activity log that keeps it) never echoes the text.
       const shown = (payload as { secret?: unknown } | undefined)?.secret ? '[secret]' : text;
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
+      const tabId = await ctx.tabManager.tabId();
 
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';
@@ -238,8 +236,7 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
 
     browser_press_key: async (payload) => {
       const { key, ...element } = schemas.browser_press_key.parse(payload);
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (!tabId) throw new Error('No tab connected');
+      const tabId = await ctx.tabManager.tabId();
 
       const initialTab = await chrome.tabs.get(tabId);
       const initialUrl = initialTab.url || '';

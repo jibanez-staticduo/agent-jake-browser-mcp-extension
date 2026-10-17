@@ -12,9 +12,16 @@ describe('a call the gate has cut', () => {
     let answer!: (response: unknown) => void;
     // The content script of a frozen tab: the first message never answers until the test says so.
     const sendMessage = vi.fn(() => new Promise((resolve) => { answer = resolve; }));
-    vi.stubGlobal('chrome', { tabs: { get: vi.fn(async () => ({ id: 1, url: 'https://mail.test/' })), sendMessage } });
+    vi.stubGlobal('chrome', {
+      tabs: {
+        get: vi.fn(async () => ({ id: 1, url: 'https://mail.test/' })),
+        query: vi.fn(async () => [{ id: 1, url: 'https://mail.test/' }]),
+        sendMessage,
+      },
+    });
     const tabManager = {
-      getConnectedTabId: vi.fn(() => 1),
+      hasTab: vi.fn(async () => true),
+      connectTab: vi.fn(async () => undefined),
       startNewTabDetection: vi.fn(),
       stopNewTabDetection: vi.fn(() => null),
       sendDebuggerCommand: vi.fn(async () => ({})),
@@ -34,7 +41,7 @@ describe('a call the gate has cut', () => {
 
   it('runs as before while the call holds the browser', async () => {
     vi.stubGlobal('chrome', {});
-    const tabManager = { switchTab: vi.fn(async () => {}), getConnectedTabId: vi.fn(() => 2) } as unknown as TabManager;
+    const tabManager = { switchTab: vi.fn(async () => {}) } as unknown as TabManager;
     const result = await createToolHandlers(tabManager)({ id: 's1', type: 'browser_switch_tab', payload: { tabId: 2 } });
     expect(result).toMatchObject({ id: 's1', success: true });
     expect(tabManager.switchTab).toHaveBeenCalledWith(2);

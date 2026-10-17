@@ -35,9 +35,9 @@ const defaultFavicon = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/
           v-for="tab in status.sortedTabs.filter(t => t.connected)"
           :key="tab.id"
           class="tab-item active"
-          @click="status.focusTab()"
+          @click="status.focusTab(tab.id)"
         >
-          <div class="tab-checkmark" @click.stop="status.disconnectTab()">✓</div>
+          <div class="tab-checkmark" @click.stop="status.disconnectTab(tab.id)">✓</div>
           <span class="tab-title">{{ tab.title || 'Sin título' }}</span>
         </div>
       </template>

@@ -16,7 +16,8 @@ import {
 export const previewState = {
   authenticated: false,
   connected: false,
-  connectedTabId: null as number | null,
+  /** Tabs the mock reports as driven; several sessions drive several tabs (INFRA-907). */
+  drivenTabIds: [] as number[],
   activities: [] as ActivityEntry[],
 };
 
@@ -43,7 +44,7 @@ export function clearMockActivities(): void {
 export function resetPreviewState(): void {
   previewState.authenticated = false;
   previewState.connected = false;
-  previewState.connectedTabId = null;
+  previewState.drivenTabIds = [];
   previewState.activities = [];
 }
 
@@ -71,19 +72,19 @@ function handleMessage(msg: { action: string; payload?: unknown }): unknown {
     case 'logout': {
       previewState.authenticated = false;
       previewState.connected = false;
-      previewState.connectedTabId = null;
+      previewState.drivenTabIds = [];
       return { success: true };
     }
 
     case 'getStatus': {
-      return createMockStatus(previewState.connected, previewState.connectedTabId) satisfies Status;
+      return createMockStatus(previewState.connected, previewState.drivenTabIds) satisfies Status;
     }
 
     case 'connectTab': {
       const payload = msg.payload as { tabId: number } | undefined;
       const tabId = payload?.tabId ?? MOCK_TABS[0].id;
       previewState.connected = true;
-      previewState.connectedTabId = tabId;
+      if (!previewState.drivenTabIds.includes(tabId)) previewState.drivenTabIds.push(tabId);
       addMockActivity({
         type: 'connection',
         action: 'connect',
@@ -95,12 +96,13 @@ function handleMessage(msg: { action: string; payload?: unknown }): unknown {
     }
 
     case 'disconnectTab': {
-      previewState.connected = false;
-      previewState.connectedTabId = null;
+      const { tabId } = (msg.payload ?? {}) as { tabId?: number };
+      previewState.drivenTabIds = previewState.drivenTabIds.filter((id) => id !== tabId);
+      previewState.connected = previewState.drivenTabIds.length > 0;
       addMockActivity({
         type: 'connection',
         action: 'disconnect',
-        description: 'Disconnected from tab',
+        description: `Disconnected from tab ${tabId}`,
         success: true,
       });
       return { success: true };

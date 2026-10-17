@@ -5,7 +5,7 @@
 
 import { log } from '@/utils/logger';
 import { CONFIG } from '@/types/config';
-import type { TabManager } from '../tab-manager';
+import type { CallTab } from '../tab-manager';
 
 /**
  * Check if an error is a navigation-related error (BFCache, port closed, etc).
@@ -25,7 +25,8 @@ export function isNavigationError(error: Error): boolean {
  * Contains dependencies needed for tool execution.
  */
 export interface ToolContext {
-  tabManager: TabManager;
+  /** The browser as this call sees it: pinned to the call's tab (see `CallTab`). */
+  tabManager: CallTab;
   sendToContent: <T>(action: string, payload?: Record<string, unknown>, frameId?: number) => Promise<T>;
   sendToAllFrames: <T>(action: string, payload?: Record<string, unknown>) => Promise<FrameResult<T>[]>;
   getSelector: (ref: string) => Promise<string>;
@@ -65,28 +66,16 @@ export function parseRef(ref: string | number): { frameId: number; local: string
  * Create tool context from a tab manager.
  * This binds all helper functions to the tab manager instance.
  */
-export function createToolContext(tabManager: TabManager): ToolContext {
+export function createToolContext(tabManager: CallTab): ToolContext {
   /**
-   * Connected tab, or the active tab of the focused window when the popup has not
-   * connected one. Auto-attach keeps the MCP usable from a headless session: there
-   * is no UI to bind a tab by hand, so the first command binds the active tab. That tab is the
-   * USER's own: it is flagged (TabManager.isAutoAttached) so read-only tools may look at it but
-   * browser_navigate never drives it.
+   * The tab this call works in: the one the server named, or, when it named none, the tab in front
+   * bound as the USER's own. Auto-attach keeps the MCP usable from a headless session: there is no
+   * UI to bind a tab by hand, so the first command that needs a tab binds the active one. It is
+   * flagged (CallTab.isAutoAttached) so read-only tools may look at it but browser_navigate never
+   * drives it.
    */
-  async function requireTabId(): Promise<number> {
-    let tabId = tabManager.getConnectedTabId();
-    if (!tabId) {
-      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!active?.id) {
-        throw new Error('No active tab to attach to');
-      }
-      await tabManager.connectTab(active.id, active.url, { autoAttached: true });
-      tabId = tabManager.getConnectedTabId();
-      if (!tabId) {
-        throw new Error(`Could not attach to the active tab (${active.url ?? 'no url'})`);
-      }
-    }
-    return tabId;
+  function requireTabId(): Promise<number> {
+    return tabManager.tabId();
   }
 
   /**
@@ -251,8 +240,7 @@ export function createToolContext(tabManager: TabManager): ToolContext {
    * Returns navigated: true if page navigated, false if stable on same page.
    */
   async function waitForStableOrNavigation(initialUrl: string, frameId: number = 0): Promise<{ navigated: boolean; newUrl?: string }> {
-    const tabId = tabManager.getConnectedTabId();
-    if (!tabId) throw new Error('No tab connected');
+    const tabId = await tabManager.tabId();
 
     try {
       // After acting inside an iframe the mutations happen in THAT frame: watching the

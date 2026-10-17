@@ -15,7 +15,9 @@ const serverState = computed(() => status.status.connected ? 'connected' : 'disc
 // Tab connection state from status store
 const tabConnected = computed(() => status.hasConnectedTab);
 const tabTitle = computed(() => {
-  const tab = status.connectedTab;
+  const tabs = status.connectedTabs;
+  if (tabs.length > 1) return `${tabs.length} pestañas`;
+  const tab = tabs[0];
   if (!tab) return 'Sin pestaña';
   return tab.title.length > 18 ? tab.title.slice(0, 18) + '…' : tab.title;
 });
@@ -59,7 +61,7 @@ const serverStatusText = computed(() => {
     <div
       class="indicator tab-indicator"
       :class="{ active: tabConnected, clickable: tabConnected }"
-      @click="tabConnected && status.focusTab()"
+      @click="status.connectedTab && status.focusTab(status.connectedTab.id)"
     >
       <div class="indicator-ring">
         <div class="indicator-core"></div>

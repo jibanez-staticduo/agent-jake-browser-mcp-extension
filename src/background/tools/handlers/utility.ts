@@ -20,10 +20,7 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
      * tab paints like a visible one, so the user's tab is never moved.
      */
     browser_screenshot: async () => {
-      const tabId = ctx.tabManager.getConnectedTabId();
-      if (!tabId) {
-        throw new Error('No tab connected');
-      }
+      const tabId = await ctx.tabManager.tabId();
 
       const result = await ctx.tabManager.sendDebuggerCommand<{ data: string }>(
         'Page.captureScreenshot',
@@ -290,11 +287,10 @@ export function createUtilityHandlers(ctx: HandlerContext): HandlerMap {
       }
 
       // Button (or an input inside an iframe): let the page open its chooser and answer it.
-      ctx.tabManager.beginFileChooser();
+      const tabId = await ctx.tabManager.tabId();
       const chooser = new AbortController();
-      const tabId = ctx.tabManager.getConnectedTabId();
+      ctx.tabManager.beginFileChooser();
       try {
-        if (tabId === null) throw new Error('No tab connected for file chooser');
         await ctx.tabManager.setFileChooserInterception(tabId, true);
         const opened = ctx.tabManager.waitForDebuggerEvent<{ backendNodeId: number }>('Page.fileChooserOpened', 10000, chooser.signal);
         void opened.catch(() => {});

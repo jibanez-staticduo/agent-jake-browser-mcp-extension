@@ -21,7 +21,7 @@ function fakeContext() {
     waitForStableOrNavigation: vi.fn(async () => ({ navigated: false })),
     dispatchMouseEventTyped: vi.fn(async () => undefined),
     tabManager: {
-      getConnectedTabId: () => 7,
+      tabId: () => Promise.resolve(7),
       startNewTabDetection: vi.fn(),
       stopNewTabDetection: vi.fn(() => null),
       runPasskeyCeremony,

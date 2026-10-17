@@ -9,8 +9,8 @@ const updated: unknown[] = [];
   tabs: { update: vi.fn(async (...args: unknown[]) => { updated.push(args); }) },
 };
 
-/** A tab manager reduced to what browser_navigate reads. */
-function contextWith(opts: { connected: number | null; autoAttached: boolean }) {
+/** A call's pinned tab manager, reduced to what browser_navigate reads. */
+function contextWith(opts: { routed: number | null; autoAttached: boolean }) {
   const createTab = vi.fn(async (url: string) => ({
     tab: { id: 99, url, title: '', active: false, connected: true },
     loaded: true,
@@ -18,7 +18,7 @@ function contextWith(opts: { connected: number | null; autoAttached: boolean }) 
   const waitForNextTabLoad = vi.fn(async (_id: number, start: () => unknown) => { await start(); return true; });
   const ctx = {
     tabManager: {
-      getConnectedTabId: () => opts.connected,
+      routedTabId: () => opts.routed,
       isAutoAttached: () => opts.autoAttached,
       createTab,
       waitForNextTabLoad,
@@ -28,9 +28,9 @@ function contextWith(opts: { connected: number | null; autoAttached: boolean }) 
 }
 
 describe('browser_navigate never drives the user\'s own tab', () => {
-  it('with no tab connected it opens a NEW background tab, connects to it and returns its id', async () => {
+  it('with no tab named it opens a NEW background tab and returns its id', async () => {
     updated.length = 0;
-    const { handlers, createTab, waitForNextTabLoad } = contextWith({ connected: null, autoAttached: false });
+    const { handlers, createTab, waitForNextTabLoad } = contextWith({ routed: null, autoAttached: false });
 
     const answer = await handlers.browser_navigate({ url: 'https://example.com/login' });
 
@@ -42,19 +42,19 @@ describe('browser_navigate never drives the user\'s own tab', () => {
 
   it('on a tab bound only by auto-attach (the user\'s) it opens a new background tab and leaves that one alone', async () => {
     updated.length = 0;
-    const { handlers, createTab, waitForNextTabLoad } = contextWith({ connected: 7, autoAttached: true });
+    const { handlers, createTab, waitForNextTabLoad } = contextWith({ routed: null, autoAttached: true });
 
     const answer = await handlers.browser_navigate({ url: 'https://example.com/' });
 
     expect(createTab).toHaveBeenCalledWith('https://example.com/', true, false);
     expect(waitForNextTabLoad).not.toHaveBeenCalled();
-    expect(updated).toEqual([]); // chrome.tabs.update never touched tab 7
+    expect(updated).toEqual([]); // chrome.tabs.update never touched the user's tab
     expect(answer).toMatchObject({ tabId: 99, openedNewTab: true });
   });
 
   it('on a tab the agent opened or chose it keeps navigating in place', async () => {
     updated.length = 0;
-    const { handlers, createTab, waitForNextTabLoad } = contextWith({ connected: 7, autoAttached: false });
+    const { handlers, createTab, waitForNextTabLoad } = contextWith({ routed: 7, autoAttached: false });
 
     const answer = await handlers.browser_navigate({ url: 'https://example.com/next' });
 

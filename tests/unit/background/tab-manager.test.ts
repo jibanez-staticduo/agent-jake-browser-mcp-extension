@@ -73,13 +73,22 @@ vi.mock('@/background/activity-log', () => ({
 }));
 
 import { TabManager, WEBAUTHN_PIN_SCRIPT, PASSKEY_CEREMONY_TIMEOUT_MS, pinWebAuthn, purgeForeignExtensionFrames } from '@/background/tab-manager';
+import { pinnedToTab } from '@/background/tool-handlers';
 import { runInNewContext } from 'node:vm';
-import { pageEvents } from '@/background/page-events';
 import { TIMEOUTS } from '@/constants/timeouts';
 import { createNavigationHandlers } from '@/background/tools/handlers/navigation';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 import { createStateHandlers } from '@/background/tools/handlers/state';
 import { createToolContext } from '@/background/tools/utils';
+
+/** A tab the manager already drives, without going through the debugger: the tests below are about
+ * what happens on a tab, not about attaching it. */
+function drive(manager: TabManager, tabId: number) {
+  const session = (manager as unknown as { session(n: number): { debuggerAttached: boolean; captureEvents: boolean } }).session(tabId);
+  session.debuggerAttached = true;
+  session.captureEvents = true;
+  return session;
+}
 
 describe('TabManager CDP readiness', () => {
   beforeEach(() => {
@@ -88,65 +97,67 @@ describe('TabManager CDP readiness', () => {
 
   it('cancels a file chooser event wait without a late timeout rejection', async () => {
     const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 101;
+    drive(manager, 101);
     const controller = new AbortController();
-    const wait = manager.waitForDebuggerEvent('Page.fileChooserOpened', 10000, controller.signal);
+    const wait = manager.waitForDebuggerEvent(101, 'Page.fileChooserOpened', 10000, controller.signal);
     controller.abort();
     await expect(wait).rejects.toThrow('Stopped waiting for Page.fileChooserOpened');
   });
 
   it('rejects a second file chooser until the first releases its lock', () => {
     const manager = new TabManager();
-    manager.beginFileChooser();
-    expect(() => manager.beginFileChooser()).toThrow('already in progress');
-    manager.endFileChooser();
-    expect(() => manager.beginFileChooser()).not.toThrow();
-    manager.endFileChooser();
+    manager.beginFileChooser(101);
+    expect(() => manager.beginFileChooser(101)).toThrow('already in progress');
+    manager.endFileChooser(101);
+    expect(() => manager.beginFileChooser(101)).not.toThrow();
+    manager.endFileChooser(101);
   });
 
   it('clears captured network and console data on disconnect and debugger detach', async () => {
     const manager = new TabManager();
-    pageEvents.handle('Network.requestWillBeSent', { requestId: 'secret', request: { url: 'https://x.test', postData: 'secret' } });
-    pageEvents.handle('Runtime.consoleAPICalled', { args: [{ value: 'secret' }] });
-    await manager.disconnectTab();
-    expect(pageEvents.networkRequests()).toHaveLength(0);
-    expect(pageEvents.consoleMessages()).toHaveLength(0);
+    drive(manager, 101);
+    const events = manager.eventsFor(101);
+    events.handle('Network.requestWillBeSent', { requestId: 'secret', request: { url: 'https://x.test', postData: 'secret' } });
+    events.handle('Runtime.consoleAPICalled', { args: [{ value: 'secret' }] });
+    await manager.disconnectTab(101);
+    expect(events.networkRequests()).toHaveLength(0);
+    expect(events.consoleMessages()).toHaveLength(0);
 
-    pageEvents.handle('Network.requestWillBeSent', { requestId: 'secret2', request: { url: 'https://x.test' } });
-    manager.markDebuggerDetached();
-    expect(pageEvents.networkRequests()).toHaveLength(0);
+    drive(manager, 101);
+    manager.eventsFor(101).handle('Network.requestWillBeSent', { requestId: 'secret2', request: { url: 'https://x.test' } });
+    manager.markDebuggerDetached(101);
+    expect(manager.eventsFor(101).networkRequests()).toHaveLength(0);
   });
 
   it('ignores a late network event while disconnect is waiting on the close guard', async () => {
     const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 101;
-    (manager as unknown as { captureEvents: boolean }).captureEvents = true;
+    drive(manager, 101);
     let releaseGuard!: () => void;
     vi.spyOn(manager as never, 'setLiveConnectionCloseGuard' as never).mockImplementation(
       () => new Promise<void>((resolve) => { releaseGuard = resolve; }) as never,
     );
 
-    const disconnect = manager.disconnectTab();
-    await expect(manager.waitForDebuggerEvent('Page.fileChooserOpened')).rejects.toThrow('No connected tab');
+    const disconnect = manager.disconnectTab(101);
+    await expect(manager.waitForDebuggerEvent(101, 'Page.fileChooserOpened')).rejects.toThrow('No debugger session for tab 101');
     await (manager as unknown as { handleDebuggerEvent: (source: { tabId: number }, method: string, params: object) => Promise<void> })
       .handleDebuggerEvent({ tabId: 101 }, 'Network.requestWillBeSent', {
         requestId: 'late', request: { url: 'https://x.test', headers: { Cookie: 'late-secret' } },
       });
-    expect(pageEvents.networkRequests()).toHaveLength(0);
+    expect(manager.eventsFor(101).networkRequests()).toHaveLength(0);
     releaseGuard();
     await disconnect;
-    expect(pageEvents.networkRequests()).toHaveLength(0);
+    expect(manager.eventsFor(101).networkRequests()).toHaveLength(0);
   });
 
   it('rejects old chooser waits and never sends their files to a new tab', async () => {
     const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 101;
-    const oldWait = manager.waitForDebuggerEvent('Page.fileChooserOpened');
-    const rejected = expect(oldWait).rejects.toThrow('tab changed or detached');
+    drive(manager, 101);
+    const oldWait = manager.waitForDebuggerEvent(101, 'Page.fileChooserOpened');
+    const rejected = expect(oldWait).rejects.toThrow('the tab detached');
 
-    await manager.disconnectTab();
+    await manager.disconnectTab(101);
     await rejected;
-    (manager as unknown as { connectedTabId: number }).connectedTabId = 102;
+    drive(manager, 102);
     await (manager as unknown as { handleDebuggerEvent: (source: { tabId: number }, method: string, params: object) => Promise<void> })
       .handleDebuggerEvent({ tabId: 102 }, 'Page.fileChooserOpened', { backendNodeId: 77 });
     await expect(manager.setChooserFiles(101, 77, ['/tmp/old-file'])).rejects.toThrow('Tab changed');
@@ -159,14 +170,23 @@ describe('TabManager CDP readiness', () => {
     );
   });
 
-  it('reports not ready when no tab is connected', async () => {
+  it('connecting a tab we already drive attaches it once and leaves the other tabs alone', async () => {
+    // INFRA-907: every command of a session routes through connectTab for its own tab; it must not
+    // re-attach, and it must not take anything away from the tabs other sessions drive.
     const manager = new TabManager();
-    const status = await manager.getCdpStatus();
+    mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Demo', url: 'https://example.com' });
+    mockChrome.debugger.getTargets.mockResolvedValue([]);
+    mockChrome.debugger.attach.mockResolvedValue(undefined);
+    mockChrome.debugger.sendCommand.mockResolvedValue({});
 
-    expect(status.connectedTabId).toBeNull();
-    expect(status.debuggerAttached).toBe(false);
-    expect(status.canExecuteCdp).toBe(false);
-    expect(status.lastCdpError).toContain('No tab connected');
+    await manager.connectTab(102);
+    await manager.connectTab(101);
+    mockChrome.debugger.attach.mockClear();
+    await manager.connectTab(101);
+
+    expect(mockChrome.debugger.attach).not.toHaveBeenCalled();
+    expect(mockChrome.debugger.detach).not.toHaveBeenCalled();
+    expect(manager.drivenTabIds().sort((a, b) => a - b)).toEqual([101, 102]);
   });
 
   it('throws CDP_DEBUGGER_BUSY when another debugger owns the tab', async () => {
@@ -244,7 +264,7 @@ describe('TabManager CDP readiness', () => {
     });
 
     await manager.connectTab(101, 'https://example.com');
-    await manager.reattachDebugger();
+    await manager.reattachDebugger(101);
 
     const scripts = mockChrome.debugger.sendCommand.mock.calls
       .filter(([, method]) => String(method).includes('ScriptToEvaluateOnNewDocument'))
@@ -361,7 +381,7 @@ describe('TabManager CDP readiness', () => {
     });
 
     await expect(manager.connectTab(101, 'https://example.com')).resolves.toBeUndefined();
-    expect(manager.getConnectedTabId()).toBe(101);
+    expect(manager.drivenTabIds()).toEqual([101]);
   });
 
   it('reattaches and retries once when command fails with detached debugger', async () => {
@@ -397,7 +417,7 @@ describe('TabManager CDP readiness', () => {
     });
 
     await manager.connectTab(101, 'https://example.com');
-    const result = await manager.sendDebuggerCommand('Runtime.evaluate', { expression: '1+1' });
+    const result = await manager.sendDebuggerCommand(101, 'Runtime.evaluate', { expression: '1+1' });
 
     expect(result).toEqual({ result: { type: 'number', value: 2 } });
     expect(mockChrome.debugger.attach).toHaveBeenCalledTimes(2);
@@ -427,7 +447,7 @@ describe('TabManager CDP readiness', () => {
       })
     );
 
-    await manager.disconnectTab();
+    await manager.disconnectTab(101);
 
     expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -450,7 +470,7 @@ describe('TabManager CDP readiness', () => {
     await manager.connectTab(101, 'https://example.com');
     mockChrome.scripting.executeScript.mockClear();
 
-    await manager.reapplyLiveConnectionUi();
+    await manager.reapplyLiveConnectionUi(101);
 
     expect(mockChrome.scripting.executeScript).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -531,7 +551,7 @@ describe('TabManager background-tab control', () => {
 
     await manager.connectTab(101, 'https://example.com');
     const listener = mockChrome.webNavigation.onCommitted.addListener.mock.calls.at(-1)?.[0];
-    await manager.disconnectTab();
+    await manager.disconnectTab(101);
 
     expect(mockChrome.webNavigation.onCommitted.removeListener).toHaveBeenCalledWith(listener);
   });
@@ -595,8 +615,8 @@ describe('TabManager auto-attach flag', () => {
 
     await manager.connectTab(7, 'https://a.example/', { autoAttached: true });
 
-    expect(manager.isAutoAttached()).toBe(true);
-    expect(mockChrome.storage.local.set).toHaveBeenCalledWith({ autoAttachedTabId: 7 });
+    expect(manager.isAutoAttached(7)).toBe(true);
+    expect(mockChrome.storage.local.set).toHaveBeenLastCalledWith({ drivenTabIds: [7], autoAttachedTabIds: [7] });
   });
 
   it('connecting the same tab on purpose (switch_tab, popup) clears the flag', async () => {
@@ -605,8 +625,8 @@ describe('TabManager auto-attach flag', () => {
 
     await manager.connectTab(7);
 
-    expect(manager.isAutoAttached()).toBe(false);
-    expect(mockChrome.storage.local.remove).toHaveBeenCalledWith('autoAttachedTabId');
+    expect(manager.isAutoAttached(7)).toBe(false);
+    expect(mockChrome.storage.local.set).toHaveBeenLastCalledWith({ drivenTabIds: [7], autoAttachedTabIds: [] });
   });
 
   it('a plain connect (new_tab) is not flagged', async () => {
@@ -614,7 +634,7 @@ describe('TabManager auto-attach flag', () => {
 
     await manager.connectTab(7);
 
-    expect(manager.isAutoAttached()).toBe(false);
+    expect(manager.isAutoAttached(7)).toBe(false);
   });
 
   it('initialize restores the flag only for the tab it was set on', async () => {
@@ -622,24 +642,24 @@ describe('TabManager auto-attach flag', () => {
     mockChrome.tabs.get.mockResolvedValue({ id: 7, url: 'https://a.example/' });
     const restored = new TabManager();
     await restored.initialize();
-    expect(restored.isAutoAttached()).toBe(true);
+    expect(restored.isAutoAttached(7)).toBe(true);
 
     mockChrome.storage.local.get.mockResolvedValueOnce({ connectedTabId: 8, autoAttachedTabId: 7 });
     mockChrome.tabs.get.mockResolvedValue({ id: 8, url: 'https://b.example/' });
     const other = new TabManager();
     await other.initialize();
-    expect(other.isAutoAttached()).toBe(false);
+    expect(other.isAutoAttached(8)).toBe(false);
   });
 
-  it('requireTabId (read-only tools) auto-attaches the active tab with the flag set', async () => {
-    mockChrome.tabs.query.mockResolvedValueOnce([{ id: 7, url: 'https://a.example/' }]);
+  it('a call that names no tab auto-attaches the active one with the flag set', async () => {
+    mockChrome.tabs.query.mockResolvedValue([{ id: 7, url: 'https://a.example/' }]);
     const manager = new TabManager();
-    const ctx = createToolContext(manager);
+    const ctx = createToolContext(pinnedToTab(manager, null));
 
     await ctx.sendToContent('getPageInfo').catch(() => undefined);
 
-    expect(manager.getConnectedTabId()).toBe(7);
-    expect(manager.isAutoAttached()).toBe(true);
+    expect(manager.drivenTabIds()).toEqual([7]);
+    expect(manager.isAutoAttached(7)).toBe(true);
   });
 });
 
@@ -697,7 +717,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
     mockChrome.debugger.sendCommand.mockClear();
 
-    const { result, passkey } = await manager.runPasskeyCeremony('enroll', click);
+    const { result, passkey } = await manager.runPasskeyCeremony(101, 'enroll', click);
 
     expect(result).toEqual({ clicked: 'e1' });
     expect(passkey).toEqual({
@@ -731,7 +751,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
 
     vi.useFakeTimers();
     try {
-      const running = manager.runPasskeyCeremony('enroll', click);
+      const running = manager.runPasskeyCeremony(101, 'enroll', click);
       await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
       const { passkey } = await running;
       expect(passkey.ceremony).toBe('timeout');
@@ -751,7 +771,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
     mockChrome.debugger.sendCommand.mockClear();
 
-    const { passkey } = await manager.runPasskeyCeremony('use', click);
+    const { passkey } = await manager.runPasskeyCeremony(101, 'use', click);
 
     expect(passkey.ceremony).toBe('completed');
     const added = webauthnCalls().filter(([method]) => method === 'WebAuthn.addCredential');
@@ -767,7 +787,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
     mockChrome.debugger.sendCommand.mockClear();
 
-    await expect(manager.runPasskeyCeremony('use', click)).rejects.toThrow('No agent passkey enrolled for accounts.shopify.com');
+    await expect(manager.runPasskeyCeremony(101, 'use', click)).rejects.toThrow('No agent passkey enrolled for accounts.shopify.com');
     expect(click).not.toHaveBeenCalled();
     expect(webauthnCalls()).toEqual([]);
   });
@@ -780,7 +800,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
       await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
       mockChrome.debugger.sendCommand.mockClear();
 
-      const running = manager.runPasskeyCeremony('enroll', click);
+      const running = manager.runPasskeyCeremony(101, 'enroll', click);
       await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
       const { passkey } = await running;
 
@@ -809,7 +829,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
       return base(debuggee, method, params);
     });
 
-    const { passkey } = await manager.runPasskeyCeremony('enroll', click);
+    const { passkey } = await manager.runPasskeyCeremony(101, 'enroll', click);
 
     expect(guards).toBe(2); // the quick restore, then the full reinstall
     expect(passkey).toEqual(expect.objectContaining({ ceremony: 'completed', guardRestored: false }));
@@ -821,7 +841,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
     mockChrome.debugger.sendCommand.mockClear();
 
-    await expect(manager.runPasskeyCeremony('enroll', async () => { throw new Error('element not found'); }))
+    await expect(manager.runPasskeyCeremony(101, 'enroll', async () => { throw new Error('element not found'); }))
       .rejects.toThrow('element not found');
     expect(webauthnCalls().slice(-3)).toEqual([
       ['WebAuthn.removeVirtualAuthenticator', { authenticatorId: 'va-2' }],
@@ -842,7 +862,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     await manager.connectTab(101, 'https://accounts.shopify.com/lookup');
     mockChrome.tabs.update.mockClear();
 
-    await manager.runPasskeyCeremony('enroll', click);
+    await manager.runPasskeyCeremony(101, 'enroll', click);
 
     expect(mockChrome.tabs.query).toHaveBeenCalledWith({ active: true, windowId: 7 });
     expect(mockChrome.tabs.update.mock.calls).toEqual([[101, { active: true }], [55, { active: true }]]);
@@ -857,7 +877,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     mockChrome.debugger.sendCommand.mockClear();
     mockChrome.tabs.update.mockRejectedValueOnce(new Error('No tab with id: 101'));
 
-    await expect(manager.runPasskeyCeremony('enroll', click)).rejects.toThrow('No tab with id');
+    await expect(manager.runPasskeyCeremony(101, 'enroll', click)).rejects.toThrow('No tab with id');
     expect(click).not.toHaveBeenCalled();
     expect(webauthnCalls()).toEqual([]);
   });
@@ -870,7 +890,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     mockChrome.tabs.update.mockClear();
     vi.useFakeTimers();
     try {
-      const running = manager.runPasskeyCeremony('enroll', click);
+      const running = manager.runPasskeyCeremony(101, 'enroll', click);
       await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
       await running;
     } finally {
@@ -885,7 +905,7 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
     mockChrome.tabs.get.mockResolvedValue({ id: 101, title: 'Plain', url: 'http://example.com/' });
     await manager.connectTab(101, 'http://example.com/');
 
-    await expect(manager.runPasskeyCeremony('enroll', click)).rejects.toThrow('Passkeys need an https page');
+    await expect(manager.runPasskeyCeremony(101, 'enroll', click)).rejects.toThrow('Passkeys need an https page');
     expect(click).not.toHaveBeenCalled();
   });
 });
@@ -954,8 +974,8 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
 
   function connectedManager(tabId: number) {
     const manager = new TabManager();
-    (manager as unknown as { connectedTabId: number }).connectedTabId = tabId;
-    return { manager, handlers: createNavigationHandlers({ tabManager: manager } as unknown as HandlerContext) };
+    drive(manager, tabId);
+    return { manager, handlers: createNavigationHandlers({ tabManager: pinnedToTab(manager, tabId) } as unknown as HandlerContext) };
   }
 
   let events: ReturnType<typeof wireLoadEvents>;
@@ -1274,7 +1294,7 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
 
     it('browser_state answers from the half-loaded page', async () => {
       const manager = await managerOnTheHangingTab();
-      const handlers = createStateHandlers(createToolContext(manager) as unknown as HandlerContext);
+      const handlers = createStateHandlers(createToolContext(pinnedToTab(manager, HANG_TAB)) as unknown as HandlerContext);
 
       const answer = track(handlers.browser_state({}));
       await vi.advanceTimersByTimeAsync(PROBE_MS);
@@ -1301,7 +1321,7 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
       expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
     });
 
-    it('another tab can be connected: leaving the loading one does not wait for it', async () => {
+    it('another tab is connected while the loading one stays driven', async () => {
       const manager = await managerOnTheHangingTab();
       tabs[OTHER_TAB] = 'complete';
 
@@ -1309,7 +1329,7 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
       await vi.advanceTimersByTimeAsync(PROBE_MS);
 
       expect(answer.state).toBe('resolved');
-      expect(manager.getConnectedTabId()).toBe(OTHER_TAB);
+      expect(manager.drivenTabIds().sort((x, y) => x - y)).toEqual([HANG_TAB, OTHER_TAB]);
     });
 
     it('new_tab to another page answers while the loading tab is the connected one', async () => {

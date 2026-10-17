@@ -1,13 +1,13 @@
 /**
- * Manages connected tab state and tab operations.
- * Tracks which tab is currently being automated.
+ * Manages the tabs the agent drives. Each tab holds its own debugger session and its own state:
+ * two sessions working in different tabs never touch each other (INFRA-907).
  */
 
 import { log } from '@/utils/logger';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER, TIMEOUTS } from '@/constants';
-import { pageEvents } from './page-events';
+import { PageEventLog } from './page-events';
 import { passkeysForHost, rpIdMatchesHost, savePasskeys, summarize, type PasskeySummary, type StoredPasskey } from './passkey-vault';
 
 /**
@@ -110,11 +110,34 @@ interface CdpCredential {
   signCount: number;
 }
 
-export interface CdpStatus {
-  connectedTabId: number | null;
-  debuggerAttached: boolean;
-  canExecuteCdp: boolean;
-  lastCdpError: string | null;
+/**
+ * The TabManager as one tool call sees it: pinned to the call's tab, so a handler never chooses a
+ * tab and cannot act on the one another session is driving (INFRA-907). The pinned methods are the
+ * ones that used to read the single connected tab; the rest take a tab id explicitly, as always.
+ */
+export type PinnedMethodName =
+  | 'sendDebuggerCommand' | 'waitForDebuggerEvent' | 'beginFileChooser' | 'endFileChooser'
+  | 'startNewTabDetection' | 'stopNewTabDetection' | 'runPasskeyCeremony' | 'closeTab'
+  | 'sendTabToBack' | 'reapplyLiveConnectionUi' | 'isAutoAttached';
+
+export interface CallTab extends Omit<TabManager, PinnedMethodName | 'markDebuggerDetached' | 'reattachDebugger'> {
+  /** The tab of this call: the one the server named, or the tab in front bound as the user's own. */
+  tabId(): Promise<number>;
+  /** The tab the server named, without binding anything: null when the call names none. */
+  routedTabId(): number | null;
+  /** The tab already chosen for this call, or null while nothing has been resolved (never binds one). */
+  currentTabId(): number | null;
+  sendDebuggerCommand<T>(method: string, params?: Record<string, unknown>, timeout?: number): Promise<T>;
+  waitForDebuggerEvent<T = Record<string, unknown>>(method: string, timeout?: number, signal?: AbortSignal): Promise<T>;
+  beginFileChooser(): void;
+  endFileChooser(): void;
+  startNewTabDetection(): void;
+  stopNewTabDetection(): TabInfo | null;
+  runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }>;
+  closeTab(tabId?: number): Promise<number>;
+  sendTabToBack(tabId?: number): Promise<number | null>;
+  reapplyLiveConnectionUi(): Promise<void>;
+  isAutoAttached(): boolean;
 }
 
 /**
@@ -168,118 +191,120 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
   return results.reduce((n, r) => n + (typeof r.result === 'number' ? r.result : 0), 0);
 }
 
+/** Storage keys of the build before INFRA-907, which held the browser's single connected tab. */
+const LEGACY_TAB_KEY = 'connectedTabId';
+const LEGACY_AUTO_ATTACHED_KEY = 'autoAttachedTabId';
+
+/**
+ * Everything the debugger holds on ONE tab. It used to live on the manager, one copy for the whole
+ * browser, which is why a second session had to let go of the first tab to use its own (INFRA-907).
+ */
+class TabSession {
+  debuggerAttached = false;
+  captureEvents = false;
+  /** The tab is the user's own, reached by auto-attach and not opened or chosen by the agent. */
+  autoAttached = false;
+  disconnecting = false;
+  pendingNewTab: TabInfo | null = null;
+  newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
+  fileChooserInProgress = false;
+  webauthnPinIdentifier: string | null = null;
+  webauthnAuthenticatorId: string | null = null;
+  /** Bumped on detach so the waiters of this tab die and nobody else's. */
+  generation = 0;
+  readonly events = new PageEventLog();
+}
+
 export class TabManager {
-  private connectedTabId: number | null = null;
-  /** Set when the connected tab is the user's own, reached through auto-attach and not opened or chosen by the agent. */
-  private autoAttachedTabId: number | null = null;
-  private debuggerAttached = false;
-  private captureEvents = false;
-  private connectionGeneration = 0;
-  private disconnecting = false;
-  private lastCdpError: string | null = null;
-  private pendingNewTab: TabInfo | null = null;
-  private newTabListener: ((tab: chrome.tabs.Tab) => void) | null = null;
-  private fileChooserInProgress = false;
-  private webauthnPinScript: { tabId: number; identifier: string } | null = null;
-  private webauthnGuard: { tabId: number; authenticatorId: string } | null = null;
+  /** One per tab the agent drives. The debugger is exclusive per tab, so this is the unit of isolation. */
+  private readonly sessions = new Map<number, TabSession>();
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
 
+  private session(tabId: number): TabSession {
+    let session = this.sessions.get(tabId);
+    if (!session) {
+      session = new TabSession();
+      this.sessions.set(tabId, session);
+    }
+    return session;
+  }
+
+  /** The tab's session only when we hold the debugger on it: what "connected" used to mean. */
+  private driving(tabId: number): TabSession | undefined {
+    const session = this.sessions.get(tabId);
+    return session?.debuggerAttached ? session : undefined;
+  }
+
   /**
-   * Initialize tab manager, restoring state from storage.
+   * Initialize tab manager, restoring the tabs we were driving from storage.
    */
   async initialize(): Promise<void> {
     // Chrome swaps a tab for a new one (new id) on prerender activation and similar: without
     // following it, every command after that answers "No tab with id" on a tab that is open.
-    chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
-      if (this.connectedTabId !== removedTabId) return;
-      log.info(`Connected tab ${removedTabId} was replaced by ${addedTabId}; following it`);
-      this.connectedTabId = addedTabId;
-      this.debuggerAttached = false;
-      void chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: addedTabId });
-      if (this.autoAttachedTabId === removedTabId) {
-        this.autoAttachedTabId = addedTabId;
-        void chrome.storage.local.set({ [DEBUGGER.AUTO_ATTACHED_KEY]: addedTabId });
-      }
+    // A tab the user closed takes its session with it: there is nothing left to drive.
+    chrome.tabs.onRemoved.addListener((removedTabId) => {
+      if (this.sessions.delete(removedTabId)) void this.saveDrivenTabs();
     });
 
-    const stored = await chrome.storage.local.get([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
-    if (stored[DEBUGGER.STORAGE_KEY]) {
-      const tabId = stored[DEBUGGER.STORAGE_KEY] as number;
-      // Verify tab still exists
-      if (await this.tabExists(tabId)) {
-        this.connectedTabId = tabId;
-        // A service-worker restart must not turn the user's tab into one the agent owns.
-        this.autoAttachedTabId = stored[DEBUGGER.AUTO_ATTACHED_KEY] === tabId ? tabId : null;
-        await this.setLiveConnectionCloseGuard(tabId, true);
-        log.info(`Restored connected tab: ${tabId}`);
-      } else {
-        await chrome.storage.local.remove([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
-      }
+    chrome.tabs.onReplaced?.addListener((addedTabId, removedTabId) => {
+      const session = this.sessions.get(removedTabId);
+      if (!session) return;
+      log.info(`Driven tab ${removedTabId} was replaced by ${addedTabId}; following it`);
+      this.sessions.delete(removedTabId);
+      session.debuggerAttached = false;
+      this.sessions.set(addedTabId, session);
+      void this.saveDrivenTabs();
+    });
+
+    const stored = await chrome.storage.local.get([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY, LEGACY_TAB_KEY, LEGACY_AUTO_ATTACHED_KEY]);
+    // Before INFRA-907 these keys held the single connected tab: adopt it so the upgrade does not
+    // drop the close guard off a tab the agent was driving.
+    const legacy = typeof stored[LEGACY_TAB_KEY] === 'number' ? [stored[LEGACY_TAB_KEY] as number] : [];
+    if (legacy.length) await chrome.storage.local.remove([LEGACY_TAB_KEY, LEGACY_AUTO_ATTACHED_KEY]);
+    const driven = [...new Set([...(Array.isArray(stored[DEBUGGER.STORAGE_KEY]) ? (stored[DEBUGGER.STORAGE_KEY] as number[]) : []), ...legacy])];
+    const autoAttached = Array.isArray(stored[DEBUGGER.AUTO_ATTACHED_KEY]) ? (stored[DEBUGGER.AUTO_ATTACHED_KEY] as number[]) : [];
+    if (stored[LEGACY_AUTO_ATTACHED_KEY] === legacy[0]) autoAttached.push(legacy[0]);
+    for (const tabId of driven) {
+      if (!await this.tabExists(tabId)) continue;
+      // A service-worker restart must not turn the user's tab into one the agent owns.
+      this.session(tabId).autoAttached = autoAttached.includes(tabId);
+      await this.setLiveConnectionCloseGuard(tabId, true);
     }
+    if (driven.length) await this.saveDrivenTabs();
+  }
+
+  /** Which tabs we drive, so a service-worker restart picks them up again. */
+  private async saveDrivenTabs(): Promise<void> {
+    const driven = [...this.sessions].filter(([, session]) => session.debuggerAttached).map(([tabId]) => tabId);
+    await chrome.storage.local.set({
+      [DEBUGGER.STORAGE_KEY]: driven,
+      [DEBUGGER.AUTO_ATTACHED_KEY]: driven.filter((tabId) => this.sessions.get(tabId)?.autoAttached),
+    });
   }
 
   /**
-   * True when the connected tab is the user's own, bound by auto-attach (see requireTabId) rather
-   * than opened (browser_new_tab) or chosen (browser_switch_tab, the popup) by the agent. Whatever
-   * navigates must not drive such a tab: it opens a background one instead.
+   * True when the tab is the user's own, bound by auto-attach (see the call's tab in
+   * tool-handlers.ts) rather than opened (browser_new_tab) or chosen (browser_switch_tab, the
+   * popup) by the agent. Whatever navigates must not drive such a tab: it opens a background one.
    */
-  isAutoAttached(): boolean {
-    return this.connectedTabId !== null && this.autoAttachedTabId === this.connectedTabId;
+  isAutoAttached(tabId: number): boolean {
+    return this.sessions.get(tabId)?.autoAttached === true;
+  }
+
+  /** Tabs we hold the debugger on: what `list_tabs` reports as `connected`. */
+  drivenTabIds(): number[] {
+    return [...this.sessions].filter(([, session]) => session.debuggerAttached).map(([tabId]) => tabId);
+  }
+
+  /** The console and network captured for ONE tab — never another tab's history. */
+  eventsFor(tabId: number): PageEventLog {
+    return this.session(tabId).events;
   }
 
   /**
-   * Get the currently connected tab ID.
-   */
-  getConnectedTabId(): number | null {
-    return this.connectedTabId;
-  }
-
-  /**
-   * Return live CDP readiness for diagnostics and preflight checks.
-   * Attempts a self-heal attach when possible.
-   */
-  async getCdpStatus(): Promise<CdpStatus> {
-    const tabId = this.connectedTabId;
-    if (!tabId) {
-      return {
-        connectedTabId: null,
-        debuggerAttached: false,
-        canExecuteCdp: false,
-        lastCdpError: this.lastCdpError ?? 'CDP_NOT_READY: No tab connected',
-      };
-    }
-
-    let attached = await this.isDebuggerAttached(tabId);
-    if (!attached) {
-      try {
-        await this.attachDebugger(tabId);
-        attached = await this.isDebuggerAttached(tabId);
-      } catch (error) {
-        this.recordCdpError(error);
-      }
-    }
-
-    if (!attached) {
-      return {
-        connectedTabId: tabId,
-        debuggerAttached: false,
-        canExecuteCdp: false,
-        lastCdpError: this.lastCdpError ?? `CDP_NOT_READY: Debugger is not attached to tab ${tabId}`,
-      };
-    }
-
-    const probe = await this.probeCdp(tabId);
-
-    return {
-      connectedTabId: tabId,
-      debuggerAttached: true,
-      canExecuteCdp: probe.ok,
-      lastCdpError: probe.error,
-    };
-  }
-
-  /**
-   * Connect to a specific tab for automation.
+   * Take the debugger for ONE tab. The tabs another session is driving keep theirs: that is the
+   * whole point of INFRA-907 — until now this let go of the previous tab before looking at the new
+   * one, so every command of a second session dropped the first session's debugger.
    * If tabUrl is chrome://newtab/, navigates to about:blank first.
    */
   async connectTab(tabId: number, tabUrl?: string, options: { autoAttached?: boolean } = {}): Promise<void> {
@@ -289,33 +314,28 @@ export class TabManager {
       await this.waitForNextTabLoad(tabId, () => chrome.tabs.update(tabId, { url: 'about:blank' }));
     }
 
-    // Disconnect previous tab if any
-    if (this.connectedTabId && this.connectedTabId !== tabId) {
-      await this.disconnectTab();
-    }
-
     // Verify tab exists
     if (!await this.tabExists(tabId)) {
       await logError('tab_connect', `Tab ${tabId} does not exist`, { tabId });
       throw new Error(`Tab ${tabId} does not exist`);
     }
 
-    try {
-      // Attach debugger
-      if (this.connectedTabId !== tabId) pageEvents.reset(); // another tab: its history is not ours
-      await this.attachDebugger(tabId);
+    const session = this.session(tabId);
+    session.autoAttached = options.autoAttached === true;
+    if (session.debuggerAttached && !session.disconnecting) {
+      await this.saveDrivenTabs();
+      return; // already ours: nothing to re-enable, and no other tab to disturb
+    }
 
-      this.connectedTabId = tabId;
-      this.captureEvents = true;
-      this.autoAttachedTabId = options.autoAttached ? tabId : null;
-      await chrome.storage.local.set({ [DEBUGGER.STORAGE_KEY]: tabId });
-      if (options.autoAttached) await chrome.storage.local.set({ [DEBUGGER.AUTO_ATTACHED_KEY]: tabId });
-      else await chrome.storage.local.remove(DEBUGGER.AUTO_ATTACHED_KEY);
+    try {
+      await this.attachDebugger(tabId);
+      session.captureEvents = true;
 
       // Get tab info for logging
       const tab = await chrome.tabs.get(tabId);
       const title = tab.title || tab.url || `Tab ${tabId}`;
       await this.setLiveConnectionCloseGuard(tabId, true);
+      await this.saveDrivenTabs();
 
       log.info(`Connected to tab: ${tabId}`);
       await logTab('tab_connect', `Connected to: ${title}`, true, { tabId, url: tab.url });
@@ -326,32 +346,29 @@ export class TabManager {
   }
 
   /**
-   * Disconnect from the current tab.
+   * Let go of ONE tab: its debugger, its captures and its waiters. Other tabs are untouched.
    */
-  async disconnectTab(): Promise<void> {
-    this.captureEvents = false;
-    this.cancelEventWaiters();
-    pageEvents.reset();
-    if (!this.connectedTabId) {
-      return;
-    }
+  async disconnectTab(tabId: number): Promise<void> {
+    const session = this.sessions.get(tabId);
+    if (!session) return;
 
-    this.disconnecting = true;
-    const tabId = this.connectedTabId;
-    if (this.frameCommitListener) {
-      chrome.webNavigation.onCommitted.removeListener(this.frameCommitListener);
-      this.frameCommitListener = null;
-    }
+    session.captureEvents = false;
+    this.cancelEventWaiters(tabId);
+    session.events.reset();
+    session.disconnecting = true;
     try {
       await this.setLiveConnectionCloseGuard(tabId, false);
     } finally {
-      await this.detachDebugger();
-      this.connectedTabId = null;
-      this.autoAttachedTabId = null;
-      this.cancelEventWaiters();
-      pageEvents.reset();
-      this.disconnecting = false;
-      await chrome.storage.local.remove([DEBUGGER.STORAGE_KEY, DEBUGGER.AUTO_ATTACHED_KEY]);
+      await this.detachDebugger(tabId);
+      this.sessions.delete(tabId);
+      if (!this.sessions.size && this.frameCommitListener) {
+        chrome.webNavigation.onCommitted.removeListener(this.frameCommitListener);
+        this.frameCommitListener = null;
+      }
+      this.cancelEventWaiters(tabId);
+      session.events.reset();
+      session.disconnecting = false;
+      await this.saveDrivenTabs();
     }
 
     log.info(`Disconnected from tab: ${tabId}`);
@@ -403,10 +420,11 @@ export class TabManager {
    * not the target list — is what answers it.
    */
   private async attachDebugger(tabId: number): Promise<void> {
-    this.captureEvents = false;
-    this.cancelEventWaiters();
-    pageEvents.reset();
-    this.debuggerAttached = false;
+    const session = this.session(tabId);
+    session.captureEvents = false;
+    this.cancelEventWaiters(tabId);
+    session.events.reset();
+    session.debuggerAttached = false;
 
     try {
       log.info(`Attaching debugger to tab ${tabId}...`);
@@ -418,26 +436,22 @@ export class TabManager {
         log.warn(`Foreign extension frame blocked the attach to tab ${tabId}; removed ${removed}, retrying`);
         await chrome.debugger.attach({ tabId }, DEBUGGER.PROTOCOL_VERSION);
       }
-      this.debuggerAttached = true;
-      this.lastCdpError = null;
+      session.debuggerAttached = true;
       log.info(`Debugger attached to tab ${tabId}`);
     } catch (error) {
       const message = (error as Error).message ?? '';
       if (message.includes('Another debugger') || message.includes('Already attached')) {
         // Either the client holding it is us (then commands work), or it is DevTools.
         if (await this.isDebuggerAttached(tabId)) {
-          this.debuggerAttached = true;
-          this.lastCdpError = null;
+          session.debuggerAttached = true;
           log.debug(`Debugger was already ours on tab ${tabId}`);
         } else {
           const typedError = new Error(`CDP_DEBUGGER_BUSY: ${message}`);
-          this.recordCdpError(typedError);
           log.warn('Debugger already attached by another client');
           throw typedError;
         }
       } else {
         log.error('Failed to attach debugger:', error);
-        this.recordCdpError(error);
         throw error;
       }
     }
@@ -445,7 +459,7 @@ export class TabManager {
     // Always enable domains after attaching or detecting existing attachment
     // These calls are idempotent (safe to call multiple times)
     await this.enableDebuggerDomains(tabId);
-    if (this.connectedTabId === tabId) this.captureEvents = true;
+    session.captureEvents = true;
   }
 
   /**
@@ -457,7 +471,6 @@ export class TabManager {
         await sendCommandLiftingForeignFrames(tabId, `${domain}.enable`);
         log.info(`${domain} domain enabled`);
       } catch (enableError) {
-        this.recordCdpError(enableError);
         throw new Error(`CDP_NOT_READY: Failed to enable ${domain} domain: ${(enableError as Error).message}`);
       }
     }
@@ -506,6 +519,7 @@ export class TabManager {
    */
   private async installWebAuthnGuard(tabId: number): Promise<void> {
     const target = { tabId };
+    const session = this.session(tabId);
     try {
       // Dropping the previous session's authenticator keeps a re-attach at exactly one.
       await chrome.debugger.sendCommand(target, 'WebAuthn.disable').catch(() => undefined);
@@ -513,22 +527,23 @@ export class TabManager {
       await this.addGuardAuthenticator(tabId);
 
       // One copy per session: a re-attach on the same session would otherwise stack them.
-      if (this.webauthnPinScript?.tabId === tabId) {
+      if (session.webauthnPinIdentifier) {
         await chrome.debugger.sendCommand(target, 'Page.removeScriptToEvaluateOnNewDocument', {
-          identifier: this.webauthnPinScript.identifier,
+          identifier: session.webauthnPinIdentifier,
         }).catch(() => undefined);
       }
       const { identifier } = await chrome.debugger.sendCommand(target, 'Page.addScriptToEvaluateOnNewDocument', {
         source: WEBAUTHN_PIN_SCRIPT,
         runImmediately: true,
       }) as { identifier: string };
-      this.webauthnPinScript = { tabId, identifier };
+      session.webauthnPinIdentifier = identifier;
 
       // CDP scripts only reach the tab's own process; cross-site iframes get the pin through
-      // chrome.scripting, now and whenever one commits a document.
+      // chrome.scripting, now and whenever one commits a document. One listener for every tab we
+      // drive: it decides per event which tab the commit belongs to.
       if (!this.frameCommitListener) {
         this.frameCommitListener = (details) => {
-          if (details.tabId === this.connectedTabId && details.frameId !== 0) {
+          if (this.sessions.get(details.tabId)?.webauthnPinIdentifier && details.frameId !== 0) {
             void this.pinWebAuthnInFrames(details.tabId, [details]);
           }
         };
@@ -546,7 +561,7 @@ export class TabManager {
       options: GUARD_AUTHENTICATOR,
     }) as { authenticatorId: string };
     await chrome.debugger.sendCommand(target, 'WebAuthn.setResponseOverrideBits', { authenticatorId, isBadUP: true });
-    this.webauthnGuard = { tabId, authenticatorId };
+    this.session(tabId).webauthnAuthenticatorId = authenticatorId;
   }
 
   /**
@@ -559,9 +574,8 @@ export class TabManager {
    * It waits for the site to create or use a credential, up to PASSKEY_CEREMONY_TIMEOUT_MS.
    * Whatever happens, the ceremony authenticator goes and the guard comes back.
    */
-  async runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }> {
-    const tabId = this.connectedTabId;
-    if (!tabId) throw new Error('No tab connected');
+  async runPasskeyCeremony<T>(tabId: number, mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }> {
+    if (!this.sessions.has(tabId)) throw new Error('No tab connected');
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url ?? '';
     if (!/^https:/.test(url)) throw new Error(`Passkeys need an https page, not ${url || 'an empty tab'}`);
@@ -579,11 +593,12 @@ export class TabManager {
     // Before the guard comes off: if activating fails, the tab keeps its guard.
     if (!tab.active) await chrome.tabs.update(tabId, { active: true });
     const target = { tabId };
-    if (this.webauthnGuard?.tabId === tabId) {
+    const session = this.session(tabId);
+    if (session.webauthnAuthenticatorId) {
       await chrome.debugger.sendCommand(target, 'WebAuthn.removeVirtualAuthenticator', {
-        authenticatorId: this.webauthnGuard.authenticatorId,
+        authenticatorId: session.webauthnAuthenticatorId,
       }).catch(() => undefined);
-      this.webauthnGuard = null;
+      session.webauthnAuthenticatorId = null;
     }
     let authenticatorId: string | undefined;
     let guardRestored = true;
@@ -644,7 +659,7 @@ export class TabManager {
       log.warn('[Passkey] WebAuthn guard not restored, reinstalling it:', error);
     }
     await this.installWebAuthnGuard(tabId);
-    return this.webauthnGuard?.tabId === tabId;
+    return this.session(tabId).webauthnAuthenticatorId !== null;
   }
 
   /**
@@ -704,40 +719,44 @@ export class TabManager {
     }
   }
 
-  /** Only one upload may consume the next file chooser event. */
-  beginFileChooser(): void {
-    if (this.disconnecting) throw new Error('Tab is disconnecting');
-    if (this.fileChooserInProgress) throw new Error('A file chooser upload is already in progress');
-    this.fileChooserInProgress = true;
+  /** Only one upload may consume the next file chooser event of a tab. */
+  beginFileChooser(tabId: number): void {
+    const session = this.session(tabId);
+    if (session.disconnecting) throw new Error('Tab is disconnecting');
+    if (session.fileChooserInProgress) throw new Error('A file chooser upload is already in progress');
+    session.fileChooserInProgress = true;
   }
 
-  endFileChooser(): void {
-    this.fileChooserInProgress = false;
+  endFileChooser(tabId: number): void {
+    const session = this.sessions.get(tabId);
+    if (session) session.fileChooserInProgress = false;
   }
 
-  private cancelEventWaiters(): void {
-    this.connectionGeneration++;
+  private cancelEventWaiters(tabId: number): void {
+    const session = this.sessions.get(tabId);
+    if (session) session.generation++;
     for (const waiter of [...this.eventWaiters]) {
-      waiter.reject(new Error('Debugger event wait canceled because the tab changed or detached'));
+      if (waiter.tabId === tabId) waiter.reject(new Error('Debugger event wait canceled because the tab detached'));
     }
   }
 
   async setChooserFiles(tabId: number, backendNodeId: number, files: string[]): Promise<void> {
-    if (this.disconnecting || this.connectedTabId !== tabId) throw new Error('Tab changed during file upload');
+    const session = this.sessions.get(tabId);
+    if (!session || session.disconnecting) throw new Error('Tab changed during file upload');
     // Pin the command to the original tab; reattachment would invalidate the chooser node.
     await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', { backendNodeId, files });
   }
 
   async setFileChooserInterception(tabId: number, enabled: boolean): Promise<void> {
-    if (enabled && (this.disconnecting || this.connectedTabId !== tabId)) throw new Error('Tab changed during file upload');
+    if (enabled && this.session(tabId).disconnecting) throw new Error('Tab changed during file upload');
     await chrome.debugger.sendCommand({ tabId }, 'Page.setInterceptFileChooserDialog', { enabled });
   }
 
-  /** Resolve with the next matching event from the connected tab. */
-  waitForDebuggerEvent<T = Record<string, unknown>>(method: string, timeout = 10000, signal?: AbortSignal): Promise<T> {
-    const tabId = this.connectedTabId;
-    if (tabId === null || this.disconnecting) return Promise.reject(new Error('No connected tab for debugger event wait'));
-    const generation = this.connectionGeneration;
+  /** Resolve with the next matching event from one tab. */
+  waitForDebuggerEvent<T = Record<string, unknown>>(tabId: number, method: string, timeout = 10000, signal?: AbortSignal): Promise<T> {
+    const session = this.sessions.get(tabId);
+    if (!session || session.disconnecting) return Promise.reject(new Error(`No debugger session for tab ${tabId}`));
+    const generation = session.generation;
     return new Promise<T>((resolve, reject) => {
       const waiter = { method, tabId, generation, resolve: (params: unknown) => {
         cleanup();
@@ -791,14 +810,15 @@ export class TabManager {
     method: string,
     params?: object
   ): Promise<void> => {
-    if (!this.connectedTabId || source.tabId !== this.connectedTabId) {
-      return;
+    const session = source.tabId === undefined ? undefined : this.sessions.get(source.tabId);
+    if (!session) {
+      return; // an event of a tab we do not drive (another session's, DevTools', the user's)
     }
 
-    if (this.captureEvents) pageEvents.handle(method, params as Record<string, unknown> | undefined);
+    if (session.captureEvents) session.events.handle(method, params as Record<string, unknown> | undefined);
 
     for (const waiter of this.eventWaiters) {
-      if (waiter.method === method && waiter.tabId === source.tabId && waiter.generation === this.connectionGeneration) {
+      if (waiter.method === method && waiter.tabId === source.tabId && waiter.generation === session.generation) {
         waiter.resolve(params ?? {});
       }
     }
@@ -813,7 +833,7 @@ export class TabManager {
 
     try {
       await chrome.debugger.sendCommand(
-        { tabId: this.connectedTabId },
+        { tabId: source.tabId },
         'Page.handleJavaScriptDialog',
         { accept }
       );
@@ -824,22 +844,18 @@ export class TabManager {
   };
 
   /**
-   * Detach debugger from tab.
+   * Detach debugger from ONE tab. The shared onEvent listener stays: it dispatches by tab.
    */
-  private async detachDebugger(): Promise<void> {
-    if (!this.connectedTabId) {
-      return;
-    }
-
+  private async detachDebugger(tabId: number): Promise<void> {
+    const session = this.session(tabId);
     // Always reset flag
-    this.debuggerAttached = false;
-    this.webauthnPinScript = null; // the session's scripts go with it
-    this.webauthnGuard = null; // and its authenticators
+    session.debuggerAttached = false;
+    session.webauthnPinIdentifier = null; // the session's scripts go with it
+    session.webauthnAuthenticatorId = null; // and its authenticators
 
     try {
-      chrome.debugger.onEvent.removeListener(this.handleDebuggerEvent);
-      await chrome.debugger.detach({ tabId: this.connectedTabId });
-      log.debug('Debugger detached');
+      await chrome.debugger.detach({ tabId });
+      log.debug(`Debugger detached from tab ${tabId}`);
     } catch (error) {
       // May already be detached
       log.warn('Failed to detach debugger:', error);
@@ -847,66 +863,68 @@ export class TabManager {
   }
 
   /**
-   * Reattach debugger to the connected tab.
-   * Called when debugger is unexpectedly detached.
+   * Reattach debugger to one tab. Called when the debugger is unexpectedly detached.
    */
-  async reattachDebugger(): Promise<void> {
-    if (!this.connectedTabId) {
+  async reattachDebugger(tabId: number): Promise<void> {
+    if (!this.sessions.has(tabId)) {
       throw new Error('No tab connected');
     }
 
     // Mark as detached so attachDebugger will do full attach
-    this.debuggerAttached = false;
+    this.session(tabId).debuggerAttached = false;
 
-    await this.attachDebugger(this.connectedTabId);
-    log.info(`[TabManager] Debugger reattached to tab ${this.connectedTabId}`);
+    await this.attachDebugger(tabId);
+    log.info(`[TabManager] Debugger reattached to tab ${tabId}`);
   }
 
   /**
-   * Mark debugger as detached (called from onDetach listener).
+   * Mark one tab's debugger as detached (called from the onDetach listener, which says which tab).
+   * Answers whether the tab was ours at all: a tab we only read events for is not one to reattach.
    */
-  markDebuggerDetached(): void {
-    this.captureEvents = false;
-    this.cancelEventWaiters();
-    pageEvents.reset();
-    this.debuggerAttached = false;
-    this.webauthnPinScript = null;
-    this.webauthnGuard = null;
-    this.lastCdpError = 'CDP_DEBUGGER_DETACHED: Debugger detached unexpectedly';
+  markDebuggerDetached(tabId: number): boolean {
+    const session = this.sessions.get(tabId);
+    if (!session) return false;
+    const wasDriving = session.debuggerAttached;
+    session.captureEvents = false;
+    this.cancelEventWaiters(tabId);
+    session.events.reset();
+    session.debuggerAttached = false;
+    session.webauthnPinIdentifier = null;
+    session.webauthnAuthenticatorId = null;
+    void this.saveDrivenTabs();
+    return wasDriving;
   }
 
   /**
-   * Send a debugger command to the connected tab.
-   * Auto-reattaches debugger if it has been detached.
+   * Send a debugger command to ONE tab, attaching its debugger if that tab has none yet.
+   * Never touches another tab: two sessions driving two tabs run their commands at the same time.
    */
   async sendDebuggerCommand<T>(
+    tabId: number,
     method: string,
     params?: Record<string, unknown>,
     timeout: number = 25000 // 25 seconds default timeout (less than WS timeout of 30s)
   ): Promise<T> {
-    if (!this.connectedTabId) {
-      throw new Error('No tab connected');
-    }
-
+    const session = this.session(tabId);
     let retriedAfterDetach = false;
     let retriedAfterPurge = false;
 
     while (true) {
-      // Check actual debugger state (not just our flag) and reattach if needed
-      const attached = await this.isDebuggerAttached(this.connectedTabId);
+      // Check actual debugger state (not just our flag) and attach if needed
+      const attached = await this.isDebuggerAttached(tabId);
       if (!attached) {
-        log.warn(`[sendDebuggerCommand] Debugger detached, reattaching to tab ${this.connectedTabId}...`);
-        await this.attachDebugger(this.connectedTabId);
+        log.warn(`[sendDebuggerCommand] Debugger not on tab ${tabId} yet, attaching...`);
+        await this.attachDebugger(tabId);
       }
 
       log.debug(`[sendDebuggerCommand] Executing ${method}`, {
-        tabId: this.connectedTabId,
+        tabId,
         hasParams: params !== undefined,
       });
 
       // Wrap Chrome's debugger command in a timeout
       const commandPromise = chrome.debugger.sendCommand(
-        { tabId: this.connectedTabId },
+        { tabId },
         method,
         params
       ) as Promise<T>;
@@ -919,17 +937,15 @@ export class TabManager {
 
       try {
         const result = await Promise.race([commandPromise, timeoutPromise]);
-        this.lastCdpError = null;
         log.debug(`[sendDebuggerCommand] ${method} completed successfully`);
         return result;
       } catch (error) {
         const message = (error as Error)?.message || String(error);
-        this.recordCdpError(error);
         log.error(`[sendDebuggerCommand] ${method} failed:`, error);
 
         if (message.includes(FOREIGN_EXTENSION_FRAME_ERROR) && !retriedAfterPurge) {
           retriedAfterPurge = true;
-          const removed = await purgeForeignExtensionFrames(this.connectedTabId).catch(() => 0);
+          const removed = await purgeForeignExtensionFrames(tabId).catch(() => 0);
           log.warn(`[sendDebuggerCommand] foreign extension frame blocked ${method}; removed ${removed}, retrying`);
           continue;
         }
@@ -940,33 +956,12 @@ export class TabManager {
           }
 
           retriedAfterDetach = true;
-          await this.attachDebugger(this.connectedTabId);
+          await this.attachDebugger(tabId);
           continue;
         }
 
         throw error;
       }
-    }
-  }
-
-  private recordCdpError(error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    this.lastCdpError = message;
-  }
-
-  private async probeCdp(tabId: number): Promise<{ ok: true; error: null } | { ok: false; error: string }> {
-    try {
-      await chrome.debugger.sendCommand(
-        { tabId },
-        'Runtime.evaluate',
-        { expression: '1+1', returnByValue: true }
-      );
-      this.lastCdpError = null;
-      return { ok: true, error: null };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.recordCdpError(error);
-      return { ok: false, error: message };
     }
   }
 
@@ -987,7 +982,7 @@ export class TabManager {
       title: tab.title || '',
       // Only mark the specific current tab as active
       active: tab.id === currentTabId,
-      connected: tab.id === this.connectedTabId,
+      connected: this.driving(tab.id!) !== undefined,
     }));
   }
 
@@ -1032,7 +1027,7 @@ export class TabManager {
         url: current.url || url,
         title: current.title || '',
         active: current.active,
-        connected: connect && tab.id === this.connectedTabId,
+        connected: connect && this.driving(tab.id!) !== undefined,
       },
       loaded,
     };
@@ -1042,19 +1037,14 @@ export class TabManager {
    * Push a tab to the background by activating another tab of its window.
    * No-op when the tab is already hidden or it is the only tab there.
    */
-  async sendTabToBack(tabId?: number): Promise<number | null> {
-    const targetId = tabId ?? this.connectedTabId;
-    if (!targetId) {
-      throw new Error('No tab specified and no connected tab');
-    }
-
-    const tab = await chrome.tabs.get(targetId);
+  async sendTabToBack(tabId: number): Promise<number | null> {
+    const tab = await chrome.tabs.get(tabId);
     if (!tab.active) {
       return null;
     }
 
     const siblings = await chrome.tabs.query({ windowId: tab.windowId });
-    const other = siblings.find((t) => t.id !== undefined && t.id !== targetId);
+    const other = siblings.find((t) => t.id !== undefined && t.id !== tabId);
     if (!other?.id) {
       return null;
     }
@@ -1076,54 +1066,43 @@ export class TabManager {
   }
 
   /**
-   * Close a tab (the connected one when no id is given). Returns the id it closed.
+   * Close one tab, letting go of its debugger first. Returns the id it closed.
    */
-  async closeTab(tabId?: number): Promise<number> {
-    const targetTabId = tabId || this.connectedTabId;
-
-    if (!targetTabId) {
-      throw new Error('No tab specified and no connected tab');
-    }
-
-    if (targetTabId === this.connectedTabId) {
-      await this.disconnectTab();
-    }
-
-    await chrome.tabs.remove(targetTabId);
-    log.info(`Closed tab: ${targetTabId}`);
-    return targetTabId;
+  async closeTab(tabId: number): Promise<number> {
+    await this.disconnectTab(tabId);
+    await chrome.tabs.remove(tabId);
+    log.info(`Closed tab: ${tabId}`);
+    return tabId;
   }
 
   /**
-   * Re-apply live connection UI on the connected tab after page navigations/reloads.
+   * Re-apply live connection UI on one tab after page navigations/reloads.
    */
-  async reapplyLiveConnectionUi(): Promise<void> {
-    if (!this.connectedTabId) {
+  async reapplyLiveConnectionUi(tabId: number): Promise<void> {
+    if (!this.sessions.has(tabId)) {
       return;
     }
 
-    await this.setLiveConnectionCloseGuard(this.connectedTabId, true);
+    await this.setLiveConnectionCloseGuard(tabId, true);
   }
 
   /**
-   * Start listening for new tabs opened during an operation.
-   * Call this before actions that might open new tabs (like clicks).
+   * Watch for tabs a click in ONE tab opens. Call this before actions that might open new tabs.
    */
-  startNewTabDetection(): void {
+  startNewTabDetection(tabId: number): void {
+    const session = this.session(tabId);
     // Clear any previous state
-    this.pendingNewTab = null;
+    session.pendingNewTab = null;
 
     // Remove existing listener if any
-    if (this.newTabListener) {
-      chrome.tabs.onCreated.removeListener(this.newTabListener);
+    if (session.newTabListener) {
+      chrome.tabs.onCreated.removeListener(session.newTabListener);
     }
 
-    this.newTabListener = (tab: chrome.tabs.Tab) => {
-      // Only track if we have a connected tab (automation in progress)
-      // and it's not the connected tab itself
-      if (this.connectedTabId && tab.id && tab.id !== this.connectedTabId) {
+    session.newTabListener = (tab: chrome.tabs.Tab) => {
+      if (tab.id && tab.id !== tabId) {
         log.info(`[NewTabDetection] New tab opened: ${tab.id}, url: ${tab.url || tab.pendingUrl || 'unknown'}`);
-        this.pendingNewTab = {
+        session.pendingNewTab = {
           id: tab.id,
           url: tab.url || tab.pendingUrl || '',
           title: tab.title || '',
@@ -1133,23 +1112,25 @@ export class TabManager {
       }
     };
 
-    chrome.tabs.onCreated.addListener(this.newTabListener);
+    chrome.tabs.onCreated.addListener(session.newTabListener);
     log.debug('[NewTabDetection] Started listening for new tabs');
   }
 
   /**
-   * Stop listening for new tabs and return any detected tab.
-   * Returns the new tab info if one was detected, null otherwise.
+   * Stop watching one tab and return any tab it opened, or null.
    */
-  stopNewTabDetection(): TabInfo | null {
-    if (this.newTabListener) {
-      chrome.tabs.onCreated.removeListener(this.newTabListener);
-      this.newTabListener = null;
+  stopNewTabDetection(tabId: number): TabInfo | null {
+    const session = this.sessions.get(tabId);
+    if (!session) return null;
+
+    if (session.newTabListener) {
+      chrome.tabs.onCreated.removeListener(session.newTabListener);
+      session.newTabListener = null;
       log.debug('[NewTabDetection] Stopped listening for new tabs');
     }
 
-    const newTab = this.pendingNewTab;
-    this.pendingNewTab = null;
+    const newTab = session.pendingNewTab;
+    session.pendingNewTab = null;
 
     if (newTab) {
       log.info(`[NewTabDetection] Returning detected new tab: ${newTab.id}`);

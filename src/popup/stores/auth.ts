@@ -5,6 +5,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { sendMessage } from './index';
 import type { AuthState, LoginResponse } from '../types';
+import { usePolling } from '../composables/usePolling';
 
 export const useAuthStore = defineStore('auth', () => {
   // State
@@ -17,7 +18,6 @@ export const useAuthStore = defineStore('auth', () => {
   const error = ref<string | null>(null);
 
   // Polling
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
   // Actions
   async function refresh(): Promise<void> {
@@ -59,17 +59,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  function startPolling(): void {
-    refresh();
-    pollInterval = setInterval(refresh, 5000);
-  }
-
-  function stopPolling(): void {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
+  const { startPolling, stopPolling } = usePolling(refresh, 5000);
 
   return {
     // State

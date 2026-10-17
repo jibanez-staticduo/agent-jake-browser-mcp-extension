@@ -215,4 +215,3 @@ export class PageEventLog {
 }
 
 /** One log per service worker: the extension automates one tab at a time. */
-export const pageEvents = new PageEventLog();

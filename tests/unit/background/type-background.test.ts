@@ -34,7 +34,7 @@ function fakeContext(opts: { initial?: number; landed: (n: number) => number; pe
     waitForStableOrNavigation: vi.fn(async () => ({ navigated: false })),
     dispatchMouseEventTyped: vi.fn(async () => undefined),
     dispatchKeyEventTyped,
-    tabManager: { getConnectedTabId: () => 7, sendDebuggerCommand: vi.fn(async () => undefined) },
+    tabManager: { tabId: () => Promise.resolve(7), sendDebuggerCommand: vi.fn(async () => undefined) },
   } as unknown as HandlerContext;
   // `landed` decides how many of the typed characters the page really took.
   let typed = 0;

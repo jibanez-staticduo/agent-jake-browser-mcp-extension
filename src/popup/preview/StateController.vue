@@ -21,7 +21,7 @@ function toggleAuth(): void {
   previewState.authenticated = !previewState.authenticated;
   if (!previewState.authenticated) {
     previewState.connected = false;
-    previewState.connectedTabId = null;
+    previewState.drivenTabIds = [];
   }
 }
 
@@ -30,7 +30,7 @@ function toggleConnected(): void {
     previewState.authenticated = true;
   }
   previewState.connected = !previewState.connected;
-  previewState.connectedTabId = previewState.connected ? 101 : null;
+  previewState.drivenTabIds = previewState.connected ? [101] : [];
 }
 
 function addToolActivity(): void {

@@ -19,7 +19,8 @@ chk "2 default extension es 127.0.0.1"              grep -q "VITE_WS_HOST ?? '12
 not "2b el host de terceros no volvio (en codigo)"   bash -c "grep -v '^[[:space:]]*//' src/types/config.ts | grep -q agent-browser.staticduo.com"
 not "3 permiso identity retirado"                   grep -q '"identity"' manifest.json
 chk "4 keep-alive sin condicion de pestana"         bash -c "! grep -q 'alarms.clear(KEEPALIVE_ALARM)' src/background/index.ts"
-chk "5 auto-enganche de la pestana activa"          grep -q "lastFocusedWindow" src/background/tools/utils.ts
+# INFRA-907: quien auto-engancha la pestana en frente es la llamada (su CallTab), no utils.ts.
+chk "5 auto-enganche de la pestana activa"          grep -q "lastFocusedWindow" src/background/tool-handlers.ts
 chk "6 sonda del content script"                    grep -q "Receiving end does not exist" src/background/tools/utils.ts
 chk "7 browser_state DOM-first"                     test -f src/content/compact-state.ts
 chk "8 all_frames activo"                           grep -q '"all_frames": true' manifest.json
@@ -46,4 +47,10 @@ chk "16c el panel puede dictar (permiso microphone)"    grep -q '"microphone"' m
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
 # INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
 chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
+# INFRA-907: el debugger es por pestana (un TabSession por pestana manejada). No debe volver
+# "la pestana conectada" del navegador: con una sola, el comando de una sesion soltaba la pestana
+# de otra, y por eso la cola global era la que evitaba pisarse.
+chk "19 el debugger es por pestana" bash -c 'grep -q "new Map<number, TabSession>()" src/background/tab-manager.ts'
+not "19b no hay pestana conectada unica"            grep -rq "getConnectedTabId" src/
+
 exit $fail

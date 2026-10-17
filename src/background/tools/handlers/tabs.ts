@@ -26,7 +26,7 @@ export function createTabHandlers(ctx: HandlerContext): HandlerMap {
     browser_send_to_back: async (payload) => {
       const { tabId } = schemas.browser_send_to_back.parse(payload);
       const activatedTabId = await ctx.tabManager.sendTabToBack(tabId);
-      return { sentToBack: tabId ?? ctx.tabManager.getConnectedTabId(), activatedTabId };
+      return { sentToBack: tabId ?? ctx.tabManager.currentTabId(), activatedTabId };
     },
 
     // The server closes an idle agent tab by id (its tab reaper), so the id must be honoured:

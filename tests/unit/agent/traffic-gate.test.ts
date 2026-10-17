@@ -6,26 +6,28 @@ import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 
 vi.mock('@/utils/logger', () => ({ log: { warn: vi.fn() } }));
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 const mcp = (id: string, payload: Record<string, unknown> = {}, type: IncomingMessage['type'] = 'browser_type'): IncomingMessage =>
   ({ id, type, payload });
 
 function setup(initialTab: number | null = 1) {
-  let currentTab = initialTab;
+  // The tab in front: what a call that names none takes as its own (the user's, auto-attached).
+  let activeTab = initialTab;
+  vi.stubGlobal('chrome', { tabs: { query: vi.fn(async () => (activeTab === null ? [] : [{ id: activeTab, url: 'https://a.test/' }])) } });
   const tabManager = {
-    getConnectedTabId: vi.fn(() => currentTab),
-    connectTab: vi.fn(async (id: number) => { currentTab = id; }),
-    disconnectTab: vi.fn(async () => { currentTab = null; }),
+    connectTab: vi.fn(async (id: number) => { activeTab = id; }),
+    disconnectTab: vi.fn(async (id: number) => { void id; }),
     hasTab: vi.fn(async () => true),
   } as unknown as TabManager;
-  // Routes like createToolHandlers: a call with a target connects that tab first.
-  const handler = vi.fn(async (request: IncomingMessage, _signal?: AbortSignal): Promise<OutgoingMessage> => {
-    if (typeof request.payload.targetTabId === 'number') currentTab = request.payload.targetTabId;
-    return { id: request.id, success: true, result: { tabId: currentTab } };
-  });
+  // Routes like createToolHandlers: the answer comes from the tab the call was given.
+  const handler = vi.fn(async (request: IncomingMessage): Promise<OutgoingMessage> => ({
+    id: request.id,
+    success: true,
+    result: { tabId: typeof request.payload.targetTabId === 'number' ? request.payload.targetTabId : activeTab },
+  }));
   const gate = createCopilotTrafficGate(tabManager, handler);
-  return { gate, handler, tabManager, setTab(id: number | null) { currentTab = id; }, getTab: () => currentTab };
+  return { gate, handler, tabManager, setTab(id: number | null) { activeTab = id; }, getTab: () => activeTab };
 }
 
 /** The next handler call never answers until `finish`: a frozen tab. */
@@ -98,13 +100,14 @@ describe('Copilot/MCP traffic gate', () => {
 
     expect(await gate.handleMcp(mcp('m1', { targetTabId: 2 }))).toMatchObject({ success: false, error: { code: 'COPILOT_BUSY' } });
     expect(await gate.handleMcp(mcp('m2', { targetTabId: 3 }))).toMatchObject({ success: true, result: { tabId: 3 } });
-    // Without a target MCP acts on the connected tab: fine on 3, not on the copilot's.
+    // Without a target MCP takes the tab in front: fine while that is not the copilot's.
+    setTab(3);
     expect(await gate.handleMcp(mcp('m3'))).toMatchObject({ success: true, result: { tabId: 3 } });
     setTab(2);
     expect(await gate.handleMcp(mcp('m4'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
-    // With nothing connected it would take the active tab, the user's: likely the copilot's.
+    // No tab in front: the call opens or binds one of its own, so no panel is in its way.
     setTab(null);
-    expect(await gate.handleMcp(mcp('m5'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
+    expect(await gate.handleMcp(mcp('m5'))).toMatchObject({ success: true });
     expect(await gate.handleMcp(mcp('m6', { tabId: 2 }, 'browser_close_tab'))).toMatchObject({ error: { code: 'COPILOT_BUSY' } });
     expect(await gate.handleMcp(mcp('m7', { url: 'https://a.test/' }, 'browser_new_tab'))).toMatchObject({ success: true });
 
@@ -137,28 +140,24 @@ describe('Copilot/MCP traffic gate', () => {
     expect(lease.tabId()).toBe(8);
   });
 
-  it('gives the browser back as MCP had it: the tab it last came from, or none, even if that fails', async () => {
-    const { gate, tabManager, getTab } = setup(1);
+  it('releasing a panel lets go of its own tab and of nothing else', async () => {
+    // INFRA-907: with a debugger per tab there is no "the browser's tab" to give back. Releasing
+    // frees the tab this panel used; MCP keeps whatever else it was driving.
+    const { gate, tabManager } = setup(1);
     const lease = gate.acquire(2)!;
     await gate.handleMcp(mcp('m1', { targetTabId: 3 }));
     await lease.exec('browser_state', {});
     await lease.release();
-    expect(tabManager.connectTab).toHaveBeenCalledWith(3);
-    expect(getTab()).toBe(3);
+    expect(tabManager.disconnectTab).toHaveBeenCalledWith(2);
+    expect(tabManager.connectTab).not.toHaveBeenCalledWith(3);
     await lease.release();
-    expect(tabManager.connectTab).toHaveBeenCalledOnce();
-
-    const empty = setup(null);
-    const emptyLease = empty.gate.acquire(2)!;
-    await emptyLease.exec('browser_state', {});
-    await emptyLease.release();
-    expect(empty.tabManager.disconnectTab).toHaveBeenCalledOnce();
-    expect(empty.getTab()).toBeNull();
+    expect(tabManager.disconnectTab).toHaveBeenCalledOnce();
+    expect(await gate.handleMcp(mcp('m2', { targetTabId: 2 }))).toMatchObject({ success: true });
 
     const broken = setup(1);
     const brokenLease = broken.gate.acquire(2)!;
     await brokenLease.exec('browser_state', {});
-    vi.mocked(broken.tabManager.connectTab).mockRejectedValueOnce(new Error('tab closed'));
+    vi.mocked(broken.tabManager.disconnectTab).mockRejectedValueOnce(new Error('tab closed'));
     await expect(brokenLease.release()).rejects.toThrow('tab closed');
     expect(broken.gate.acquire(2)).not.toBeNull();
   });

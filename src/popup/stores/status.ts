@@ -5,26 +5,23 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { sendMessage } from './index';
 import type { Status, TabInfo } from '../types';
+import { usePolling } from '../composables/usePolling';
 
 export const useStatusStore = defineStore('status', () => {
   // State
   const status = ref<Status>({
     connected: false,
-    tabId: null,
     tabs: [],
   });
 
   // Polling
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Computed
-  const connectedTab = computed<TabInfo | undefined>(() => {
-    return status.value.tabs.find(t => t.connected);
-  });
+  // Computed: the tabs the agent drives — several sessions drive several tabs at once (INFRA-907)
+  const connectedTabs = computed<TabInfo[]>(() => status.value.tabs.filter(t => t.connected));
 
-  const hasConnectedTab = computed<boolean>(() => {
-    return !!connectedTab.value;
-  });
+  const connectedTab = computed<TabInfo | undefined>(() => connectedTabs.value[0]);
+
+  const hasConnectedTab = computed<boolean>(() => connectedTabs.value.length > 0);
 
   const validTabs = computed<TabInfo[]>(() => {
     return status.value.tabs.filter(tab => {
@@ -64,9 +61,9 @@ export const useStatusStore = defineStore('status', () => {
     }
   }
 
-  async function disconnectTab(): Promise<void> {
+  async function disconnectTab(tabId: number): Promise<void> {
     try {
-      await sendMessage('disconnectTab');
+      await sendMessage('disconnectTab', { tabId });
       await refresh();
     } catch (e) {
       console.error('[StatusStore] disconnectTab failed:', e);
@@ -85,38 +82,26 @@ export const useStatusStore = defineStore('status', () => {
     }
   }
 
-  async function focusTab(): Promise<void> {
-    const tab = connectedTab.value;
-    if (tab?.id) {
-      try {
-        const fullTab = await chrome.tabs.get(tab.id);
-        await chrome.tabs.update(tab.id, { active: true });
-        if (fullTab.windowId) {
-          await chrome.windows.update(fullTab.windowId, { focused: true });
-        }
-        window.close();
-      } catch (e) {
-        console.error('[StatusStore] focusTab failed:', e);
+  async function focusTab(tabId: number): Promise<void> {
+    try {
+      const fullTab = await chrome.tabs.get(tabId);
+      await chrome.tabs.update(tabId, { active: true });
+      if (fullTab.windowId) {
+        await chrome.windows.update(fullTab.windowId, { focused: true });
       }
+      window.close();
+    } catch (e) {
+      console.error('[StatusStore] focusTab failed:', e);
     }
   }
 
-  function startPolling(): void {
-    refresh();
-    pollInterval = setInterval(refresh, 2000);
-  }
-
-  function stopPolling(): void {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
+  const { startPolling, stopPolling } = usePolling(refresh);
 
   return {
     // State
     status,
     // Computed
+    connectedTabs,
     connectedTab,
     hasConnectedTab,
     validTabs,

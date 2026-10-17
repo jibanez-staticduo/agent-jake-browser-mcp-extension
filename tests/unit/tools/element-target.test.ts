@@ -34,7 +34,7 @@ function fakeContext(content: Record<string, (payload: Record<string, unknown>) 
   const keys: string[] = [];
   const ctx = {
     tabManager: {
-      getConnectedTabId: () => 1,
+      tabId: () => Promise.resolve(1),
       startNewTabDetection: vi.fn(),
       stopNewTabDetection: vi.fn(() => null),
       sendDebuggerCommand: vi.fn().mockResolvedValue({}),

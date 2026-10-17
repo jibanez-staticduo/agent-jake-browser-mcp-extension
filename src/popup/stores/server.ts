@@ -5,6 +5,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { sendMessage } from './index';
 import type { PairingInfo, ServerConfigInfo } from '../types';
+import { usePolling } from '../composables/usePolling';
 
 interface SaveResult {
   success?: boolean;
@@ -30,7 +31,6 @@ export const useServerStore = defineStore('server', () => {
 
   // Set while the user is typing so polling does not overwrite the draft.
   let draftTouched = false;
-  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
   // Computed
   const connectionId = computed(() => info.value?.connectionId ?? '');
@@ -106,17 +106,7 @@ export const useServerStore = defineStore('server', () => {
     }
   }
 
-  function startPolling(): void {
-    refresh();
-    pollInterval = setInterval(refresh, 2000);
-  }
-
-  function stopPolling(): void {
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
+  const { startPolling, stopPolling } = usePolling(refresh);
 
   return {
     // State

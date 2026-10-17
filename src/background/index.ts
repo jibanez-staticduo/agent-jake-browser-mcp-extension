@@ -114,17 +114,11 @@ async function initialize(): Promise<void> {
 }
 
 /**
- * Start or stop the keep-alive alarm based on whether a tab is connected.
- * The alarm prevents the service worker from going to sleep.
+ * Keep the service worker awake. The alarm runs ALWAYS: without it MV3 sleeps after ~30s, takes the
+ * WebSocket down with it, and the agent sees "Extension not connected" with no way to wake it —
+ * there is no UI to poke when the MCP client is a headless session.
  */
 async function updateKeepAliveAlarm(): Promise<void> {
-  const tabId = tabManager?.getConnectedTabId();
-
-  // The alarm runs ALWAYS. Without it the MV3 service worker sleeps after ~30s,
-  // takes the WebSocket down with it, and the agent sees "Extension not
-  // connected" with no way to wake it — there is no UI to poke when the MCP
-  // client is a headless session.
-  void tabId;
   const existing = await chrome.alarms.get(KEEPALIVE_ALARM);
   if (!existing) {
     await chrome.alarms.create(KEEPALIVE_ALARM, {
@@ -196,19 +190,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 /**
- * Try to connect to browser-mcp if we have a connected tab.
+ * Keep the WebSocket up whether or not a tab is attached: tools that do not touch the DOM
+ * (list_tabs, navigate, new_tab) must work, and each command's tab attaches on demand.
  */
 async function tryConnect(): Promise<void> {
   if (!wsClient) return;
 
-  const tabId = tabManager?.getConnectedTabId();
   const wsConnected = wsClient?.isConnected();
-  log.debug(`[Loop] tryConnect - tabId: ${tabId}, wsConnected: ${wsConnected}`);
-
-  // Keep the WebSocket up connected tab or not: tools that do not touch the DOM
-  // (list_tabs, navigate, new_tab) must work, and the tab gets attached on the
-  // first command that needs it (see ensureTabId in tools/utils.ts).
-  void tabId;
+  log.debug(`[Loop] tryConnect - wsConnected: ${wsConnected}`);
 
   // Skip if ws-client already has a reconnect scheduled
   if (wsClient.isReconnecting()) {
@@ -287,26 +276,12 @@ async function handlePopupMessage(message: {
 
   switch (action) {
     case 'getStatus': {
-      // Ensure tabManager is initialized before accessing
+      // Which tabs the agent drives is a property of each tab (`connected`), not of the browser.
       const tabs = tabManager ? await tabManager.listTabs() : [];
       return {
         connected: wsClient?.isConnected() || false,
-        tabId: tabManager?.getConnectedTabId() || null,
         tabs,
       };
-    }
-
-    case 'getCdpStatus': {
-      if (!tabManager) {
-        return {
-          connectedTabId: null,
-          debuggerAttached: false,
-          canExecuteCdp: false,
-          lastCdpError: 'CDP_NOT_READY: Tab manager not initialized',
-        };
-      }
-
-      return await tabManager.getCdpStatus();
     }
 
     case 'getServerConfig': {
@@ -373,30 +348,11 @@ async function handlePopupMessage(message: {
       return { success: true };
     }
 
-    case 'connectMcp': {
-      if (!tabManager?.getConnectedTabId()) {
-        return { success: false, error: 'Pick a tab before connecting MCP' };
-      }
-
-      wsClient?.resetReconnectAttempts();
-      await wsClient?.connect();
-      await updateKeepAliveAlarm();
-      return { success: true };
-    }
-
-    case 'disconnectMcp': {
-      wsClient?.disconnect();
-      return { success: true };
-    }
-
+    // No tab is needed to connect MCP: each command binds the tab of its own session.
     case 'toggleMcp': {
       if (wsClient?.isConnected()) {
         wsClient.disconnect();
         return { success: true, connected: false };
-      }
-
-      if (!tabManager?.getConnectedTabId()) {
-        return { success: false, connected: false, error: 'Pick a tab before connecting MCP' };
       }
 
       wsClient?.resetReconnectAttempts();
@@ -405,11 +361,10 @@ async function handlePopupMessage(message: {
       return { success: true, connected: true };
     }
 
+    // Letting go of one tab leaves the other sessions and the WebSocket alone.
     case 'disconnectTab': {
-      await tabManager?.disconnectTab();
-      wsClient?.disconnect();
-      // Stop keep-alive alarm
-      await updateKeepAliveAlarm();
+      const { tabId } = payload as { tabId: number };
+      await tabManager?.disconnectTab(tabId);
       return { success: true };
     }
 
@@ -448,23 +403,20 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 /**
- * Handle debugger detach.
- * Attempts to reattach if it wasn't user-initiated.
+ * Handle debugger detach for ONE tab: clean up that tab and reattach it if the drop was not the
+ * user's. The tabs other sessions drive are not touched (INFRA-907).
  */
 chrome.debugger.onDetach.addListener(async (source, reason) => {
-  log.warn(`Debugger detached from tab ${source.tabId}: ${reason}`);
+  const tabId = source.tabId;
+  if (!tabId) return;
+  log.warn(`Debugger detached from tab ${tabId}: ${reason}`);
 
-  // Mark debugger as detached in TabManager
-  tabManager?.markDebuggerDetached();
-
-  // If it's our connected tab and reason isn't user-initiated, try to reattach
-  const connectedTabId = tabManager?.getConnectedTabId();
-  if (source.tabId === connectedTabId && reason !== 'canceled_by_user') {
+  if (tabManager?.markDebuggerDetached(tabId) && reason !== 'canceled_by_user') {
     // Small delay to let Chrome settle
     await new Promise(resolve => setTimeout(resolve, 500));
 
     try {
-      await tabManager?.reattachDebugger();
+      await tabManager.reattachDebugger(tabId);
       log.info('[onDetach] Debugger reattached successfully');
     } catch (error) {
       log.error('[onDetach] Failed to reattach debugger:', error);
@@ -474,19 +426,18 @@ chrome.debugger.onDetach.addListener(async (source, reason) => {
 });
 
 /**
- * Re-apply live connection guard UI after the connected tab reloads/navigates.
+ * Re-apply the live connection guard UI on the tab that reloaded or navigated, when we drive it.
  */
 chrome.tabs.onUpdated.addListener((updatedTabId, changeInfo) => {
   if (changeInfo.status !== 'complete') {
     return;
   }
 
-  const connectedTabId = tabManager?.getConnectedTabId();
-  if (!connectedTabId || connectedTabId !== updatedTabId) {
+  if (!tabManager?.drivenTabIds().includes(updatedTabId)) {
     return;
   }
 
-  tabManager?.reapplyLiveConnectionUi().catch((error) => {
+  tabManager.reapplyLiveConnectionUi(updatedTabId).catch((error) => {
     log.warn('[onUpdated] Failed to re-apply live connection UI:', error);
   });
 });
@@ -505,7 +456,7 @@ initialized.catch(error => {
 (globalThis as Record<string, unknown>).__debug = {
   getStatus: () => ({
     wsConnected: wsClient?.isConnected(),
-    tabId: tabManager?.getConnectedTabId(),
+    drivenTabs: tabManager?.drivenTabIds(),
     reconnectAttempts: (wsClient as unknown as { reconnectAttempts?: number })?.reconnectAttempts,
   }),
   forceConnect: () => wsClient?.connect(),

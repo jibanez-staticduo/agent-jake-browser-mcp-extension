@@ -3,7 +3,7 @@
  * Delegates to categorized handler modules.
  */
 
-import type { TabManager } from './tab-manager';
+import type { CallTab, TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
 import { log } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
@@ -22,11 +22,11 @@ import {
 } from './tools/handlers';
 
 /**
- * Build a HandlerContext from a TabManager.
+ * Build a HandlerContext from the call's pinned tab manager.
  * Extends ToolContext with typed mouse/key event wrappers.
  */
-function buildHandlerContext(tabManager: TabManager): HandlerContext {
-  const ctx = createToolContext(tabManager);
+function buildHandlerContext(call: CallTab): HandlerContext {
+  const ctx = createToolContext(call);
 
   return {
     ...ctx,
@@ -41,7 +41,7 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
     async dispatchKeyEventTyped(type, key, text?) {
       if (type === 'char') void ctx.sendToContent('cursor', { kind: 'type' }).catch(() => {});
       const keyDef = getKeyDefinition(key);
-      await tabManager.sendDebuggerCommand('Input.dispatchKeyEvent', {
+      await call.sendDebuggerCommand('Input.dispatchKeyEvent', {
         type,
         key: keyDef.key,
         code: keyDef.code,
@@ -53,29 +53,80 @@ function buildHandlerContext(tabManager: TabManager): HandlerContext {
 }
 
 /**
- * The MCP server names the tab of the calling session in every command (`targetTabId`): the
- * extension follows one tab at a time, and without this a second session on the same browser
- * acted on whatever tab the first one had connected. Connect to it first — without activating
- * it — and hand the handler the payload without the routing field.
+ * The MCP server names the tab of the calling session in every command (`targetTabId`); the
+ * copilot's lease knows its own. Take that tab out of the payload and give the call the tab it
+ * works in — from here on no handler chooses a tab, which is what let one session act on
+ * another's (INFRA-907).
  */
 export async function routeToTargetTab(
-  tabManager: Pick<TabManager, 'getConnectedTabId' | 'connectTab' | 'hasTab'>,
+  tabManager: Pick<TabManager, 'connectTab' | 'hasTab'>,
   payload: unknown,
-): Promise<unknown> {
-  if (!payload || typeof payload !== 'object') return payload;
+): Promise<{ tabId: number | null; payload: unknown }> {
+  if (!payload || typeof payload !== 'object') return { tabId: null, payload };
   const { targetTabId, ...rest } = payload as Record<string, unknown>;
-  if (typeof targetTabId !== 'number') return payload;
-  if (tabManager.getConnectedTabId() !== targetTabId) {
-    // Check first: connectTab lets go of the current tab before it looks at the new one, and a
-    // gone tab would leave the browser with nothing connected — another session's tab dropped.
-    if (!await tabManager.hasTab(targetTabId)) {
-      const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
-      gone.name = 'TAB_GONE';
-      throw gone;
-    }
-    await tabManager.connectTab(targetTabId);
+  if (typeof targetTabId !== 'number') return { tabId: null, payload };
+  if (!await tabManager.hasTab(targetTabId)) {
+    const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
+    gone.name = 'TAB_GONE';
+    throw gone;
   }
-  return rest;
+  await tabManager.connectTab(targetTabId);
+  return { tabId: targetTabId, payload: rest };
+}
+
+/** Pinned methods that act now, so the call's tab must already be resolved when they are used. */
+const SYNC_PINNED = new Set<PropertyKey>([
+  'beginFileChooser', 'endFileChooser', 'startNewTabDetection', 'stopNewTabDetection',
+  'isAutoAttached', 'reapplyLiveConnectionUi',
+]);
+
+/** Pinned methods that name a tab only when the caller gives one (close this tab, send this back). */
+const OPTIONAL_PINNED = new Set<PropertyKey>(['closeTab', 'sendTabToBack']);
+
+/** Pinned methods that may resolve the call's tab themselves (binding the tab in front if none). */
+const ASYNC_PINNED = new Set<PropertyKey>(['sendDebuggerCommand', 'waitForDebuggerEvent', 'runPasskeyCeremony']);
+
+/**
+ * The TabManager pinned to one call's tab (see `CallTab`): a handler cannot name another session's
+ * tab because it does not name any. When the server named none, the first tool that needs a tab
+ * binds the tab in front as the USER's own — auto-attached, so navigating tools refuse to drive it.
+ *
+ * `fence` is the gate's cut: naming the tab is part of holding the browser, so a call that lost it
+ * cannot even reach the content script of the tab another call is using now.
+ */
+export function pinnedToTab(tabManager: TabManager, routed: number | null, fence = new AbortController().signal): CallTab {
+  let resolved: number | null = routed;
+  let binding: Promise<number> | null = null;
+  const tabId = (): Promise<number> => {
+    fence.throwIfAborted();
+    if (resolved !== null) return Promise.resolve(resolved);
+    binding ??= (async () => {
+      const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (!active?.id) throw new Error('No active tab to attach to');
+      await tabManager.connectTab(active.id, active.url, { autoAttached: true });
+      resolved = active.id;
+      return resolved;
+    })();
+    return binding;
+  };
+  const currentTab = (): number => {
+    if (resolved === null) throw new Error('No tab connected');
+    return resolved;
+  };
+
+  return new Proxy(tabManager, {
+    get(target, prop) {
+      if (prop === 'tabId') return tabId;
+      if (prop === 'routedTabId') return () => routed;
+      if (prop === 'currentTabId') return () => resolved;
+      const value = Reflect.get(target, prop);
+      if (typeof value !== 'function') return value;
+      if (SYNC_PINNED.has(prop)) return (...args: unknown[]) => value.apply(target, [currentTab(), ...args]);
+      if (OPTIONAL_PINNED.has(prop)) return (tab?: number, ...args: unknown[]) => value.apply(target, [tab ?? currentTab(), ...args]);
+      if (ASYNC_PINNED.has(prop)) return async (...args: unknown[]) => value.apply(target, [await tabId(), ...args]);
+      return value.bind(target);
+    },
+  }) as unknown as CallTab;
 }
 
 /** What a cut call may still do from its catch/finally: let go of what it took, never act. */
@@ -104,8 +155,8 @@ function fencedTabManager(tabManager: TabManager, signal: AbortSignal): TabManag
  * Create tool handlers bound to a tab manager.
  */
 export function createToolHandlers(browser: TabManager) {
-  function handlersFor(tabManager: TabManager): Record<string, (payload: unknown) => Promise<unknown>> {
-    const ctx = buildHandlerContext(tabManager);
+  function handlersFor(call: CallTab): Record<string, (payload: unknown) => Promise<unknown>> {
+    const ctx = buildHandlerContext(call);
     return {
       ...createNavigationHandlers(ctx),
       ...createInteractionHandlers(ctx),
@@ -134,11 +185,12 @@ export function createToolHandlers(browser: TabManager) {
     const { id, type, payload } = message;
     const startTime = performance.now();
     const tabManager = fencedTabManager(browser, signal);
-    const handlers = handlersFor(tabManager);
 
     log.debug(`[Tool] Received: ${type} (id: ${id})`);
 
     try {
+      const routed = await routeToTargetTab(tabManager, payload);
+      const handlers = handlersFor(pinnedToTab(tabManager, routed.tabId, signal));
       const handler = handlers[type];
       if (!handler) {
         logError('unknown_tool', `Unknown tool: ${type}`);
@@ -152,7 +204,7 @@ export function createToolHandlers(browser: TabManager) {
         };
       }
 
-      const result = await handler(await routeToTargetTab(tabManager, payload));
+      const result = await handler(routed.payload);
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = getToolDescription(type, payload, result);

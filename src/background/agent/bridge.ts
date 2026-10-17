@@ -82,12 +82,14 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
     return refusal(message.id, 'TIMEOUT', `${message.type} did not finish in ${TIMEOUTS.TOOL_CALL / 1000} s (the page is not answering: frozen or hung). It was cut and does nothing more; retry it, or reload the tab.`);
   };
 
-  /** The tab an MCP command acts on: null when none, undefined when it would take the user's active tab. */
-  function tabOf({ type, payload }: IncomingMessage): number | null | undefined {
+  /** The tab an MCP command acts on: null when it names none and needs none. */
+  async function tabOf({ type, payload }: IncomingMessage): Promise<number | null> {
     if (typeof payload?.targetTabId === 'number') return payload.targetTabId;
     if (NAMES_TAB.has(type) && typeof payload?.tabId === 'number') return payload.tabId;
     if (type === 'browser_new_tab' || type === 'browser_list_tabs') return null;
-    return tabManager.getConnectedTabId() ?? undefined;
+    // It names none, so it will take the tab in front (auto-attach): that is the one to check.
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    return active?.id ?? null;
   }
 
   return {
@@ -99,8 +101,8 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
       if (UNGATED.has(message.type)) return handleMessage(message);
       const arrivedAt = Date.now();
       return queued(async (signal) => {
-        const tab = tabOf(message);
-        if (tab === undefined ? copilotTabs.size > 0 : tab !== null && copilotTabs.has(tab)) {
+        const tab = await tabOf(message);
+        if (tab !== null && copilotTabs.has(tab)) {
           return refusal(message.id, 'COPILOT_BUSY', 'Copilot is using this tab; retry when it finishes.');
         }
         return handleMessage(message, signal);
@@ -111,8 +113,6 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
       if (copilotTabs.has(tabId)) return null;
       copilotTabs.add(tabId);
       let tab = tabId;
-      // What MCP had connected before the copilot last came in: what release gives back.
-      let previous = tabManager.getConnectedTabId();
       let released = false;
       return {
         tabId: () => tab,
@@ -127,8 +127,6 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
             if (typeof into === 'number' && into !== tab && copilotTabs.has(into)) {
               return refusal(message.id, 'COPILOT_BUSY', 'Another Copilot panel is working in that tab.');
             }
-            const before = tabManager.getConnectedTabId();
-            if (before !== tab) previous = before;
             const response = await handleMessage(message, signal);
             const moved = name === 'browser_new_tab' ? (response.result as { tab?: { id?: unknown } } | undefined)?.tab?.id : into;
             if (response.success && !signal.aborted && typeof moved === 'number' && moved !== tab) {
@@ -139,16 +137,15 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
             return response;
           }, timedOut(message));
         },
+        // The panel's own tab, and nothing else: with a debugger per tab there is no "previous tab
+        // of MCP" to give back (INFRA-907) — releasing only lets go of the tab this panel used.
         release() {
           if (released) return Promise.resolve();
           released = true;
           const free = () => { copilotTabs.delete(tab); };
           return queued(async () => {
             try {
-              if (tabManager.getConnectedTabId() === tab && previous !== tab) {
-                if (previous !== null && await tabManager.hasTab(previous)) await tabManager.connectTab(previous);
-                else await tabManager.disconnectTab();
-              }
+              await tabManager.disconnectTab(tab);
             } finally {
               free();
             }
