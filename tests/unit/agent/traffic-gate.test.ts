@@ -182,4 +182,32 @@ describe('Copilot/MCP traffic gate', () => {
     await lease.release();
     expect(await lease.exec('browser_state', {})).toMatchObject({ success: false, error: { code: 'COPILOT_STOPPED' } });
   });
+
+  it('a frozen tab never starves the tab-less commands the server reaper needs (INFRA-930)', async () => {
+    // INFRA-930 (17-10): a hung browser_evaluate held the one queue, and browser_list_tabs and
+    // browser_close_tab — which touch no page and cannot hang — expired behind it at 28 s. The
+    // server's tab-reaper needs exactly those two: one frozen tab left the browser out of
+    // service for every session, reaper included. They must answer while the queue is stuck.
+    const { gate, handler } = setup();
+    const hung = hang(handler);
+    const stuck = gate.handleMcp(mcp('m1', { targetTabId: 4 }));
+    await settle();
+    // Answers within this window, or the queue still owns it.
+    const within = <T>(p: Promise<T>) => Promise.race([p, new Promise<'late'>((r) => setTimeout(() => r('late'), 250))]);
+
+    expect(await within(gate.handleMcp(mcp('m2', {}, 'browser_list_tabs')))).toMatchObject({ id: 'm2', success: true });
+    expect(await within(gate.handleMcp(mcp('m3', { tabId: 4 }, 'browser_close_tab')))).toMatchObject({ id: 'm3', success: true });
+    expect(await within(gate.handleMcp(mcp('m4', { query: 'fleet' }, 'browser_find_tab')))).toMatchObject({ id: 'm4', success: true });
+    // Straight through the queue says nothing about the copilot's tab: close there is still refused.
+    const lease = gate.acquire(6)!;
+    expect(await within(gate.handleMcp(mcp('m5', { tabId: 6 }, 'browser_close_tab'))))
+      .toMatchObject({ id: 'm5', success: false, error: { code: 'COPILOT_BUSY' } });
+    // Page-less calls answered; the frozen tab still holds the queue for page calls (m1 is the only
+    // handler call that has not returned, and nothing behind it ran).
+    expect(handler).toHaveBeenCalledTimes(4);
+
+    hung.finish?.({ id: 'm1', success: true });
+    await stuck;
+    await lease.release();
+  });
 });

@@ -32,6 +32,13 @@ const LEAVES_TAB = new Set<string>(['browser_switch_tab', 'browser_new_tab']);
 const UNGATED = new Set<string>(['browser_wait', 'browser_reload_extension']);
 /** They pick, list, search or need no tab, so the copilot's calls go out without its tab (the server's NOT_ROUTED). */
 const NOT_ROUTED = new Set<string>(['browser_new_tab', 'browser_switch_tab', 'browser_list_tabs', 'browser_find_tab', ...UNGATED]);
+/**
+ * Tab bookkeeping done in the browser process (chrome.tabs.*): it touches no page, so a frozen tab
+ * cannot hang it and it never waits in the queue (INFRA-930, 17-10: a hung browser_evaluate starved
+ * browser_list_tabs and browser_close_tab behind it at 28 s, and with them the server's tab-reaper,
+ * which needs exactly those two to find and close the hung tab). The copilot's tab is still refused.
+ */
+const PAGE_FREE = new Set<string>(['browser_list_tabs', 'browser_find_tab', 'browser_close_tab']);
 /** Tab management that names its own tab in `tabId` (the server's NAMES_TAB). */
 const NAMES_TAB = new Set<string>(['browser_switch_tab', 'browser_close_tab', 'browser_send_to_back']);
 
@@ -48,8 +55,10 @@ const refusal = (id: string, code: string, message: string): OutgoingMessage => 
 
 /**
  * MCP and the copilot panels share one browser that follows a single connected tab, so every call
- * runs alone, in one queue, and is cut at TIMEOUTS.TOOL_CALL — for MCP counted from its arrival, so
- * the extension answers before the server gives up. A cut call is fenced (createToolHandlers) and
+ * that touches a page runs alone, in one queue, and is cut at TIMEOUTS.TOOL_CALL — for MCP counted
+ * from its arrival, so the extension answers before the server gives up. What touches no page
+ * (PAGE_FREE) skips the queue: it cannot hang on a frozen tab and must answer while one is stuck.
+ * A cut call is fenced (createToolHandlers) and
  * the queue moves on: a tab that never answers cannot hold the browser (16-10, a click hung on a
  * frozen tab kept the old in-flight counter up for hours). Each panel holds its own tab: MCP stays
  * out of that tab, and only of that one.
@@ -100,13 +109,16 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
       // Recargar mata el proceso de todos modos, así que no pisa ninguna acción en curso.
       if (UNGATED.has(message.type)) return handleMessage(message);
       const arrivedAt = Date.now();
-      return queued(async (signal) => {
+      const checked = async (signal?: AbortSignal): Promise<OutgoingMessage> => {
         const tab = await tabOf(message);
         if (tab !== null && copilotTabs.has(tab)) {
           return refusal(message.id, 'COPILOT_BUSY', 'Copilot is using this tab; retry when it finishes.');
         }
         return handleMessage(message, signal);
-      }, timedOut(message), arrivedAt);
+      };
+      // A frozen tab must not starve what cannot hang on one (PAGE_FREE): it answers now, queue or not.
+      if (PAGE_FREE.has(message.type)) return checked();
+      return queued(checked, timedOut(message), arrivedAt);
     },
 
     acquire(tabId: number): CopilotLease | null {
@@ -121,7 +133,7 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
             id: `copilot-${++seq}`, type: name as ToolName, payload: NOT_ROUTED.has(name) ? args : { ...args, targetTabId: tab },
           };
           if (released) return Promise.resolve(refusal(message.id, 'COPILOT_STOPPED', 'This Copilot run has ended.'));
-          if (UNGATED.has(name)) return handleMessage(message);
+          if (UNGATED.has(name) || PAGE_FREE.has(name)) return handleMessage(message);
           return queued(async (signal) => {
             const into = name === 'browser_switch_tab' ? args.tabId : undefined;
             if (typeof into === 'number' && into !== tab && copilotTabs.has(into)) {
