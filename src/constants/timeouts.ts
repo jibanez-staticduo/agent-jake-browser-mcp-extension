@@ -37,6 +37,14 @@ export const TIMEOUTS = {
    * REQUEST_TIMEOUT, so the extension answers TIMEOUT itself before the server cuts.
    */
   TOOL_CALL: 28000,
+
+  /**
+   * Longest close_tab waits for the tab to let go of its debugger (INFRA-930, 20-10): a renderer
+   * frozen in JS answers neither chrome.debugger.detach nor an injected script, and close_tab
+   * waiting for them left the server's tab-reaper unable to close the hung tab. After this cut the
+   * tab is removed anyway; the pending detach dies with it and tabs.onRemoved clears the session.
+   */
+  DISCONNECT_CUT: 2000,
 } as const;
 
 export type TimeoutKey = keyof typeof TIMEOUTS;

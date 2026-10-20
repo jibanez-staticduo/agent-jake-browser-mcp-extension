@@ -1321,6 +1321,22 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
       expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
     });
 
+    it('close_tab closes it even when the frozen renderer never answers (INFRA-930)', async () => {
+      // The renderer stuck in JS (measured 17-10, INFRA-930): neither the guard script nor
+      // chrome.debugger.detach ever resolves, and close_tab waiting for them left the server's
+      // tab-reaper unable to close the hung tab. Letting go of the tab is best-effort: after the
+      // cut the tab is removed anyway, and tabs.onRemoved cleans up what disconnect left behind.
+      const manager = await managerOnTheHangingTab();
+      mockChrome.debugger.detach.mockImplementation(() => new Promise(() => undefined));
+      mockChrome.scripting.executeScript.mockImplementation(() => new Promise(() => undefined));
+
+      const answer = track(manager.closeTab(HANG_TAB));
+      await vi.advanceTimersByTimeAsync(TIMEOUTS.DISCONNECT_CUT + 100);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: HANG_TAB });
+      expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
+    });
+
     it('another tab is connected while the loading one stays driven', async () => {
       const manager = await managerOnTheHangingTab();
       tabs[OTHER_TAB] = 'complete';
@@ -1358,6 +1374,9 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
     it('is shorter than the server\'s own cut, so the extension always answers first', () => {
       expect(Number.isFinite(TIMEOUTS.TAB_LOAD_WAIT)).toBe(true);
       expect(TIMEOUTS.TAB_LOAD_WAIT).toBeLessThan(TIMEOUTS.REQUEST_TIMEOUT);
+      // close_tab waits for the disconnect at most this long (INFRA-930), and answers well before the server cuts.
+      expect(Number.isFinite(TIMEOUTS.DISCONNECT_CUT)).toBe(true);
+      expect(TIMEOUTS.DISCONNECT_CUT).toBeLessThan(TIMEOUTS.TOOL_CALL);
     });
 
     it.each(['createTab', 'browser_navigate', 'browser_reload'] as const)('%s gives up at TAB_LOAD_WAIT: not before, not after', async (which) => {

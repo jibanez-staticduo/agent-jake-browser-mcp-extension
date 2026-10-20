@@ -1066,10 +1066,16 @@ export class TabManager {
   }
 
   /**
-   * Close one tab, letting go of its debugger first. Returns the id it closed.
+   * Close one tab, letting go of its debugger first — best-effort (INFRA-930): a renderer frozen in
+   * JS never answers the detach or the guard script, and the server's tab-reaper needs close_tab to
+   * actually close the hung tab. After TIMEOUTS.DISCONNECT_CUT the tab is removed anyway; the pending
+   * detach dies with it and tabs.onRemoved deletes whatever session the disconnect left behind.
    */
   async closeTab(tabId: number): Promise<number> {
-    await this.disconnectTab(tabId);
+    await Promise.race([
+      this.disconnectTab(tabId).catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, TIMEOUTS.DISCONNECT_CUT)),
+    ]);
     await chrome.tabs.remove(tabId);
     log.info(`Closed tab: ${tabId}`);
     return tabId;
