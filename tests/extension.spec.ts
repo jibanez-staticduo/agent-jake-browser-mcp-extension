@@ -137,7 +137,8 @@ test.beforeAll(async () => {
   ({ server: fixtureServer, origin: fixtureOrigin } = await startFixtureServer());
 
   context = await chromium.launchPersistentContext('', {
-    headless: false,
+    channel: 'chromium',
+    headless: process.env.AJB_HEADLESS === '1',
     args: [
       `--disable-extensions-except=${EXTENSION_PATH}`,
       `--load-extension=${EXTENSION_PATH}`,

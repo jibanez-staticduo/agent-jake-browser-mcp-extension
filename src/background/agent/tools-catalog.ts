@@ -76,7 +76,7 @@ export const AGENT_TOOLS: FunctionTool[] = [
     { query: { type: 'string' }, limit: { type: 'number', description: 'matches to return, 10 by default' } }, ['query']),
   tool('browser_switch_tab', 'Connect to another tab: later tools act on it. It also BRINGS the tab to the front: not needed to type or click in a background tab, so use it only when the user must see that tab.', { tabId: { type: 'number' } }, ['tabId']),
   tool('browser_new_tab', 'Open a URL in a new background tab and connect to it.',
-    { url: { type: 'string' }, switchTo: { type: 'boolean', description: 'Bring it to the front' } }, ['url']),
+    { url: { type: 'string' }, switchTo: { type: 'boolean', description: 'Accepted for compatibility; tabs always open without focus' } }, ['url']),
   tool('browser_close_tab', 'Close the connected tab.'),
   tool('browser_evaluate', 'Run JavaScript in the page and return the result (last resort; prefer the tools above).',
     { code: { type: 'string' } }, ['code']),
@@ -140,6 +140,8 @@ export const META_TOOLS = new Set(['ask_user', 'update_plan', 'present_plan']);
  * Nombres que el panel ya ejecuta por su cuenta. Un servidor MCP anuncia los suyos (sus `browser_*`):
  * con estos fuera, del servidor solo entran los plugins.
  */
+export const INTERNAL_TOOL_NAMES = new Set(['browser_read_secret']);
+
 export const LOCAL_TOOL_NAMES = new Set(
   [...AGENT_TOOLS, SCREENSHOT_TOOL, ASK_USER_TOOL, UPDATE_PLAN_TOOL, PRESENT_PLAN_TOOL].map((t) => t.function.name),
 );
@@ -158,5 +160,5 @@ export function agentTools(
     return [...browser.filter((t) => READ_ONLY_TOOLS.has(t.function.name)), ASK_USER_TOOL, PRESENT_PLAN_TOOL];
   }
   if (mode === 'ask') return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL];
-  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL, ...plugins.filter((t) => !LOCAL_TOOL_NAMES.has(t.function.name))];
+  return [...browser, ASK_USER_TOOL, UPDATE_PLAN_TOOL, ...plugins.filter((t) => !LOCAL_TOOL_NAMES.has(t.function.name) && !INTERNAL_TOOL_NAMES.has(t.function.name))];
 }

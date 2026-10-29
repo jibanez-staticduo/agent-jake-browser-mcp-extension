@@ -24,6 +24,7 @@ export function mimeFor(path: string): string | null {
 }
 
 export function isSafePath(path: string): boolean {
+  if (path.toLowerCase() === 'config.json') return false;
   if (!path || path.length > 200 || !SAFE_CHARS.test(path) || path.startsWith('/')) return false;
   const parts = path.split('/');
   if (parts.some((s) => s === '' || s === '.' || s === '..' || s.startsWith('.') || s.endsWith('.') || WINDOWS_RESERVED.test(s.split('.')[0]))) return false;

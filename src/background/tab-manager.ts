@@ -3,7 +3,9 @@
  * two sessions working in different tabs never touch each other (INFRA-907).
  */
 
-import { log } from '@/utils/logger';
+import { log, isSecretLogging } from '@/utils/logger';
+import { AgentWindows } from './agent-windows';
+import { logDebuggerDetachFailure } from './debugger-diagnostics';
 import { logTab, logError } from './activity-log';
 import type { TabInfo } from '@/types/messages';
 import { DEBUGGER, TIMEOUTS } from '@/constants';
@@ -215,7 +217,12 @@ class TabSession {
   readonly events = new PageEventLog();
 }
 
+export interface CdpStatus {
+  connectedTabId: number | null; debuggerAttached: boolean; canExecuteCdp: boolean; lastCdpError: string | null;
+}
+
 export class TabManager {
+  private readonly agentWindows = new AgentWindows();
   /** One per tab the agent drives. The debugger is exclusive per tab, so this is the unit of isolation. */
   private readonly sessions = new Map<number, TabSession>();
   private frameCommitListener: ((details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) => void) | null = null;
@@ -271,6 +278,20 @@ export class TabManager {
       await this.setLiveConnectionCloseGuard(tabId, true);
     }
     if (driven.length) await this.saveDrivenTabs();
+  }
+
+  /** Probe one tab without changing the debugger sessions of the other tabs. */
+  async getCdpStatus(tabId: number | null = this.drivenTabIds()[0] ?? null): Promise<CdpStatus> {
+    if (tabId === null) return { connectedTabId: null, debuggerAttached: false, canExecuteCdp: false, lastCdpError: 'CDP_NOT_READY: No tab connected' };
+    let attached = await this.isDebuggerAttached(tabId);
+    let error: string | null = null;
+    try {
+      if (!attached) { await this.attachDebugger(tabId); attached = true; }
+      await this.sendDebuggerCommand(tabId, 'Runtime.evaluate', { expression: '1', returnByValue: true });
+    } catch (cause) {
+      error = isSecretLogging() ? 'Secret operation CDP failure' : cause instanceof Error ? cause.message : String(cause);
+    }
+    return { connectedTabId: tabId, debuggerAttached: attached, canExecuteCdp: error === null, lastCdpError: error };
   }
 
   /** Which tabs we drive, so a service-worker restart picks them up again. */
@@ -858,7 +879,7 @@ export class TabManager {
       log.debug(`Debugger detached from tab ${tabId}`);
     } catch (error) {
       // May already be detached
-      log.warn('Failed to detach debugger:', error);
+      logDebuggerDetachFailure(error);
     }
   }
 
@@ -983,6 +1004,7 @@ export class TabManager {
       // Only mark the specific current tab as active
       active: tab.id === currentTabId,
       connected: this.driving(tab.id!) !== undefined,
+      windowId: tab.windowId,
     }));
   }
 
@@ -993,12 +1015,13 @@ export class TabManager {
    * `active: false` would jump the window to the new tab and steal the user's
    * view. Pass `active: true` only when the user is meant to see it.
    */
-  async createTab(url: string, connect = true, active = false): Promise<{ tab: TabInfo; loaded: boolean }> {
+  async createTab(url: string, connect = true, active = false, windowId?: number): Promise<{ tab: TabInfo; loaded: boolean; windowCreated?: boolean; windowId: number }> {
     // The WebAuthn guard's page script only beats a password manager's content script in
     // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
     // drive opens blank, we attach, and only then does it load the URL.
     const guardFirst = connect && /^https?:/i.test(url);
-    const tab = await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
+    const owned = windowId !== undefined ? await this.agentWindows.openTab(guardFirst ? 'about:blank' : url, windowId) : null;
+    const tab = owned?.tab ?? await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
     // Not waited for unless we connect; and a page that outlasts TAB_LOAD_WAIT is still a tab we
     // opened and drive: it stays connected and the answer says loaded:false (it is not an error).
     let loaded = tab.status === 'complete';
@@ -1028,8 +1051,11 @@ export class TabManager {
         title: current.title || '',
         active: current.active,
         connected: connect && this.driving(tab.id!) !== undefined,
+        windowId: tab.windowId,
       },
       loaded,
+      windowId: tab.windowId,
+      ...(owned ? { windowCreated: owned.windowCreated } : {}),
     };
   }
 
@@ -1071,7 +1097,12 @@ export class TabManager {
    * actually close the hung tab. After TIMEOUTS.DISCONNECT_CUT the tab is removed anyway; the pending
    * detach dies with it and tabs.onRemoved deletes whatever session the disconnect left behind.
    */
+  async closeWindow(windowId: number, tabIds: number[]) {
+    return this.agentWindows.closeWindow(windowId, tabIds, id => this.disconnectTab(id));
+  }
+
   async closeTab(tabId: number): Promise<number> {
+    if (!Number.isSafeInteger(tabId) || tabId <= 0) throw new Error("Tab ID must be a positive integer");
     await Promise.race([
       this.disconnectTab(tabId).catch(() => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, TIMEOUTS.DISCONNECT_CUT)),

@@ -77,7 +77,7 @@ export async function checkForUpdate(latestUrl: string | null, deps: UpdateCheck
     available: latest.build > deps.current.build,
     latest,
     current: deps.current,
-    downloadUrl: new URL('/download', latestUrl).toString(),
+    downloadUrl: new URL('/download/artifact.zip', latestUrl).toString(),
     checkedAt: deps.now().toISOString(),
   };
   if (!state.available) {

@@ -56,7 +56,7 @@ describe('browser_new_tab', () => {
 
     const answer = await handlers.browser_new_tab({ url: 'https://slow.example/hang' });
 
-    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, false);
+    expect(createTab).toHaveBeenCalledWith('https://slow.example/hang', true, false, 0);
     expect(answer).toEqual({ tab, loaded: false });
   });
 });

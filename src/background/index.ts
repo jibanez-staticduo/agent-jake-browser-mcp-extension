@@ -12,6 +12,7 @@ import './sw-polyfill';
 
 import { WebSocketClient } from './ws-client';
 import { TabManager } from './tab-manager';
+import { logDebuggerDetached } from './debugger-diagnostics';
 import { createToolHandlers } from './tool-handlers';
 import { activityLog } from './activity-log';
 import { preparePrivateStorage } from './storage-privacy';
@@ -43,6 +44,7 @@ import {
   parseWsUrl,
   setServerUrl,
   setToken,
+  setLabel,
   STORAGE_KEYS,
 } from '@/config/runtime';
 
@@ -208,7 +210,7 @@ async function tryConnect(): Promise<void> {
   if (!wsConnected) {
     log.info('[Loop] Not connected, attempting WebSocket connect...');
     try {
-      await wsClient.connect();
+      if (!await wsClient.connect()) return;
       log.info('[Loop] Connected to browser-mcp');
     } catch (error) {
       log.warn(`[Loop] Connect failed: ${(error as Error).message}`);
@@ -284,6 +286,12 @@ async function handlePopupMessage(message: {
       };
     }
 
+    case 'getCdpStatus': {
+      const tabId = (payload as { tabId?: number } | undefined)?.tabId;
+      if (tabId !== undefined && (!Number.isSafeInteger(tabId) || tabId <= 0)) throw new Error('Tab ID must be a positive integer');
+      return tabManager?.getCdpStatus(tabId);
+    }
+
     case 'getServerConfig': {
       const cfg = await getEffectiveConfig();
       const stored = await chrome.storage.local.get([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
@@ -299,13 +307,15 @@ async function handlePopupMessage(message: {
           : '',
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
+        label: cfg.label,
         connected: wsClient?.isConnected() || false,
         pairing: getPairingInfo(),
+        awaitingToken: wsClient?.isAwaitingToken() || false,
       };
     }
 
     case 'saveServerConfig': {
-      const { serverUrl, token } = (payload || {}) as { serverUrl?: string; token?: string };
+      const { serverUrl, token, label } = (payload || {}) as { serverUrl?: string; token?: string; label?: string };
       if (typeof serverUrl === 'string') {
         const trimmed = serverUrl.trim();
         if (trimmed && parseWsUrl(trimmed) === null) {
@@ -316,6 +326,7 @@ async function handlePopupMessage(message: {
       if (typeof token === 'string') {
         await setToken(token.trim());
       }
+      if (typeof label === "string") await setLabel(label);
       // Reconnect immediately so the new URL/token take effect.
       cancelPairing();
       wsClient?.disconnect();
@@ -356,9 +367,9 @@ async function handlePopupMessage(message: {
       }
 
       wsClient?.resetReconnectAttempts();
-      await wsClient?.connect();
+      const connected = await wsClient?.connect() ?? false;
       await updateKeepAliveAlarm();
-      return { success: true, connected: true };
+      return { success: connected, connected };
     }
 
     // Letting go of one tab leaves the other sessions and the WebSocket alone.
@@ -409,7 +420,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.debugger.onDetach.addListener(async (source, reason) => {
   const tabId = source.tabId;
   if (!tabId) return;
-  log.warn(`Debugger detached from tab ${tabId}: ${reason}`);
+  logDebuggerDetached(tabId, reason);
 
   if (tabManager?.markDebuggerDetached(tabId) && reason !== 'canceled_by_user') {
     // Small delay to let Chrome settle

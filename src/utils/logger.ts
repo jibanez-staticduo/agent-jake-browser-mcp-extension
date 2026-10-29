@@ -16,6 +16,22 @@ const LOG_LEVELS: Record<LogLevel, number> = {
 
 // Set minimum log level (can be changed for production)
 let minLevel: LogLevel = 'debug';
+let secretOperations = 0;
+
+export function isSecretLogging(): boolean {
+  return secretOperations > 0;
+}
+
+// Operations can overlap. A counter keeps all nested/concurrent diagnostics safe
+// until the last secret operation releases its scope.
+export async function withSecretLogging<T>(operation: () => Promise<T>): Promise<T> {
+  secretOperations++;
+  try {
+    return await operation();
+  } finally {
+    secretOperations--;
+  }
+}
 
 export function setLogLevel(level: LogLevel): void {
   minLevel = level;
@@ -26,6 +42,7 @@ function shouldLog(level: LogLevel): boolean {
 }
 
 function formatArgs(args: unknown[]): unknown[] {
+  if (isSecretLogging()) return ['[secret operation: diagnostic redacted]'];
   return args.map(arg => {
     if (arg instanceof Error) {
       return `${arg.message}\n${arg.stack}`;

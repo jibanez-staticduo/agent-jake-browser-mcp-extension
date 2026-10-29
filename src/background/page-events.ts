@@ -14,6 +14,8 @@
  * to the new navigation afterwards (its requestId is the frame's loaderId).
  */
 
+import { isSecretLogging } from '@/utils/logger';
+
 export type ConsoleLevel = 'error' | 'warning' | 'info' | 'debug';
 
 export interface ConsoleEntry {
@@ -102,6 +104,11 @@ export class PageEventLog {
   }
 
   handle(method: string, params: Record<string, any> = {}): void {
+    // Page callbacks may log every typed prefix or send it over the network.
+    // Suppress content capture at the shared sink; CDP waiters/dialog handling
+    // remain independent in TabManager. Navigation retains only bookkeeping.
+    if (isSecretLogging() && method !== 'Page.frameNavigated') return;
+
     switch (method) {
       case 'Page.frameNavigated': {
         const frame = params.frame ?? {};

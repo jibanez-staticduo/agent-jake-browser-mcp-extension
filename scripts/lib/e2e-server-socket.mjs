@@ -23,7 +23,8 @@ export async function launchExtension({ repo, root, wsPort, server, say }) {
 
   await server.listen(wsPort);
   const context = await chromium.launchPersistentContext(join(root, 'profile'), {
-    headless: false,
+    channel: 'chromium',
+    headless: process.env.AJB_HEADLESS === '1',
     args: [`--disable-extensions-except=${join(root, 'ext')}`, `--load-extension=${join(root, 'ext')}`, '--no-sandbox'],
   });
   for (let i = 0; i < 100 && !server.connected(); i++) await new Promise((r) => setTimeout(r, 100));
@@ -60,7 +61,7 @@ export function createServerSide(say) {
     sock.on('data', onData).on('error', () => undefined);
     socket = sock;
   });
-  
+
   let n = 0;
   /** One command, then its answer or the server's cut. */
   async function command(type, payload = {}) {

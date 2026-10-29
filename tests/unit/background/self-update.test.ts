@@ -48,6 +48,14 @@ type D = ReturnType<typeof deps>;
 const pkgWrites = (d: D) => d.writes.filter((p) => !p.startsWith('agent-jake-probe-'));
 
 describe('applyUpdate', () => {
+  it.each(['version', 'sha', 'manifest', 'config'])('rejects a signed package with invalid %s identity before writing extension files', async (kind) => {
+    const files = { ...FILES, ...(kind === 'manifest' ? { 'manifest.json': '{"version":"9.9.9"}' } : {}), ...(kind === 'config' ? { 'config.json': '{"wsUrl":"wss://other.test"}' } : {}) };
+    const meta = { version: LATEST.version, build: LATEST.build, sha: LATEST.sha, ...(kind === 'version' ? { version: '9.9.9' } : {}), ...(kind === 'sha' ? { sha: 'wrong' } : {}) };
+    const d = deps({}, pkg(files, meta));
+    expect(await run(d)).toMatchObject({ status: 'rejected' });
+    expect(d.notes).toContain('bad-package');
+    expect(pkgWrites(d)).toEqual([]);
+  });
   it('1. applies in order, reloads once, leaves pendingCleanup + files, toggles the UI, keeps the lock until the reload', async () => {
     const d = deps();
     const r = await run(d);

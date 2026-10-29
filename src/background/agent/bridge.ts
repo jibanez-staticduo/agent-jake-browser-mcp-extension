@@ -20,7 +20,7 @@ import {
 import { TIMEOUTS } from '@/constants/timeouts';
 import { log } from '@/utils/logger';
 import { AgentStopped, runAgent, type ToolOutcome } from './loop';
-import { LOCAL_TOOL_NAMES } from './tools-catalog';
+import { LOCAL_TOOL_NAMES, INTERNAL_TOOL_NAMES } from './tools-catalog';
 import { openServer, type ServerPlugin } from './mcp-server';
 import { formatPageContext } from './context';
 
@@ -232,6 +232,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
 
     const execTool = async (name: string, args: Record<string, unknown>): Promise<ToolOutcome> => {
       // Un plugin del servidor no toca esta pestaña: se resuelve antes que lo demás (INFRA-909).
+      if (INTERNAL_TOOL_NAMES.has(name)) return { ok: false, error: 'Internal tool is unavailable to the copilot' };
       if (pluginNames.has(name)) return plugin!.call(name, args);
       if (pinned && LEAVES_TAB.has(name)) {
         return { ok: false, error: 'La pestaña está chinchetada: el usuario quiere que trabajes aquí. Pídele que quite la chincheta si necesitas ir a otra.' };
@@ -301,7 +302,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
             if (!settings.mcpUrl) return [];
             plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal);
             pluginNames = new Set(
-              plugin.tools.map((t) => t.function.name).filter((n) => !LOCAL_TOOL_NAMES.has(n)),
+              plugin.tools.map((t) => t.function.name).filter((n) => !LOCAL_TOOL_NAMES.has(n) && !INTERNAL_TOOL_NAMES.has(n)),
             );
             return plugin.tools;
           },

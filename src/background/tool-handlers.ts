@@ -5,11 +5,13 @@
 
 import type { CallTab, TabManager } from './tab-manager';
 import type { IncomingMessage, OutgoingMessage, ToolName as MessageToolName } from '@/types/messages';
-import { log } from '@/utils/logger';
+import { log, withSecretLogging } from '@/utils/logger';
 import { logTool, logError } from './activity-log';
-import { redactPayload } from './redact';
+import { redactPayload, redactResult } from './redact';
 import { getKeyDefinition } from '@/constants/keys';
 import { createToolContext } from './tools/utils';
+import { SECRET_ERRORS } from './tools/handlers/queries';
+import type { SecretCode } from '@/content/read-secret';
 import type { HandlerContext } from './tools/handlers';
 import {
   createNavigationHandlers,
@@ -64,7 +66,8 @@ export async function routeToTargetTab(
 ): Promise<{ tabId: number | null; payload: unknown }> {
   if (!payload || typeof payload !== 'object') return { tabId: null, payload };
   const { targetTabId, ...rest } = payload as Record<string, unknown>;
-  if (typeof targetTabId !== 'number') return { tabId: null, payload };
+  if (targetTabId === undefined) return { tabId: null, payload: rest };
+  if (typeof targetTabId !== 'number' || !Number.isSafeInteger(targetTabId) || targetTabId <= 0) throw new Error('targetTabId must be a positive integer');
   if (!await tabManager.hasTab(targetTabId)) {
     const gone = new Error(`TAB_GONE: tab ${targetTabId} of this session no longer exists; open one with browser_new_tab or pick one with browser_switch_tab`);
     gone.name = 'TAB_GONE';
@@ -183,6 +186,9 @@ export function createToolHandlers(browser: TabManager) {
    */
   return async function handleMessage(message: IncomingMessage, signal = new AbortController().signal): Promise<OutgoingMessage> {
     const { id, type, payload } = message;
+    const readingSecret = type === 'browser_read_secret';
+    const secret = type === 'browser_type' && (payload as { secret?: unknown } | undefined)?.secret === true;
+    const execute = async (): Promise<OutgoingMessage> => {
     const startTime = performance.now();
     const tabManager = fencedTabManager(browser, signal);
 
@@ -208,7 +214,7 @@ export function createToolHandlers(browser: TabManager) {
       const durationMs = Math.round(performance.now() - startTime);
 
       const description = getToolDescription(type, payload, result);
-      logTool(type, description, true, durationMs, { payload: redactPayload(payload), result });
+      logTool(type, secret ? "Secret typing completed" : description, true, durationMs, (secret || readingSecret) ? undefined : { payload: redactPayload(payload, type), result: redactResult(type, result) });
 
       log.info(`[Tool] Completed: ${type} (id: ${id}) - success in ${durationMs}ms`);
 
@@ -219,19 +225,27 @@ export function createToolHandlers(browser: TabManager) {
       };
     } catch (error) {
       const durationMs = Math.round(performance.now() - startTime);
-      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${(error as Error).message} in ${durationMs}ms`);
+      if (readingSecret) {
+        const name = (error as Error)?.name;
+        const code: SecretCode = Object.hasOwn(SECRET_ERRORS, name) ? name as SecretCode : 'SECRET_NO_MATCH';
+        error = Object.assign(new Error(SECRET_ERRORS[code]()), { name: code });
+      }
+      const safeError = secret ? new Error('Secret typing failed') : error as Error;
+      log.error(`[Tool] Failed: ${type} (id: ${id}) - ${safeError.message} in ${durationMs}ms`);
 
-      logTool(type, (error as Error).message, false, durationMs, { payload: redactPayload(payload), error: (error as Error).message });
+      logTool(type, safeError.message, false, durationMs);
 
       return {
         id,
         success: false,
         error: {
-          code: (error as Error).name || 'EXECUTION_ERROR',
-          message: (error as Error).message,
+          code: secret ? 'EXECUTION_ERROR' : safeError.name || 'EXECUTION_ERROR',
+          message: safeError.message,
         },
       };
     }
+    };
+    return (secret || readingSecret) ? withSecretLogging(execute) : execute();
   };
 }
 

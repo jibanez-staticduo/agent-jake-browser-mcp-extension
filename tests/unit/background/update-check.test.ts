@@ -44,7 +44,7 @@ describe('checkForUpdate', () => {
     const url = latestUrlFor(POD, '');
     const state = await checkForUpdate(url, d);
     expect(state?.available).toBe(true);
-    expect(state?.downloadUrl).toBe('https://browser-mcp.lan.e-dani.com/download');
+    expect(state?.downloadUrl).toBe('https://browser-mcp.lan.e-dani.com/download/artifact.zip');
     expect(d.store.get(UPDATE_STATE_KEY)).toMatchObject({ available: true, latest: { build: 125 } });
     expect(d.badge.at(-1)).toBe('NEW');
     expect(d.notified).toBe(1);

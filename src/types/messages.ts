@@ -27,6 +27,8 @@ export type ToolName =
   | 'browser_switch_tab'
   | 'browser_send_to_back'
   | 'browser_close_tab'
+  | 'browser_close_window'
+  | 'browser_read_secret'
   | 'browser_get_text'
   | 'browser_get_attribute'
   | 'browser_is_visible'
@@ -101,6 +103,7 @@ export interface Snapshot {
 
 // Tab info for tab management
 export interface TabInfo {
+  windowId?: number;
   id: number;
   url: string;
   title: string;

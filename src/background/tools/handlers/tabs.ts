@@ -7,14 +7,19 @@ import type { HandlerContext, HandlerMap } from './types';
 export function createTabHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_new_tab: async (payload) => {
-      const { url, switchTo } = schemas.browser_new_tab.parse(payload);
-      return ctx.tabManager.createTab(url, true, switchTo); // { tab, loaded }
+      const { url, windowId } = schemas.browser_new_tab.parse(payload);
+      return ctx.tabManager.createTab(url, true, false, windowId ?? 0); // { tab, loaded }
     },
 
     // closeById tells the server this build closes the tab it is asked for (see browser_close_tab):
     // its tab reaper closes nothing on a browser that does not say so.
+    browser_close_window: async (payload) => {
+      const { windowId, tabIds } = schemas.browser_close_window.parse(payload);
+      return ctx.tabManager.closeWindow(windowId, tabIds);
+    },
+
     browser_list_tabs: async () => {
-      return { tabs: await ctx.tabManager.listTabs(), closeById: true };
+      return { tabs: await ctx.tabManager.listTabs(), closeById: true, closeWindow: true, windowPerSession: true };
     },
 
     // Search, not drive: it names no tab and attaches none, so several sessions can look at the

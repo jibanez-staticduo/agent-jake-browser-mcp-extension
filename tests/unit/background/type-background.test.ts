@@ -18,6 +18,7 @@ function fakeContext(opts: { initial?: number; landed: (n: number) => number; pe
   const sendToContent = vi.fn(async (action: string, payload?: Record<string, unknown>) => {
     calls.push({ action, payload });
     if (action === 'getElementCoordinates') return { x: 10, y: 20 };
+    if (action === 'getFieldLength') return { exists: true, length };
     if (action === 'fieldLength') return { length };
     if (action === 'clearField') { length = 0; return { length }; }
     if (action === 'setFieldText') {
@@ -53,7 +54,7 @@ describe('browser_type in a tab that does not take the keys', () => {
     const answer = await handlers.browser_type({ selector: '#pw', text: 's3cr3t-pass', clear: true, secret: true });
 
     expect(calls.filter((c) => c.action === 'setFieldText')).toHaveLength(1);
-    expect(answer).toEqual({ typed: '[secret]', cleared: true, fallback: 'native-setter', fieldLength: 11 });
+    expect(answer).toEqual({ typed: true, cleared: true, fallback: 'native-setter', navigated: false, verified: true, length: 11 });
     expect(JSON.stringify(answer)).not.toContain('s3cr3t');
   });
 

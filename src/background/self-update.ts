@@ -91,7 +91,10 @@ async function verifiedPackage(zip: Record<string, Uint8Array>, latest: Publishe
   if (!await verifySignature(body, new TextDecoder().decode(sig), deps.publicKey)) return null;
   let files: UpdateFiles | null;
   try { files = parseUpdateFiles(JSON.parse(new TextDecoder().decode(body))); } catch { return null; }
-  if (!files || files.build !== latest.build || files.build <= deps.currentBuild) return null;
+  if (!files || files.build !== latest.build || files.build <= deps.currentBuild || files.version !== latest.version || files.sha !== latest.sha) return null;
+  try {
+    if (JSON.parse(new TextDecoder().decode(zip["manifest.json"])).version !== files.version) return null;
+  } catch { return null; }
   for (const f of files.files) {
     const bytes = zip[f.path];
     if (!bytes || bytes.length !== f.size || await sha256Hex(bytes) !== f.sha256) return null;

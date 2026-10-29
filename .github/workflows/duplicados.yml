@@ -37,3 +37,10 @@ jobs:
   duplicados:
     uses: pocharlies-org/k8s-gitops-pocharlies/.github/workflows/reusable-duplicados.yml@main
     secrets: inherit
+    with:
+      # SC-2691 (merge del padre fec2f3c): el padre copia sus e2e entre sí
+      # (release-staticduo-e2e.mjs reproduce ~190 líneas de nuestro e2e-self-update.mjs) y sus
+      # specs nuevas repiten el arranque común. Deduplicar código del padre en el fork garantiza
+      # conflicto en cada merge nocturno (el fallo que este PR desatasca); los ficheros son del
+      # padre y se reescriben con cada release. El dedup, si algún día toca, es del padre.
+      ignorar: "**/release-staticduo*,**/session-windows.spec.ts,**/tab-close.spec.ts"

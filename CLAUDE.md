@@ -1,9 +1,9 @@
-# CLAUDE.md — agent-browser-extension
+# Agent Jake Browser
 
-## Diseño: la plantilla por defecto, siempre
+The product tracks the complete Pocharlies feature set with StaticDuo runtime configuration and security overlays. See docs/full-parity-20261017.md.
 
-Toda UI nueva (control, tarjeta, panel) usa los controles compartidos de `src/popup/styles/base.css`
-y los tokens de `variables.css`; ningún componente lleva color, borde o relleno propio
-(contrast.test.ts vigila los pares). Un `<select>` es nativo y hereda de base.css: su ventana la
-pinta el sistema, que sigue el tema gracias a `color-scheme` en el `:root`. Añadir un control sin
-pasar por la plantilla es un bug, no un estilo.
+- Validate changes with npm run typecheck, npm run test:unit, npm run build and scripts/check-deltas.sh. Use disposable Chromium profiles for browser QA.
+- Keep secrets out of Git, diagnostics and build inputs. Secret writing requires explicit deployment configuration.
+- Publish custom Docker images to docker.staticduo.com and verify their digest before deployment.
+- Build signed extension bundles with scripts/release-staticduo.mjs from committed source. The private signing key remains outside the repository.
+- CI runners and production release/deployment belong to each installation. This fork must not invoke Pocharlies kubectl contexts, host sync scripts or organization-secret workflows.

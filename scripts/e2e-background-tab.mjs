@@ -34,7 +34,7 @@ try {
 
   let worker = context.serviceWorkers()[0];
   for (let i = 0; i < 50 && !worker; i++) { await new Promise((r) => setTimeout(r, 100)); worker = context.serviceWorkers()[0]; }
-  const tabInfo = (id) => worker.evaluate((tabId) => chrome.tabs.get(tabId).then((t) => ({ active: t.active, url: t.url })), id);
+  const tabInfo = (id) => worker.evaluate(async (tabId) => { const t = await chrome.tabs.get(tabId); const front = await chrome.windows.getLastFocused(); return { active: t.active && t.windowId === front.id, url: t.url }; }, id);
   const activeTabs = () => worker.evaluate(() => chrome.tabs.query({ active: true }).then((ts) => ts.map((t) => t.id)));
   const pageOf = (id, url) => context.pages().find((p) => p.url() === url);
   const probe = (page, sel) => page.evaluate((s) => {

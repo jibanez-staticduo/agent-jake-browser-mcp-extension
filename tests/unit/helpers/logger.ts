@@ -7,3 +7,6 @@ export const log = {
   warn: vi.fn(),
   error: vi.fn(),
 };
+
+export const isSecretLogging = () => false;
+export const withSecretLogging = async <T>(operation: () => Promise<T>): Promise<T> => operation();

@@ -35,6 +35,7 @@ export const schemas = {
     ...target,
     text: z.string(),
     clear: z.boolean().optional().default(false),
+    secret: z.boolean().optional().default(false),
   }).refine(hasTarget, targetRequired),
 
   browser_hover: z.object({ ...target }).refine(hasTarget, targetRequired),
@@ -69,6 +70,7 @@ export const schemas = {
   browser_new_tab: z.object({
     url: z.string().url(),
     switchTo: z.boolean().optional().default(false),
+    windowId: z.number().int().positive().optional(),
   }),
 
   browser_switch_tab: z.object({
@@ -84,11 +86,19 @@ export const schemas = {
     tabId: z.number().optional(),
   }),
 
+  browser_close_window: z.object({
+    windowId: z.number().int().positive(),
+    tabIds: z.array(z.number().int().positive()),
+  }),
+
   browser_close_tab: z.object({
-    tabId: z.number().optional(),
+    tabId: z.number().int().positive().optional(),
   }),
 
   browser_get_text: z.object({ ...target }).refine(hasTarget, targetRequired),
+
+  browser_read_secret: z.object({ ...target, regex: z.string().min(1).max(256).optional() })
+    .refine((d) => hasTarget(d) || d.regex !== undefined, { message: 'Either ref, selector or regex must be provided' }),
 
   browser_get_attribute: z.object({ ...target, attribute: z.string() }).refine(hasTarget, targetRequired),
 

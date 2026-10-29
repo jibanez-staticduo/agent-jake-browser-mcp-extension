@@ -6,7 +6,7 @@ const enc = (s: string) => new TextEncoder().encode(s);
 
 describe('isSafePath', () => {
   it.each(['manifest.json', 'assets/index.ts-loader-BAV7mLrc.js', 'src/sidepanel/index.html', 'icons/icon16.png'])('accepts %s', (p) => expect(isSafePath(p)).toBe(true));
-  it.each(['', '/etc/x.js', '../x.js', 'a/../b.js', '.vite/manifest.json', 'assets/.hidden.js', 'a\\b.js', 'x.exe', 'a//b.js', 'config.json ', 'dir./x.js', 'con.js', 'assets/NUL.js', 'a/lpt1.css', 'COM9.json', 'aux.min.js'])('rejects %j', (p) => expect(isSafePath(p)).toBe(false));
+  it.each(['', '/etc/x.js', '../x.js', 'a/../b.js', '.vite/manifest.json', 'assets/.hidden.js', 'a\\b.js', 'x.exe', 'a//b.js', 'config.json ', 'config.json', 'CONFIG.JSON', 'dir./x.js', 'con.js', 'assets/NUL.js', 'a/lpt1.css', 'COM9.json', 'aux.min.js'])('rejects %j', (p) => expect(isSafePath(p)).toBe(false));
 });
 
 describe('mimeFor', () => {
@@ -15,6 +15,7 @@ describe('mimeFor', () => {
     expect(mimeFor('manifest.json')).toBe('application/json');
     expect(mimeFor('i/x.PNG')).toBe('image/png');
     expect(mimeFor('x.exe')).toBeNull();
+    expect(mimeFor('assets/font.ttf')).toBe('font/ttf');
   });
 });
 
