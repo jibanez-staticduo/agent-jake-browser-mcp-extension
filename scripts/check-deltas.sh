@@ -45,6 +45,9 @@ chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -
 chk "16c el panel puede dictar (permiso microphone)"    grep -q '"microphone"' manifest.json
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
+# INFRA-1040: un merge del upstream cambió el pin a la clave de StaticDuo y el publicar dejó de
+# verificar (la privada de la casa está en el secreto CI AJB_UPDATE_SIGNING_KEY). El valor es delta.
+chk "17b el pin de firma es la clave de la casa" grep -qF "zjV1cGctLLOkPqIHtubPQASoklV4Na+WoWsGyfqN6A4=" src/config/update-key.ts
 # INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
 chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
 # INFRA-907: el debugger es por pestana (un TabSession por pestana manejada). No debe volver
