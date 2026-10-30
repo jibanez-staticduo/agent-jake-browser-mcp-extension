@@ -69,7 +69,9 @@ export const schemas = {
 
   browser_new_tab: z.object({
     url: z.string().url(),
+    // Accepted and ignored: the agent never brings a tab to the front.
     switchTo: z.boolean().optional().default(false),
+    // The agent's window for this session; absent or gone = a new unfocused window.
     windowId: z.number().int().positive().optional(),
   }),
 

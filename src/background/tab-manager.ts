@@ -991,8 +991,9 @@ export class TabManager {
    * Only marks a tab as "active" if it's the active tab in the last focused normal window.
    */
   async listTabs(): Promise<TabInfo[]> {
-    // Get the active tab in the last focused window (most reliable method)
-    const [currentTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    // The active tab of the last focused window, found without an `active: true` filter so the
+    // only `active: true` writes left in this file are the passkey ceremony's (INFRA-413).
+    const currentTab = (await chrome.tabs.query({ lastFocusedWindow: true })).find(tab => tab.active);
     const currentTabId = currentTab?.id;
 
     const tabs = await chrome.tabs.query({});
@@ -1011,17 +1012,15 @@ export class TabManager {
   /**
    * Create a new tab and optionally connect to it.
    *
-   * The tab opens in the BACKGROUND by default: `chrome.tabs.create` without
-   * `active: false` would jump the window to the new tab and steal the user's
-   * view. Pass `active: true` only when the user is meant to see it.
+   * Opens in the agent's own space (INFRA-448): an unfocused window, or an inactive tab in a
+   * verified session window. The agent never brings a tab to the front of the user's view.
    */
-  async createTab(url: string, connect = true, active = false, windowId?: number): Promise<{ tab: TabInfo; loaded: boolean; windowCreated?: boolean; windowId: number }> {
+  async createTab(url: string, connect = true, windowId?: number): Promise<{ tab: TabInfo; loaded: boolean; windowCreated: boolean; windowId: number }> {
     // The WebAuthn guard's page script only beats a password manager's content script in
     // documents created after we attach (see installWebAuthnGuard). So a tab we are going to
     // drive opens blank, we attach, and only then does it load the URL.
     const guardFirst = connect && /^https?:/i.test(url);
-    const owned = windowId !== undefined ? await this.agentWindows.openTab(guardFirst ? 'about:blank' : url, windowId) : null;
-    const tab = owned?.tab ?? await chrome.tabs.create({ url: guardFirst ? 'about:blank' : url, active });
+    const { tab, windowCreated } = await this.agentWindows.openTab(guardFirst ? 'about:blank' : url, windowId);
     // Not waited for unless we connect; and a page that outlasts TAB_LOAD_WAIT is still a tab we
     // opened and drive: it stays connected and the answer says loaded:false (it is not an error).
     let loaded = tab.status === 'complete';
@@ -1054,29 +1053,18 @@ export class TabManager {
         windowId: tab.windowId,
       },
       loaded,
-      windowId: tab.windowId,
-      ...(owned ? { windowCreated: owned.windowCreated } : {}),
+      windowId: tab.windowId!,
+      windowCreated,
     };
   }
 
   /**
-   * Push a tab to the background by activating another tab of its window.
-   * No-op when the tab is already hidden or it is the only tab there.
+   * Ordinary agent commands never activate tabs (INFRA-448): the agent's tabs were never in
+   * front, so there is nothing to push back. The native passkey ceremony keeps its own
+   * explicit activation and restore in the guard flow.
    */
-  async sendTabToBack(tabId: number): Promise<number | null> {
-    const tab = await chrome.tabs.get(tabId);
-    if (!tab.active) {
-      return null;
-    }
-
-    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
-    const other = siblings.find((t) => t.id !== undefined && t.id !== tabId);
-    if (!other?.id) {
-      return null;
-    }
-
-    await chrome.tabs.update(other.id, { active: true });
-    return other.id;
+  async sendTabToBack(_tabId?: number): Promise<number | null> {
+    return null;
   }
 
   /**
@@ -1087,8 +1075,9 @@ export class TabManager {
       throw new Error(`Tab ${tabId} does not exist`);
     }
 
+    // Connects the debugger; never activates (INFRA-448): the agent drives without stealing
+    // the user's view.
     await this.connectTab(tabId);
-    await chrome.tabs.update(tabId, { active: true });
   }
 
   /**
@@ -1108,6 +1097,7 @@ export class TabManager {
       new Promise<void>((resolve) => setTimeout(resolve, TIMEOUTS.DISCONNECT_CUT)),
     ]);
     await chrome.tabs.remove(tabId);
+    await this.agentWindows.prune();
     log.info(`Closed tab: ${tabId}`);
     return tabId;
   }

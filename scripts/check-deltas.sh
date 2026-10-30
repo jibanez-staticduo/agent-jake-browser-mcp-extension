@@ -52,5 +52,7 @@ chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" 
 # de otra, y por eso la cola global era la que evitaba pisarse.
 chk "19 el debugger es por pestana" bash -c 'grep -q "new Map<number, TabSession>()" src/background/tab-manager.ts'
 not "19b no hay pestana conectada unica"            grep -rq "getConnectedTabId" src/
-
+# INFRA-413: native passkey ceremony retains its explicit activation; ordinary tab routes do not.
+chk "20 session windows open without focus" grep -q "focused: false" src/background/agent-windows.ts
+chk "21 session window ownership uses live target UUIDs" bash -c 'grep -q "target.id === witness.targetId" src/background/agent-windows.ts && grep -q "windowPerSession: true" src/background/tools/handlers/tabs.ts'
 exit $fail
