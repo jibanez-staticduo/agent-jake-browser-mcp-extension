@@ -58,4 +58,9 @@ not "19b no hay pestana conectada unica"            grep -rq "getConnectedTabId"
 # INFRA-413: native passkey ceremony retains its explicit activation; ordinary tab routes do not.
 chk "20 session windows open without focus" grep -q "focused: false" src/background/agent-windows.ts
 chk "21 session window ownership uses live target UUIDs" bash -c 'grep -q "target.id === witness.targetId" src/background/agent-windows.ts && grep -q "windowPerSession: true" src/background/tools/handlers/tabs.ts'
+# INFRA-450 (INFRA-413 C7): las rutas de herramienta no activan pestanas ni enfocan ventanas. Las unicas
+# escrituras active:true que quedan en src/background son las de la ceremonia de passkey (excepcion
+# deliberada, ARCHITECTURE.md) en tab-manager.ts; las demas son lecturas tabs.query o comentarios.
+not "22 ninguna ruta de herramienta activa pestanas ni enfoca ventanas" bash -c "grep -rnE 'active: ?true|focused: ?true' src/background/tool-handlers.ts src/background/tools/ | grep -v 'tabs.query' | grep -vE ':[0-9]+: *//'"
+not "22b windows.update no existe en src/background" grep -rq "windows.update" src/background/
 exit $fail
