@@ -1,3 +1,0 @@
-name: security-infra1118-probe
-on:
-  workflow_dispatch:
