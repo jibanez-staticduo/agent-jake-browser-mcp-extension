@@ -63,4 +63,8 @@ chk "21 session window ownership uses live target UUIDs" bash -c 'grep -q "targe
 # deliberada, ARCHITECTURE.md) en tab-manager.ts; las demas son lecturas tabs.query o comentarios.
 not "22 ninguna ruta de herramienta activa pestanas ni enfoca ventanas" bash -c "grep -rnE 'active: ?true|focused: ?true' src/background/tool-handlers.ts src/background/tools/ | grep -v 'tabs.query' | grep -vE ':[0-9]+: *//'"
 not "22b windows.update no existe en src/background" grep -rq "windows.update" src/background/
+# INFRA-1111: el estado de la ultima pasada de tests (test-results/.last-run.json) no se trackea:
+# cambia en cada test y deja el checkout del sync sucio ("tiene cambios sin commitear"), con lo que
+# x86 deja de actualizarse. Un merge de upstream que lo devuelva al indice es un FALLO.
+not "23 test-results no esta trackeado" git ls-files --error-unmatch test-results/.last-run.json
 exit $fail
