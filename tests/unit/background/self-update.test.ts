@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { zipSync, strToU8, unzipSync } from 'fflate';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { applyUpdate, cleanupAfterUpdate, restoreDownloadUi, DownloadStalledError, FILES_KEY, LOCK_KEY, PENDING_KEY, ATTEMPTS_KEY, UI_DISABLED_KEY, type SelfUpdateDeps } from '@/background/self-update';
+import { applyUpdate, cleanupAfterUpdate, restoreDownloadUi, recordLastAuto, selfUpdateNow, DownloadStalledError, FILES_KEY, LAST_AUTO_KEY, LOCK_KEY, PENDING_KEY, ATTEMPTS_KEY, UI_DISABLED_KEY, type SelfUpdateDeps } from '@/background/self-update';
+import type { UpdateState } from '@/background/update-check';
 
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PUB = publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
@@ -295,5 +296,133 @@ describe('review round 1', () => {
     expect((await run(d)).status).toBe('rejected');
     expect(unzip).not.toHaveBeenCalled();
     expect(d.notes).toEqual(['bad-package']);
+  });
+});
+
+describe('«Actualizar ahora» (manual)', () => {
+  const recent = () => ({ lastToolActivityAt: async () => 1_000_000_000 - 60_000 });
+  const manual = (d: SelfUpdateDeps, latest = LATEST) => applyUpdate(latest, 'https://pod/download', d, { manual: true });
+
+  it('applies although the agent used a tool 1 min ago, where the automatic run returns busy for the same deps', async () => {
+    const auto = deps(recent());
+    expect(await run(auto)).toEqual({ status: 'busy' });
+    expect(auto.writes).toEqual([]);
+    const d = deps(recent());
+    expect(await manual(d)).toEqual({ status: 'applied' });
+    expect(d.reloaded).toBe(1);
+    expect([...pkgWrites(d)].sort()).toEqual(Object.keys(FILES).sort());
+  });
+
+  it('does not even read the activity log', async () => {
+    const lastToolActivityAt = vi.fn(async () => 1_000_000_000);
+    expect((await manual(deps({ lastToolActivityAt }))).status).toBe('applied');
+    expect(lastToolActivityAt).not.toHaveBeenCalled();
+  });
+
+  it('still stops after two attempts for the same build: failed/not-applied', async () => {
+    const d = deps(recent());
+    d.store.set(ATTEMPTS_KEY, { build: 141, count: 2 });
+    expect(await manual(d)).toEqual({ status: 'failed', reason: 'not-applied' });
+    expect(d.writes).toEqual([]);
+    expect(d.reloaded).toBe(0);
+  });
+
+  it('still rejects a tampered package and a package signed with another key', async () => {
+    const tampered = deps(recent(), pkg(FILES, undefined, {}, true));
+    expect((await manual(tampered)).status).toBe('rejected');
+    expect(pkgWrites(tampered)).toEqual([]);
+    const other = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(12).toString('base64');
+    const badKey = deps({ ...recent(), publicKey: other });
+    expect((await manual(badKey)).status).toBe('rejected');
+    expect(pkgWrites(badKey)).toEqual([]);
+    expect(badKey.reloaded).toBe(0);
+  });
+
+  it('still needs the probe: not-eligible when it cannot read its own folder', async () => {
+    const d = deps({ ...recent(), readOwnFile: async () => null });
+    expect(await manual(d)).toEqual({ status: 'not-eligible', reason: 'not-in-downloads' });
+    expect(d.reloaded).toBe(0);
+  });
+
+  it('still needs Ed25519 support', async () => {
+    const d = deps({ ...recent(), supportsEd25519: async () => false });
+    expect(await manual(d)).toEqual({ status: 'not-eligible', reason: 'unsupported-browser' });
+  });
+
+  it('still honours a live lock and the in-worker guard', async () => {
+    const held = deps(recent());
+    held.store.set(LOCK_KEY, held.now() - 60_000);
+    expect(await manual(held)).toEqual({ status: 'locked' });
+    const d = deps(recent());
+    const [a, b] = await Promise.all([manual(d), manual(d)]);
+    expect([a.status, b.status].sort()).toEqual(['applied', 'locked']);
+    expect(d.reloaded).toBe(1);
+  });
+
+  it('already on the published build: up-to-date', async () => {
+    expect(await manual(deps(recent()), { ...LATEST, build: 140 })).toEqual({ status: 'up-to-date' });
+  });
+});
+
+describe('selfUpdateNow', () => {
+  const state = (over: Partial<UpdateState> = {}): UpdateState => ({
+    available: true, latest: LATEST, current: { version: '2.4.0.140', build: 140, sha: 'abc' },
+    downloadUrl: 'https://pod/download', checkedAt: '2026-10-05T10:00:00Z', ...over,
+  });
+
+  it('no check result (no URL, offline, nothing published): explicit failed/no-check, nothing fetched', async () => {
+    const d = deps();
+    const fetchBytes = vi.fn(d.fetchBytes);
+    d.fetchBytes = fetchBytes;
+    expect(await selfUpdateNow(null, d)).toEqual({ status: 'failed', reason: 'no-check' });
+    expect(fetchBytes).not.toHaveBeenCalled();
+  });
+
+  it('check without a download URL: failed/no-check', async () => {
+    expect(await selfUpdateNow(state({ downloadUrl: undefined }), deps())).toEqual({ status: 'failed', reason: 'no-check' });
+  });
+
+  it('nothing newer published: up-to-date, nothing written', async () => {
+    const d = deps();
+    expect(await selfUpdateNow(state({ available: false }), d)).toEqual({ status: 'up-to-date' });
+    expect(d.writes).toEqual([]);
+  });
+
+  it('newer build and a busy agent: applied (manual run), reload scheduled once', async () => {
+    const d = deps({ lastToolActivityAt: async () => 1_000_000_000 - 60_000 });
+    expect(await selfUpdateNow(state(), d)).toEqual({ status: 'applied' });
+    expect(d.reloaded).toBe(1);
+  });
+});
+
+describe('recordLastAuto', () => {
+  it('stores status, reason and time of the automatic result', async () => {
+    const d = deps();
+    await recordLastAuto({ status: 'busy' }, d);
+    expect(d.store.get(LAST_AUTO_KEY)).toEqual({ status: 'busy', at: 1_000_000_000 });
+    await recordLastAuto({ status: 'not-eligible', reason: 'download-prompt' }, d);
+    expect(d.store.get(LAST_AUTO_KEY)).toEqual({ status: 'not-eligible', reason: 'download-prompt', at: 1_000_000_000 });
+  });
+
+  it('stores the build the run was about, so the panel shows the line only for that build', async () => {
+    const d = deps();
+    await recordLastAuto({ status: 'busy' }, d, 142);
+    expect(d.store.get(LAST_AUTO_KEY)).toEqual({ status: 'busy', build: 142, at: 1_000_000_000 });
+    await recordLastAuto({ status: 'failed', reason: 'not-applied' }, d, 143);
+    expect(d.store.get(LAST_AUTO_KEY)).toEqual({ status: 'failed', reason: 'not-applied', build: 143, at: 1_000_000_000 });
+  });
+
+  it('does not store a build for a null result, and keeps the old build-tagged value', async () => {
+    const d = deps();
+    await recordLastAuto({ status: 'busy' }, d, 142);
+    await recordLastAuto(null, d, 143);
+    expect(d.store.get(LAST_AUTO_KEY)).toEqual({ status: 'busy', build: 142, at: 1_000_000_000 });
+  });
+
+  it('keeps the previous value when the run did nothing (null: no update available)', async () => {
+    const d = deps();
+    await recordLastAuto({ status: 'busy' }, d);
+    await recordLastAuto(null, d);
+    expect(d.store.get(LAST_AUTO_KEY)).toMatchObject({ status: 'busy' });
   });
 });

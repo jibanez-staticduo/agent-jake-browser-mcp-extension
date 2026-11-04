@@ -8,12 +8,19 @@ import { CONFIG } from '@/types/config';
 import { UPDATE_PUBLIC_KEY } from '@/config/update-key';
 import { activityLog } from './activity-log';
 import { log } from '@/utils/logger';
-import type { PublishedBuild, UpdateState } from './update-check';
+import { LAST_AUTO_KEY, type PublishedBuild, type UpdateState } from './update-check';
 import { FILES_NAME, INSTALL_DIR, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
 
 export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed' | 'probe-failed' | 'not-applied' | 'unsupported-browser';
 export type SelfUpdateStatus = 'applied' | 'up-to-date' | 'locked' | 'busy' | 'not-eligible' | 'rejected' | 'failed';
 export interface SelfUpdateResult { status: SelfUpdateStatus; reason?: string }
+/** `manual`: a person clicked «Actualizar ahora». It skips ONLY the busy (idle) rule; every other safeguard stays. */
+export interface ApplyOptions { manual?: boolean }
+/**
+ * Last result of the AUTOMATIC run (30-min alarm), kept so the side panel can say why it did not update.
+ * `build` is the published build that run tried to install (the panel shows the line only for the build it offers); `at` is epoch ms.
+ */
+export interface LastAuto { status: SelfUpdateStatus; reason?: string; build?: number; at: number }
 /** A failed download; `id` is set when Chrome had already created the download item. */
 export class DownloadError extends Error {
   constructor(message: string, public id?: number) { super(message); }
@@ -50,6 +57,8 @@ export const PENDING_KEY = 'ajb.selfUpdate.pendingCleanup';
 export const NOTIFIED_KEY = 'ajb.selfUpdate.notified';
 export const UI_DISABLED_KEY = 'ajb.selfUpdate.uiDisabled';
 export const ATTEMPTS_KEY = 'ajb.selfUpdate.attempts';
+// Defined in update-check.ts (a light module): the side panel reads it and must not bundle this engine.
+export { LAST_AUTO_KEY };
 const LOCK_MS = 10 * 60_000;
 const IDLE_MS = 5 * 60_000;
 const STALL_MS = 15_000;
@@ -102,7 +111,7 @@ async function verifiedPackage(zip: Record<string, Uint8Array>, latest: Publishe
   return files;
 }
 
-export async function applyUpdate(latest: PublishedBuild, zipUrl: string, deps: SelfUpdateDeps): Promise<SelfUpdateResult> {
+export async function applyUpdate(latest: PublishedBuild, zipUrl: string, deps: SelfUpdateDeps, opts: ApplyOptions = {}): Promise<SelfUpdateResult> {
   if (latest.build <= deps.currentBuild) return { status: 'up-to-date' };
   if (inFlight) return { status: 'locked' };
   inFlight = true;
@@ -120,8 +129,11 @@ export async function applyUpdate(latest: PublishedBuild, zipUrl: string, deps: 
         return { status: 'failed', reason: 'not-applied' };
       }
 
-      const last = await deps.lastToolActivityAt();
-      if (last !== null && deps.now() - last < IDLE_MS) return { status: 'busy' };
+      // A user click bypasses only this rule: on a browser the agent uses all day the automatic run is always busy.
+      if (!opts.manual) {
+        const last = await deps.lastToolActivityAt();
+        if (last !== null && deps.now() - last < IDLE_MS) return { status: 'busy' };
+      }
 
       if (!await deps.supportsEd25519()) {
         await warnOnce(deps, 'unsupported-browser', latest.build);
@@ -193,9 +205,26 @@ export async function cleanupAfterUpdate(deps: SelfUpdateDeps): Promise<void> {
   await deps.storage.remove(PENDING_KEY);
 }
 
-export async function maybeSelfUpdate(state: UpdateState | null, deps: SelfUpdateDeps = chromeSelfUpdateDeps()): Promise<SelfUpdateResult | null> {
+export async function maybeSelfUpdate(state: UpdateState | null, deps: SelfUpdateDeps = chromeSelfUpdateDeps(), opts: ApplyOptions = {}): Promise<SelfUpdateResult | null> {
   if (!state?.available || !state.latest || !state.downloadUrl) return null;
-  return applyUpdate(state.latest, state.downloadUrl, deps);
+  return applyUpdate(state.latest, state.downloadUrl, deps, opts);
+}
+
+/**
+ * «Actualizar ahora»: `state` is a FRESH checkForUpdate result. null means the check could not run
+ * (no URL, offline, nothing published); otherwise it applies with the idle rule skipped.
+ */
+export async function selfUpdateNow(state: UpdateState | null, deps: SelfUpdateDeps = chromeSelfUpdateDeps()): Promise<SelfUpdateResult> {
+  if (!state) return { status: 'failed', reason: 'no-check' };
+  if (!state.available) return { status: 'up-to-date' };
+  return (await maybeSelfUpdate(state, deps, { manual: true })) ?? { status: 'failed', reason: 'no-check' };
+}
+
+/** Persists the automatic run's result (not the manual one) for the side panel, with the build it was about. */
+export async function recordLastAuto(result: SelfUpdateResult | null, deps: Pick<SelfUpdateDeps, 'storage' | 'now'>, build?: number): Promise<void> {
+  if (!result) return;
+  const value: LastAuto = { status: result.status, ...(result.reason ? { reason: result.reason } : {}), ...(build !== undefined ? { build } : {}), at: deps.now() };
+  await deps.storage.set(LAST_AUTO_KEY, value);
 }
 
 const NOTICE_TEXT: Record<SelfUpdateProblem, string> = {

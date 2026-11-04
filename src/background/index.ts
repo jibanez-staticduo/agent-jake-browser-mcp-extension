@@ -37,7 +37,7 @@ import {
   latestUrlFor,
   type UpdateState,
 } from './update-check';
-import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, restoreDownloadUi } from './self-update';
+import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, recordLastAuto, restoreDownloadUi, selfUpdateNow } from './self-update';
 import {
   buildDisplayUrl,
   getEffectiveConfig,
@@ -139,7 +139,9 @@ async function runUpdateCheck(): Promise<void> {
     const config = await getEffectiveConfig();
     const state = await checkForUpdate(latestUrlFor(config), chromeUpdateDeps());
     if (state?.available) log.info(`[Update] ${state.latest?.version} published; running ${state.current.version}`);
-    const result = await maybeSelfUpdate(state);
+    const selfUpdateDeps = chromeSelfUpdateDeps();
+    const result = await maybeSelfUpdate(state, selfUpdateDeps);
+    await recordLastAuto(result, selfUpdateDeps, state?.latest?.build).catch((e) => log.warn('[SelfUpdate] could not store the last automatic result:', e));
     if (result) log.info(`[SelfUpdate] ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
   } catch (error) {
     log.warn('[Update] check failed:', error);
@@ -284,6 +286,13 @@ async function handlePopupMessage(message: {
         connected: wsClient?.isConnected() || false,
         tabs,
       };
+    }
+
+    // «Actualizar ahora» (side panel): a fresh check, then the self-update with the idle rule skipped.
+    case 'selfUpdateNow': {
+      const config = await getEffectiveConfig();
+      const state = await checkForUpdate(latestUrlFor(config), chromeUpdateDeps());
+      return selfUpdateNow(state, chromeSelfUpdateDeps());
     }
 
     case 'getCdpStatus': {
