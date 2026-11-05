@@ -1182,6 +1182,46 @@ describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
     expect(titles).toEqual([message.window]);
   });
 
+  it('keeps 1Password\'s prompt through a dropped debugger, and gets the debugger and the guard back at the end', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.webNavigation.getAllFrames.mockResolvedValue([{ frameId: 0, url: SIGNIN }]);
+    mockChrome.debugger.attach.mockClear();
+    // What Chrome and our onDetach do when the prompt comes in: the debugger goes, and getting it back purges.
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => {
+      manager.markDebuggerDetached(101);
+      await purgeForeignExtensionFrames(101);
+      url = AFTER;
+      return { ok: true };
+    });
+
+    vi.useFakeTimers();
+    let spared: unknown[] = [];
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      await settle(running);
+      await running;
+      spared = mockChrome.scripting.executeScript.mock.calls
+        .map(([injection]: [{ args?: unknown[] }]) => injection.args)
+        .filter((args: unknown[] | undefined) => args?.[0] === 'own-extension-id')
+        .map((args: unknown[]) => args[1]);
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+      mockChrome.webNavigation.getAllFrames.mockResolvedValue([]);
+    }
+    expect(spared).toEqual(['com-1password-uso', '']); // spared mid-ceremony, purged at the end
+    expect(mockChrome.debugger.attach).toHaveBeenCalledTimes(1);
+    expect(guardBackOn(commands)).toHaveLength(1);
+  });
+
   it('fails loud, without a second click, when the page never moves after the click', async () => {
     const commands = fakeTab(() => SIGNIN);
     const manager = new TabManager();

@@ -203,6 +203,14 @@ async function sendCommandLiftingForeignFrames(tabId: number, method: string, pa
   }
 }
 
+/**
+ * Tabs in a 1Password ceremony (INFRA-374). When 1Password's «Use passkey» prompt comes in,
+ * Chrome drops our debugger, and getting it back purges the foreign frames: the prompt went with
+ * them and 1Password was left waiting on a UI that no longer existed (measured 05-11). In these
+ * tabs the purge spares that one element; the ceremony purges it itself when it is over.
+ */
+const onePasswordCeremonyTabs = new Set<number>();
+
 export async function purgeForeignExtensionFrames(tabId: number): Promise<number> {
   // Not allFrames: that includes the foreign extension frame itself, and injecting there fails
   // the whole call with the very error we are trying to lift. Web frames only.
@@ -212,8 +220,8 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
   const results = await chrome.scripting.executeScript({
     target: { tabId, frameIds },
     injectImmediately: true, // see setLiveConnectionCloseGuard
-    args: [chrome.runtime.id],
-    func: (ownId: string) => {
+    args: [chrome.runtime.id, onePasswordCeremonyTabs.has(tabId) ? ONEPASSWORD_PROMPT_ELEMENT : ''],
+    func: (ownId: string, spare: string) => {
       let removed = 0;
       const foreign = (src: string) => src.startsWith('chrome-extension://') && !src.startsWith(`chrome-extension://${ownId}/`);
       const sweep = (root: Document | ShadowRoot) => {
@@ -222,7 +230,7 @@ export async function purgeForeignExtensionFrames(tabId: number): Promise<number
         });
         root.querySelectorAll('*').forEach((el) => {
           const tag = el.tagName.toLowerCase();
-          if (tag.startsWith('com-1password-')) { el.remove(); removed++; return; }
+          if (tag.startsWith('com-1password-') && tag !== spare) { el.remove(); removed++; return; }
           if (el.shadowRoot) sweep(el.shadowRoot);
         });
       };
@@ -759,6 +767,7 @@ export class TabManager {
     let osClick = false;
     let guardRestored = true;
     try {
+      onePasswordCeremonyTabs.add(tabId);
       await this.dropWebAuthnGuard(tabId);
       await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId));
       // The refs of the reloaded document are its own: the handler points the click at the button again.
@@ -780,8 +789,11 @@ export class TabManager {
       // The ceremony is decided by now, so 1Password's own frame is no longer the one signing:
       // the debugger cannot work with it in the page (condition 6, INFRA-1171). Only after the
       // redirects settled: reloading in the middle of them burns a single-use token.
+      onePasswordCeremonyTabs.delete(tabId);
       await purgeForeignExtensionFrames(tabId).catch(() => 0);
-      await this.installWebAuthnGuard(tabId);
+      // Chrome may have dropped the debugger when the prompt came in: attaching again puts the guard back too.
+      if (this.session(tabId).debuggerAttached) await this.installWebAuthnGuard(tabId);
+      else await this.attachDebugger(tabId).catch((error) => log.warn('[Passkey] debugger not back after the 1Password ceremony:', error));
       guardRestored = this.session(tabId).webauthnAuthenticatorId !== null;
       await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)).catch(() => false);
       if (previous !== undefined) {
