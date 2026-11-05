@@ -16,6 +16,27 @@ beforeEach(async () => {
 });
 
 describe('durable activity history', () => {
+  it('retains only the newest 100 passkey metadata entries, without ceremony payloads', async () => {
+    for (let index = 0; index < 105; index++) {
+      await logTool('browser_passkey', 'private ceremony marker', true, 1, {
+        tabId: index,
+        rpId: 'private.example',
+        nonce: 'agent-jake-passkey-private',
+        privateKey: 'private-key-canary',
+        userHandle: 'private-handle-canary',
+      });
+    }
+    const history = await activityLog.getAll();
+    expect(history.activities).toHaveLength(100);
+    expect(history.activities[0].details).toEqual({ tabId: 104 });
+    expect(history.activities[99].details).toEqual({ tabId: 5 });
+    const serialized = JSON.stringify(stored[key]);
+    expect(serialized).not.toContain('private');
+    expect(serialized).not.toContain('nonce');
+    expect(serialized).not.toContain('userHandle');
+    expect(serialized).not.toContain('rpId');
+  });
+
   it('stores tool metadata without network, console or form secrets', async () => {
     const secret = 'secret-marker-729';
     await logTool('browser_network_request', `Response: ${secret}`, true, 7, {
