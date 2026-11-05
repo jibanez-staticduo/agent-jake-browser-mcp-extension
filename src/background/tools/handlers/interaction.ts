@@ -30,13 +30,15 @@ interface PasskeyTarget {
  * by what it is (tag, role, visible text, and which one of those it was) rather than by its ref.
  * Self-contained on purpose: it is serialized for chrome.scripting.
  */
-function passkeyTargetProbe(
+export function passkeyTargetProbe(
   mode: 'describe' | 'mark',
   arg: string | PasskeyTarget,
   mark?: string,
 ): PasskeyTarget | boolean {
   const selector = 'a,button,input[type="button"],input[type="submit"],input[type="image"],[role="button"]';
-  const textOf = (el: Element) => ((el as HTMLInputElement).value ?? el.textContent ?? '')
+  const textOf = (el: Element) => (el.tagName.toLowerCase() === 'input'
+    ? (el as HTMLInputElement).value
+    : el.textContent ?? '')
     .trim().replace(/\s+/g, ' ').slice(0, 60);
   const roleOf = (el: Element) => el.getAttribute('role') || el.tagName.toLowerCase();
   const matches = (t: PasskeyTarget) => Array.from(document.querySelectorAll(selector))

@@ -124,6 +124,8 @@ export interface PasskeyCeremonyOptions {
    * gone with it, so the handler finds the button again here and points the click at it (INFRA-374).
    */
   afterReload?: () => Promise<void>;
+  /** Call fence: do not trigger a late reload after the MCP request has been cut. */
+  signal?: AbortSignal;
 }
 
 export interface PasskeyOutcome {
@@ -652,6 +654,7 @@ export class TabManager {
     action: () => Promise<T>,
     options?: PasskeyCeremonyOptions,
   ): Promise<{ result: T; passkey: PasskeyOutcome }> {
+    options?.signal?.throwIfAborted();
     if (!this.sessions.has(tabId)) throw new Error('No tab connected');
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url ?? '';
@@ -769,9 +772,12 @@ export class TabManager {
     try {
       onePasswordCeremonyTabs.add(tabId);
       await this.dropWebAuthnGuard(tabId);
+      options.signal?.throwIfAborted();
       await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId));
       // The refs of the reloaded document are its own: the handler points the click at the button again.
+      options.signal?.throwIfAborted();
       await options.afterReload?.();
+      options.signal?.throwIfAborted();
       result = await action();
       osClick = await this.clickOnePasswordPrompt(tabId, tab.windowId, url, host);
       const landed = await this.waitForSignInToLand(tabId, url);
@@ -795,7 +801,9 @@ export class TabManager {
       if (this.session(tabId).debuggerAttached) await this.installWebAuthnGuard(tabId);
       else await this.attachDebugger(tabId).catch((error) => log.warn('[Passkey] debugger not back after the 1Password ceremony:', error));
       guardRestored = this.session(tabId).webauthnAuthenticatorId !== null;
-      await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)).catch(() => false);
+      if (!options.signal?.aborted) {
+        await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)).catch(() => false);
+      }
       if (previous !== undefined) {
         await chrome.tabs.update(previous, { active: true })
           .catch((error) => log.warn('[Passkey] previous tab not restored:', error));

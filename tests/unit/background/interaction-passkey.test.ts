@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createInteractionHandlers } from '@/background/tools/handlers/interaction';
+import { createInteractionHandlers, passkeyTargetProbe } from '@/background/tools/handlers/interaction';
 import type { HandlerContext } from '@/background/tools/handlers/types';
 
 vi.mock('@/utils/logger', () => import('../helpers/logger'));
@@ -46,6 +46,12 @@ function fakeContext(resolveTarget = vi.fn(async () => ({ frameId: 0, selector: 
 }
 
 describe('browser_passkey (INFRA-585)', () => {
+  it('describes BUTTON text from textContent rather than an absent input value', () => {
+    const button = { tagName: 'BUTTON', textContent: 'Continue', getAttribute: () => null };
+    vi.stubGlobal('document', { querySelector: () => button, querySelectorAll: () => [button] });
+    expect(passkeyTargetProbe('describe', '#passkey')).toMatchObject({ tag: 'button', text: 'Continue' });
+    vi.unstubAllGlobals();
+  });
   it('a plain click never touches the WebAuthn guard', async () => {
     const { ctx, runPasskeyCeremony } = fakeContext();
     const result = await createInteractionHandlers(ctx).browser_click({ ref: 'e1' });
