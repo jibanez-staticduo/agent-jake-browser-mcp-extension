@@ -4,7 +4,7 @@ Fecha: 2026-10-05 · Repo: `pocharlies-org/agent-browser-extension` · Estado: d
 
 ## 1. Objetivo
 
-La extensión se pone al día ella sola en cada Chrome (x86, MacBook Air personal y Mac de
+La extensión se pone al día ella sola en cada Chrome (x86, MacBook Casa (`mac-casa`) y Mac de
 CloudBlue), sin scripts en las máquinas. Después se retiran el job `desplegar`, el script
 `agent-browser-sync.sh` con su vigilante `agent-browser-sync-watch` en el x86, y el job de launchd
 `com.pocharlies.agent-browser-update` del Mac de CloudBlue.
@@ -113,8 +113,8 @@ del repo:
 1. Bajar el zip de `/download` y descomprimirlo en `~/Downloads/agent-jake-browser/`.
 2. Quitar la extensión vieja y «Cargar descomprimida» la nueva (id nuevo por el `key`).
 3. Configurar en Opciones la URL y el token (o pairing). Lo hace Daniel: son credenciales.
-   Mac de CloudBlue: `ws://127.0.0.1:8765`; x86 y MacBook Air: `wss://browser-mcp.lan.e-dani.com/ws`.
-4. Copiloto: en x86 y MacBook Air, la clave en Opciones (antes la sembraba el build del host).
+   Mac de CloudBlue: `ws://127.0.0.1:8765`; x86 y MacBook Casa: `wss://browser-mcp.lan.e-dani.com/ws`.
+4. Copiloto: en x86 y MacBook Casa, la clave en Opciones (antes la sembraba el build del host).
 5. Pod: actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
 
 ## 5. Retirada por fases

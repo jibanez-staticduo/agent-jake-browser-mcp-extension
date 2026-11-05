@@ -79,6 +79,16 @@ describe('agent window provenance', () => {
     expect(chromeMock.windows.remove).not.toHaveBeenCalled();
   });
 
+  it('does not remove a tab whose target UUID changes during disconnect', async () => {
+    const windows = new AgentWindows();
+    const first = await windows.openTab('about:blank');
+    await windows.closeWindow(first.tab.windowId, [first.tab.id], async () => {
+      targets.set(first.tab.id, 'recycled-target-uuid');
+    });
+    expect(remove).not.toHaveBeenCalledWith(first.tab.id);
+    expect(tabs.has(first.tab.id)).toBe(true);
+  });
+
   it('reports partial closure when one selected tab already disappeared', async () => {
     const windows = new AgentWindows();
     const first = await windows.openTab('about:blank');

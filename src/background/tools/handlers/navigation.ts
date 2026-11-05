@@ -16,7 +16,7 @@ export function createNavigationHandlers(ctx: HandlerContext): HandlerMap {
       // (same path as browser_new_tab, WebAuthn guard first) that becomes the call's tab. A tab the
       // agent opened or chose itself keeps navigating in place.
       if (!tabId || ctx.tabManager.isAutoAttached()) {
-        const { tab, loaded } = await ctx.tabManager.createTab(url, true, false);
+        const { tab, loaded } = await ctx.tabManager.createTab(url, true);
         return { navigated: url, loaded, tabId: tab.id, openedNewTab: true };
       }
 

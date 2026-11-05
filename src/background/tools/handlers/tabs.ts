@@ -8,7 +8,7 @@ export function createTabHandlers(ctx: HandlerContext): HandlerMap {
   return {
     browser_new_tab: async (payload) => {
       const { url, windowId } = schemas.browser_new_tab.parse(payload);
-      return ctx.tabManager.createTab(url, true, false, windowId ?? 0); // { tab, loaded }
+      return ctx.tabManager.createTab(url, true, windowId); // { tab, loaded, windowId, windowCreated }
     },
 
     // closeById tells the server this build closes the tab it is asked for (see browser_close_tab):

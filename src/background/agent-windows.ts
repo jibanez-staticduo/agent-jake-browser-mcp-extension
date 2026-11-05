@@ -87,6 +87,9 @@ export class AgentWindows {
         // Disconnect can yield to a user moving this tab. Check its window again.
         try { tab = await chrome.tabs.get(id); } catch { continue; }
         if (tab.windowId !== windowId) continue;
+        // Also retain the original target UUID: numeric tab IDs can be recycled by Chrome.
+        const witness = records.find(entry => entry.windowId === windowId)?.witnesses.find(item => item.tabId === id);
+        if (!witness || !(await chrome.debugger.getTargets()).some(target => target.type === 'page' && target.tabId === id && target.id === witness.targetId)) continue;
         try {
           await chrome.tabs.remove(id);
           closedTabIds.push(id);

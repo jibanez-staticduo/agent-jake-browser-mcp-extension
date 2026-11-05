@@ -1,4 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { AgentWindows } from '@/background/agent-windows';
+
+// Provenance and registry races are exercised by agent-windows.test.ts. Keep these tests
+// focused on the real manager's bounded loading, WebAuthn and passkey behavior.
+beforeEach(() => {
+  vi.spyOn(AgentWindows.prototype, 'openTab').mockImplementation(async (url, windowId) => ({
+    tab: { ...await mockChrome.tabs.create({ url, active: false }), windowId: windowId ?? 30 },
+    windowCreated: windowId === undefined,
+  }));
+  vi.spyOn(AgentWindows.prototype, 'prune').mockResolvedValue(undefined);
+});
 
 const mockChrome = {
   storage: {
@@ -46,8 +57,12 @@ const mockChrome = {
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
   },
+  windows: {
+    update: vi.fn().mockResolvedValue(undefined),
+  },
   runtime: {
     id: 'own-extension-id',
+    sendNativeMessage: vi.fn(),
     getManifest: vi.fn(() => ({ content_scripts: [{ js: ['content.js'] }] })),
   },
   webNavigation: {
@@ -66,6 +81,17 @@ const mockChrome = {
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
 vi.mock('@/utils/logger', () => import('../helpers/logger'));
+
+// The capture of 1Password's prompt (INFRA-374): node has no captureVisibleTab nor canvas, so the
+// tests hand the ceremony the top band they want it to see.
+const promptCapture = vi.hoisted(() => ({ band: null as null | { rgba: Uint8ClampedArray; width: number; height: number; bandHeight: number } }));
+vi.mock('@/background/onepassword-prompt', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/background/onepassword-prompt')>(),
+  captureTopBand: vi.fn(async () => {
+    if (!promptCapture.band) throw new Error('no capture in this test');
+    return promptCapture.band;
+  }),
+}));
 
 vi.mock('@/background/activity-log', () => ({
   logTab: vi.fn().mockResolvedValue(undefined),
@@ -556,27 +582,16 @@ describe('TabManager background-tab control', () => {
     expect(mockChrome.webNavigation.onCommitted.removeListener).toHaveBeenCalledWith(listener);
   });
 
-  it('createTab activates the tab only when asked', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: true });
-
-    await manager.createTab('https://example.com', false, true);
-
-    expect(mockChrome.tabs.create).toHaveBeenCalledWith({
-      url: 'https://example.com',
-      active: true,
-    });
+  it('createTab passes a session window and preserves its additive loading contract', async () => {
+    mockChrome.tabs.create.mockResolvedValue({ id: 5, url: 'https://example.com', title: '', active: false });
+    const answer = await new TabManager().createTab('https://example.com', false, 30);
+    expect(AgentWindows.prototype.openTab).toHaveBeenCalledWith('https://example.com', 30);
+    expect(answer).toMatchObject({ tab: { id: 5, windowId: 30 }, windowId: 30, windowCreated: false });
   });
 
-  it('sendTabToBack activates a sibling tab of the same window', async () => {
-    const manager = new TabManager();
-    mockChrome.tabs.get.mockResolvedValue({ id: 5, windowId: 1, active: true });
-    mockChrome.tabs.query.mockResolvedValue([{ id: 5 }, { id: 6 }]);
-
-    const activated = await manager.sendTabToBack(5);
-
-    expect(activated).toBe(6);
-    expect(mockChrome.tabs.update).toHaveBeenCalledWith(6, { active: true });
+  it('sendTabToBack never activates a sibling', async () => {
+    expect(await new TabManager().sendTabToBack(5)).toBeNull();
+    expect(mockChrome.tabs.update).not.toHaveBeenCalled();
   });
 
   it('sendTabToBack is a no-op for an already hidden tab', async () => {
@@ -907,6 +922,382 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
 
     await expect(manager.runPasskeyCeremony(101, 'enroll', click)).rejects.toThrow('Passkeys need an https page');
     expect(click).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * INFRA-374: source "1password". The key is 1Password's and never reaches the extension, so the
+ * ceremony is only ever: get out of its way (pin off, WebAuthn off, reload), click, and watch the
+ * page move on. The guard always comes back, whatever the ceremony did.
+ */
+describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
+  const SIGNIN = 'https://accounts.google.com/signin';
+  const AFTER = 'https://admin.google.com/';
+  let onUpdated: ((id: number, info: { status?: string }) => void) | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChrome.tabs.query.mockResolvedValue([]);
+  });
+
+  /** A tab whose main frame is at `url()`, a debugger that answers everything, reloads that load. */
+  function fakeTab(url: () => string): Array<{ method: string; params?: Record<string, unknown> }> {
+    const commands: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    mockChrome.tabs.get.mockImplementation(async () => ({ id: 101, active: true, windowId: 1, status: 'complete', url: url() }));
+    mockChrome.tabs.onUpdated.addListener.mockImplementation((fn: (id: number, info: { status?: string }) => void) => {
+      onUpdated = fn;
+    });
+    mockChrome.tabs.reload.mockImplementation(async () => {
+      queueMicrotask(() => onUpdated?.(101, { status: 'complete' }));
+    });
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method, params) => {
+      commands.push({ method: String(method), params: params as Record<string, unknown> | undefined });
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 'pin-1' };
+      return {};
+    });
+    return commands;
+  }
+
+  const guardBackOn = (commands: Array<{ method: string; params?: Record<string, unknown> }>) =>
+    commands.filter((c) => c.method === 'WebAuthn.addVirtualAuthenticator'
+      && (c.params as { options?: { isUserVerified?: boolean } } | undefined)?.options?.isUserVerified === false);
+
+  /** The bound the ceremony gives a redirect chain to settle, written out so a changed constant is caught. */
+  const LAND_CAP_MS = 15_000;
+  const LAND_QUIET_MS = 2_000;
+
+  /** Runs a ceremony to its end with fake timers: the URL moves, then it rests and lands. */
+  async function settle(run: Promise<unknown>): Promise<void> {
+    run.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + LAND_CAP_MS + LAND_QUIET_MS + 1_000);
+  }
+
+  it('signs in through 1Password: guard off, reload, click, guard back on', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    const click = vi.fn(async () => { url = AFTER; return { clicked: 'e7' }; });
+
+    vi.useFakeTimers();
+    let result: unknown;
+    let passkey: Record<string, unknown> = {};
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, {
+        source: '1password', rpIds: ['google.com', 'shopify.com'],
+      });
+      await settle(running);
+      ({ result, passkey } = await running);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(result).toEqual({ clicked: 'e7' });
+    expect(passkey).toEqual({
+      mode: 'use', host: 'accounts.google.com', ceremony: 'completed', passkeys: [],
+      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/', osClick: false,
+    });
+    const methods = (commands as Array<{ method: string }>).map((c) => c.method);
+    expect(methods).toContain('Page.removeScriptToEvaluateOnNewDocument'); // the pin, so 1Password can hook the reload
+    expect(methods).toContain('WebAuthn.disable');
+    expect(methods).not.toContain('WebAuthn.addCredential'); // no key of the agent is offered
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(methods[methods.length - 1]).toBe('Page.addScriptToEvaluateOnNewDocument'); // pin back on the new document
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the redirect chain and reports where it landed, without query or fragment', async () => {
+    const hops = [SIGNIN, 'https://accounts.google.com/v3/signin/challenge', 'https://myaccount.google.com/security?token=UNICO#top'];
+    let hop = 0;
+    fakeTab(() => hops[Math.min(hop, hops.length - 1)]);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    // Two more hops after the click: the first URL change is not the end of the sign-in.
+    const click = vi.fn(async () => {
+      hop = 1;
+      setTimeout(() => { hop = 2; }, 500);
+      return { clicked: 'e7' };
+    });
+
+    vi.useFakeTimers();
+    let passkey: Record<string, unknown> = {};
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds: ['google.com'] });
+      await settle(running);
+      passkey = (await running).passkey;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(passkey.landedOn).toBe('https://myaccount.google.com/security');
+    // The guard goes back only once the chain settled: one reload before the click, one after landing.
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails when the page ends on an error page of the same host', async () => {
+    let url = SIGNIN;
+    fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    const click = vi.fn(async () => {
+      url = 'https://accounts.google.com/v3/signin/challenge/pk/error?reason=no-key';
+      return { clicked: 'e7' };
+    });
+
+    let error: unknown;
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds: ['google.com'] });
+      running.catch((e) => { error = e; });
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + LAND_CAP_MS + LAND_QUIET_MS + 1_000);
+      await settle(running);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((error as Error).message).toBe(
+      '1Password did not complete the sign-in: the page ended at https://accounts.google.com/v3/signin/challenge/pk/error',
+    );
+  });
+
+  it('refuses a host that is not one of the allowed rpIds (myshopify.com included)', async () => {
+    for (const [host, rpIds] of [
+      ['myshopify.com', ['shopify.com']],
+      ['evil-shopify.com', ['shopify.com']],
+      ['accounts.google.com', ['shopify.com']],
+    ] as Array<[string, string[]]>) {
+      const url = `https://${host}/login`;
+      const commands = fakeTab(() => url);
+      const manager = new TabManager();
+      await manager.connectTab(101, url);
+      commands.length = 0;
+      const click = vi.fn(async () => ({ clicked: 'e1' }));
+
+      await expect(manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds }))
+        .rejects.toThrow(`${host} is not one of them`);
+      expect(click).not.toHaveBeenCalled();
+      expect(commands.map((c) => c.method)).not.toContain('WebAuthn.disable'); // the guard stays on
+    }
+  });
+
+  it('refuses enroll: the agent never enrolls a key into Dani\'s vault', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    const click = vi.fn(async () => ({ clicked: 'e1' }));
+
+    await expect(manager.runPasskeyCeremony(101, 'enroll', click, { source: '1password', rpIds: ['google.com'] }))
+      .rejects.toThrow('only sign in');
+    expect(click).not.toHaveBeenCalled();
+    expect(commands).toEqual([]);
+  });
+
+  it('puts the guard back when the click fails', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+
+    await expect(manager.runPasskeyCeremony(101, 'use', async () => { throw new Error('element not found'); }, {
+      source: '1password', rpIds: ['google.com'],
+    })).rejects.toThrow('element not found');
+
+    expect(commands.map((c) => c.method)).toContain('Page.removeScriptToEvaluateOnNewDocument');
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails loud when the page never moves, and still puts the guard back', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow('1Password showed no prompt for accounts.google.com');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(mockChrome.runtime.sendNativeMessage).not.toHaveBeenCalled();
+  });
+
+  /** 1Password's prompt in the page, and a capture with its blue «Use passkey» right of the centre. */
+  function promptShown(): void {
+    const width = 400;
+    const bandHeight = 110;
+    const rgba = new Uint8ClampedArray(width * bandHeight * 4).fill(255);
+    for (let y = 38; y < 52; y++) for (let x = 240; x < 300; x += 2) rgba.set([5, 100, 230, 255], (y * width + x) * 4);
+    promptCapture.band = { rgba, width, height: 300, bandHeight };
+    mockChrome.scripting.executeScript.mockImplementation(async (injection: { args?: unknown[] }) =>
+      (injection.args?.[0] === 'com-1password-uso' ? [{ result: 1 }] : []));
+  }
+
+  it('clicks 1Password\'s prompt through the native host, on the ceremony window only', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => { url = AFTER; return { ok: true, screen: [314, 290] }; });
+
+    vi.useFakeTimers();
+    let passkey: Record<string, unknown> = {};
+    let titles: unknown[] = [];
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      await settle(running);
+      passkey = (await running).passkey;
+      titles = mockChrome.scripting.executeScript.mock.calls
+        .map(([injection]: [{ args?: unknown[] }]) => injection.args?.[0])
+        .filter((arg: unknown) => typeof arg === 'string' && arg.startsWith('agent-jake-passkey-'));
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+
+    expect(passkey).toMatchObject({ ceremony: 'completed', osClick: true, landedOn: 'https://admin.google.com/' });
+    expect(mockChrome.windows.update).toHaveBeenCalledWith(1, { focused: true });
+    const [host, message] = mockChrome.runtime.sendNativeMessage.mock.calls[0];
+    expect(host).toBe('com.pocharlies.agent_jake_click');
+    expect(message).toEqual({
+      action: 'click',
+      window: expect.stringMatching(/^agent-jake-passkey-/),
+      viewport: { width: 400, height: 300 },
+      point: { x: 269, y: 45 },
+    });
+    // The host clicks only on the window carrying this title: the tab got it first.
+    expect(titles).toEqual([message.window]);
+  });
+
+  it('keeps 1Password\'s prompt through a dropped debugger, and gets the debugger and the guard back at the end', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.webNavigation.getAllFrames.mockResolvedValue([{ frameId: 0, url: SIGNIN }]);
+    mockChrome.debugger.attach.mockClear();
+    // What Chrome and our onDetach do when the prompt comes in: the debugger goes, and getting it back purges.
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => {
+      manager.markDebuggerDetached(101);
+      await purgeForeignExtensionFrames(101);
+      url = AFTER;
+      return { ok: true };
+    });
+
+    vi.useFakeTimers();
+    let spared: unknown[] = [];
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      await settle(running);
+      await running;
+      spared = mockChrome.scripting.executeScript.mock.calls
+        .map(([injection]: [{ args?: unknown[] }]) => injection.args)
+        .filter((args: unknown[] | undefined) => args?.[0] === 'own-extension-id')
+        .map((args: unknown[]) => args[1]);
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+      mockChrome.webNavigation.getAllFrames.mockResolvedValue([]);
+    }
+    expect(spared).toEqual(['com-1password-uso', '']); // spared mid-ceremony, purged at the end
+    expect(mockChrome.debugger.attach).toHaveBeenCalledTimes(1);
+    expect(guardBackOn(commands)).toHaveLength(1);
+  });
+
+  it('fails loud, without a second click, when the page never moves after the click', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockResolvedValue({ ok: true });
+
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow('1Password did not sign after the click on its «Use passkey» prompt');
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
+    expect(guardBackOn(commands)).toHaveLength(1);
+  });
+
+  it('aborts during landing without native follow-up, reload, or previous-tab activation', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    promptShown();
+    mockChrome.tabs.get.mockImplementation(async () => ({ id: 101, active: false, windowId: 1, status: 'complete', url }));
+    mockChrome.tabs.query.mockResolvedValue([{ id: 55, active: true, windowId: 1 }]);
+    const controller = new AbortController();
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => {
+      url = AFTER;
+      controller.abort();
+      return { ok: true };
+    });
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'], signal: controller.signal,
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
+    expect(mockChrome.windows.update).toHaveBeenCalledWith(1, { focused: true });
+    expect(mockChrome.tabs.update).not.toHaveBeenCalledWith(55, { active: true });
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails loud, without a second click, when the native host refuses', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockResolvedValue({ ok: false, error: "the focused window is not the ceremony's: 'Paseo - Google Chrome'" });
+
+    try {
+      await expect(manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      })).rejects.toThrow("The native host did not click 1Password's prompt: the focused window is not the ceremony's");
+    } finally {
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
+    expect(guardBackOn(commands)).toHaveLength(1);
   });
 });
 
@@ -1321,6 +1712,40 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
       expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
     });
 
+    it('close_tab closes it even when the frozen renderer never answers (INFRA-930)', async () => {
+      // The renderer stuck in JS (measured 17-10, INFRA-930): neither the guard script nor
+      // chrome.debugger.detach ever resolves, and close_tab waiting for them left the server's
+      // tab-reaper unable to close the hung tab. Letting go of the tab is best-effort: after the
+      // cut the tab is removed anyway, and tabs.onRemoved cleans up what disconnect left behind.
+      const manager = await managerOnTheHangingTab();
+      mockChrome.debugger.detach.mockImplementation(() => new Promise(() => undefined));
+      mockChrome.scripting.executeScript.mockImplementation(() => new Promise(() => undefined));
+
+      const answer = track(manager.closeTab(HANG_TAB));
+      await vi.advanceTimersByTimeAsync(TIMEOUTS.DISCONNECT_CUT + 100);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: HANG_TAB });
+      expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
+    });
+
+    it('closeWindow removes a frozen owned tab after the disconnect cut', async () => {
+      const manager = await managerOnTheHangingTab();
+      mockChrome.debugger.detach.mockImplementation(() => new Promise(() => undefined));
+      mockChrome.scripting.executeScript.mockImplementation(() => new Promise(() => undefined));
+      const closeWindow = vi.spyOn(AgentWindows.prototype, 'closeWindow').mockImplementation(async (_windowId, tabIds, beforeClose) => {
+        await beforeClose(tabIds[0]);
+        await mockChrome.tabs.remove(tabIds[0]);
+        return { windowId: 30, closed: false, closedTabIds: tabIds };
+      });
+
+      const answer = track(manager.closeWindow(30, [HANG_TAB]));
+      await vi.advanceTimersByTimeAsync(TIMEOUTS.DISCONNECT_CUT + 100);
+
+      expect(answer).toMatchObject({ state: 'resolved', value: { closedTabIds: [HANG_TAB] } });
+      expect(mockChrome.tabs.remove).toHaveBeenCalledWith(HANG_TAB);
+      closeWindow.mockRestore();
+    });
+
     it('another tab is connected while the loading one stays driven', async () => {
       const manager = await managerOnTheHangingTab();
       tabs[OTHER_TAB] = 'complete';
@@ -1358,6 +1783,9 @@ describe('TabManager bounded load waits (INFRA-699)', () => {
     it('is shorter than the server\'s own cut, so the extension always answers first', () => {
       expect(Number.isFinite(TIMEOUTS.TAB_LOAD_WAIT)).toBe(true);
       expect(TIMEOUTS.TAB_LOAD_WAIT).toBeLessThan(TIMEOUTS.REQUEST_TIMEOUT);
+      // close_tab waits for the disconnect at most this long (INFRA-930), and answers well before the server cuts.
+      expect(Number.isFinite(TIMEOUTS.DISCONNECT_CUT)).toBe(true);
+      expect(TIMEOUTS.DISCONNECT_CUT).toBeLessThan(TIMEOUTS.TOOL_CALL);
     });
 
     it.each(['createTab', 'browser_navigate', 'browser_reload'] as const)('%s gives up at TAB_LOAD_WAIT: not before, not after', async (which) => {

@@ -14,6 +14,8 @@ import type { ParsedServerUrl } from '@/config/runtime';
 export const UPDATE_ALARM = 'ajb-update-check';
 export const UPDATE_PERIOD_MINUTES = 30;
 export const UPDATE_STATE_KEY = 'ajb.update';
+/** Result of the last AUTOMATIC self-update run ({status, reason?, at}); written by self-update.ts, shown by the side panel. */
+export const LAST_AUTO_KEY = 'ajb.selfUpdate.lastAuto';
 const NOTIFIED_KEY = 'ajb.updateNotifiedBuild';
 export const UPDATE_NOTIFICATION_ID = 'ajb-update';
 

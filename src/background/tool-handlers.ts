@@ -126,7 +126,13 @@ export function pinnedToTab(tabManager: TabManager, routed: number | null, fence
       if (typeof value !== 'function') return value;
       if (SYNC_PINNED.has(prop)) return (...args: unknown[]) => value.apply(target, [currentTab(), ...args]);
       if (OPTIONAL_PINNED.has(prop)) return (tab?: number, ...args: unknown[]) => value.apply(target, [tab ?? currentTab(), ...args]);
-      if (ASYNC_PINNED.has(prop)) return async (...args: unknown[]) => value.apply(target, [await tabId(), ...args]);
+      if (ASYNC_PINNED.has(prop)) return async (...args: unknown[]) => {
+        if (prop === 'runPasskeyCeremony') {
+          const options = (args[2] as Record<string, unknown> | undefined) ?? {};
+          args[2] = { ...options, signal: fence };
+        }
+        return value.apply(target, [await tabId(), ...args]);
+      };
       return value.bind(target);
     },
   }) as unknown as CallTab;
@@ -282,6 +288,8 @@ function getToolDescription(type: string, payload: unknown, result: unknown): st
       return `Switch to tab ${p?.tabId}`;
     case 'browser_close_tab':
       return 'Close tab';
+    case 'browser_close_window':
+      return `Close window ${p?.windowId}`;
     case 'browser_evaluate':
       return `Evaluate JS via CDP (${String(p?.code || '').length} chars)`;
     case 'browser_get_html':

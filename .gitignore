@@ -26,6 +26,10 @@ npm-debug.log*
 # Test coverage
 coverage/
 
+# Test run state (vitest/playwright): cambia en cada test y rompia el fast-forward
+# de agent-browser-sync ("tiene cambios sin commitear", INFRA-1111)
+test-results/
+
 # Chrome extension keys (keep private)
 *.pem
 
