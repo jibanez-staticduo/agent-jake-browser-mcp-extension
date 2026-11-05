@@ -90,8 +90,36 @@ const CEREMONY_AUTHENTICATOR = {
 /** Under the server's 30 s request timeout, with room for the click itself. */
 export const PASSKEY_CEREMONY_TIMEOUT_MS = 20_000;
 const PASSKEY_POLL_MS = 250;
+/** A sign-in is over when the URL has not moved for this long and the tab is complete (INFRA-374). */
+const PASSKEY_LAND_QUIET_MS = 2_000;
+/** Extra room after the deadline for a redirect chain to settle before we call it landed anyway. */
+const PASSKEY_LAND_CAP_MS = 15_000;
+
+/** The URL as it is reported: a query string can carry a single-use token, and it is nobody's business. */
+function withoutQueryAndFragment(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch (_) {
+    return '';
+  }
+}
 
 export type PasskeyMode = 'enroll' | 'use';
+
+/** Whose passkey signs: the agent's own vault (INFRA-585) or 1Password's (INFRA-374). */
+export type PasskeySource = 'agent' | '1password';
+
+export interface PasskeyCeremonyOptions {
+  source?: PasskeySource;
+  /** For source "1password": the rpIds the server allows. The tab host must be one, or a subdomain of one. */
+  rpIds?: string[];
+  /**
+   * For source "1password", between the reload and the click: the refs of the old document are
+   * gone with it, so the handler finds the button again here and points the click at it (INFRA-374).
+   */
+  afterReload?: () => Promise<void>;
+}
 
 export interface PasskeyOutcome {
   mode: PasskeyMode;
@@ -101,6 +129,11 @@ export interface PasskeyOutcome {
   passkeys: PasskeySummary[];
   /** Only when putting the guard back failed twice: the tab must not browse on. */
   guardRestored?: false;
+  /** Only for a 1Password ceremony (INFRA-374): the key never comes back, so there are no passkeys to list. */
+  source?: PasskeySource;
+  rpId?: string;
+  /** Only for a 1Password ceremony: where the tab ended up, without query or fragment. */
+  landedOn?: string;
 }
 
 interface CdpCredential {
@@ -135,7 +168,7 @@ export interface CallTab extends Omit<TabManager, PinnedMethodName | 'markDebugg
   endFileChooser(): void;
   startNewTabDetection(): void;
   stopNewTabDetection(): TabInfo | null;
-  runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }>;
+  runPasskeyCeremony<T>(mode: PasskeyMode, action: () => Promise<T>, options?: PasskeyCeremonyOptions): Promise<{ result: T; passkey: PasskeyOutcome }>;
   closeTab(tabId?: number): Promise<number>;
   sendTabToBack(tabId?: number): Promise<number | null>;
   reapplyLiveConnectionUi(): Promise<void>;
@@ -594,13 +627,24 @@ export class TabManager {
    *    site sign in with one.
    * It waits for the site to create or use a credential, up to PASSKEY_CEREMONY_TIMEOUT_MS.
    * Whatever happens, the ceremony authenticator goes and the guard comes back.
+   *
+   * With `source: "1password"` (INFRA-374) none of this vault is involved: 1Password's own
+   * extension signs the ceremony in the page — see `runOnePasswordCeremony`.
    */
-  async runPasskeyCeremony<T>(tabId: number, mode: PasskeyMode, action: () => Promise<T>): Promise<{ result: T; passkey: PasskeyOutcome }> {
+  async runPasskeyCeremony<T>(
+    tabId: number,
+    mode: PasskeyMode,
+    action: () => Promise<T>,
+    options?: PasskeyCeremonyOptions,
+  ): Promise<{ result: T; passkey: PasskeyOutcome }> {
     if (!this.sessions.has(tabId)) throw new Error('No tab connected');
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url ?? '';
     if (!/^https:/.test(url)) throw new Error(`Passkeys need an https page, not ${url || 'an empty tab'}`);
     const host = new URL(url).hostname;
+    if ((options?.source ?? 'agent') === '1password') {
+      return this.runOnePasswordCeremony(tabId, tab, mode, action, options ?? {}, host);
+    }
     const known = await passkeysForHost(host);
     if (mode === 'use' && !known.length) {
       throw new Error(`No agent passkey enrolled for ${host}: enroll one first (browser_passkey with mode: "enroll" on the site's "add a passkey" button, signed in)`);
@@ -669,6 +713,135 @@ export class TabManager {
         ...(guardRestored ? {} : { guardRestored: false as const }),
       },
     };
+  }
+
+  /**
+   * A 1Password ceremony (INFRA-374): the key lives in Dani's vault and only 1Password's own
+   * extension can sign with it, so nothing here holds a key — we get out of its way and watch the
+   * page. The guard comes off and the tab reloads, because the pin leaves `get`/`create`
+   * non-configurable in a document that is already loaded: 1Password can only hook a fresh one.
+   * Then the click starts the ceremony, and the site navigating away is the only sign of a
+   * signature we can see. Afterwards the guard always goes back on, with a reload so the pin is
+   * in the document the session is left in (the cookies keep the login).
+   */
+  private async runOnePasswordCeremony<T>(
+    tabId: number,
+    tab: chrome.tabs.Tab,
+    mode: PasskeyMode,
+    action: () => Promise<T>,
+    options: PasskeyCeremonyOptions,
+    host: string,
+  ): Promise<{ result: T; passkey: PasskeyOutcome }> {
+    const rpIds = options.rpIds ?? [];
+    if (mode !== 'use') {
+      throw new Error('1Password passkeys only sign in (mode "use"): the agent never enrolls a key in Dani\'s vault');
+    }
+    const rpId = rpIds.find((allowed) => rpIdMatchesHost(allowed, host));
+    if (!rpId) {
+      throw new Error(`1Password passkeys are allowed here only for ${rpIds.join(', ') || 'no site'}; ${host} is not one of them`);
+    }
+
+    // Same focus rule as the agent ceremony: Chrome checks it in the browser, not in the page.
+    const previous = tab.active ? undefined : (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id;
+    if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+
+    const url = tab.url ?? '';
+    let result: T;
+    let landedOn = '';
+    let guardRestored = true;
+    try {
+      await this.dropWebAuthnGuard(tabId);
+      await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId));
+      // The refs of the reloaded document are its own: the handler points the click at the button again.
+      await options.afterReload?.();
+      result = await action();
+      const landed = await this.waitForSignInToLand(tabId, url);
+      if (!landed) {
+        throw new Error(`1Password is locked or holds no passkey for ${host}: the page never moved`);
+      }
+      // Still on the sign-in host and on a page that says it went wrong: the ceremony failed.
+      const where = new URL(landed);
+      if (where.hostname === host && (/\/error\b/.test(where.pathname) || where.pathname.includes('/challenge/'))) {
+        throw new Error(`1Password did not complete the sign-in: the page ended at ${landed}`);
+      }
+      landedOn = landed;
+    } finally {
+      // The ceremony is decided by now, so 1Password's own frame is no longer the one signing:
+      // the debugger cannot work with it in the page (condition 6, INFRA-1171). Only after the
+      // redirects settled: reloading in the middle of them burns a single-use token.
+      await purgeForeignExtensionFrames(tabId).catch(() => 0);
+      await this.installWebAuthnGuard(tabId);
+      guardRestored = this.session(tabId).webauthnAuthenticatorId !== null;
+      await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)).catch(() => false);
+      if (previous !== undefined) {
+        await chrome.tabs.update(previous, { active: true })
+          .catch((error) => log.warn('[Passkey] previous tab not restored:', error));
+      }
+    }
+
+    return {
+      result,
+      passkey: {
+        mode, host, ceremony: 'completed', passkeys: [], source: '1password', rpId, landedOn,
+        ...(guardRestored ? {} : { guardRestored: false as const }),
+      },
+    };
+  }
+
+  /**
+   * Out of 1Password's way on this tab: the pin script goes, the guard authenticator goes, the
+   * WebAuthn domain is dropped. Each step is best effort — an already-dead session answers nothing.
+   */
+  private async dropWebAuthnGuard(tabId: number): Promise<void> {
+    const session = this.session(tabId);
+    if (session.webauthnPinIdentifier) {
+      await sendCommandLiftingForeignFrames(tabId, 'Page.removeScriptToEvaluateOnNewDocument', {
+        identifier: session.webauthnPinIdentifier,
+      }).catch(() => undefined);
+      session.webauthnPinIdentifier = null;
+    }
+    if (session.webauthnAuthenticatorId) {
+      await sendCommandLiftingForeignFrames(tabId, 'WebAuthn.removeVirtualAuthenticator', {
+        authenticatorId: session.webauthnAuthenticatorId,
+      }).catch(() => undefined);
+      session.webauthnAuthenticatorId = null;
+    }
+    await sendCommandLiftingForeignFrames(tabId, 'WebAuthn.disable').catch(() => undefined);
+  }
+
+  /**
+   * The end of a 1Password sign-in, in two phases. First the site has to move at all, until the
+   * deadline; a sign-in that never started is no sign-in. Then the redirect chain has to settle:
+   * the URL quiet for PASSKEY_LAND_QUIET_MS with the tab `complete`, up to the deadline plus
+   * PASSKEY_LAND_CAP_MS — the first change is not the end (Google goes through several hops, and a
+   * failed one lands on an error page). Returns the final URL without query or fragment, or null
+   * when the page never moved. A chain that never settles counts as landed: the caller still gets
+   * the error check on where it ended.
+   */
+  private async waitForSignInToLand(tabId: number, from: string): Promise<string | null> {
+    const deadline = Date.now() + PASSKEY_CEREMONY_TIMEOUT_MS;
+    for (;;) {
+      const url = (await chrome.tabs.get(tabId).catch(() => null))?.url ?? '';
+      if (url && url !== from) break;
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, PASSKEY_POLL_MS));
+    }
+
+    const cap = deadline + PASSKEY_LAND_CAP_MS;
+    let last = '';
+    let quietSince = Date.now();
+    for (;;) {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      const url = tab?.url ?? '';
+      if (url !== last) {
+        last = url;
+        quietSince = Date.now();
+      }
+      if (tab?.status === 'complete' && Date.now() - quietSince >= PASSKEY_LAND_QUIET_MS) break;
+      if (Date.now() >= cap) break;
+      await new Promise((resolve) => setTimeout(resolve, PASSKEY_POLL_MS));
+    }
+    return withoutQueryAndFragment(last) || last;
   }
 
   /** Guard back after a ceremony; if that fails, the full install (WebAuthn reset + guard + pin). */

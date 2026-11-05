@@ -910,6 +910,211 @@ describe('TabManager passkey ceremony (INFRA-585)', () => {
   });
 });
 
+/**
+ * INFRA-374: source "1password". The key is 1Password's and never reaches the extension, so the
+ * ceremony is only ever: get out of its way (pin off, WebAuthn off, reload), click, and watch the
+ * page move on. The guard always comes back, whatever the ceremony did.
+ */
+describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
+  const SIGNIN = 'https://accounts.google.com/signin';
+  const AFTER = 'https://admin.google.com/';
+  let onUpdated: ((id: number, info: { status?: string }) => void) | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockChrome.tabs.query.mockResolvedValue([]);
+  });
+
+  /** A tab whose main frame is at `url()`, a debugger that answers everything, reloads that load. */
+  function fakeTab(url: () => string): Array<{ method: string; params?: Record<string, unknown> }> {
+    const commands: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    mockChrome.tabs.get.mockImplementation(async () => ({ id: 101, active: true, windowId: 1, status: 'complete', url: url() }));
+    mockChrome.tabs.onUpdated.addListener.mockImplementation((fn: (id: number, info: { status?: string }) => void) => {
+      onUpdated = fn;
+    });
+    mockChrome.tabs.reload.mockImplementation(async () => {
+      queueMicrotask(() => onUpdated?.(101, { status: 'complete' }));
+    });
+    mockChrome.debugger.sendCommand.mockImplementation(async (_debuggee, method, params) => {
+      commands.push({ method: String(method), params: params as Record<string, unknown> | undefined });
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return { identifier: 'pin-1' };
+      return {};
+    });
+    return commands;
+  }
+
+  const guardBackOn = (commands: Array<{ method: string; params?: Record<string, unknown> }>) =>
+    commands.filter((c) => c.method === 'WebAuthn.addVirtualAuthenticator'
+      && (c.params as { options?: { isUserVerified?: boolean } } | undefined)?.options?.isUserVerified === false);
+
+  /** The bound the ceremony gives a redirect chain to settle, written out so a changed constant is caught. */
+  const LAND_CAP_MS = 15_000;
+  const LAND_QUIET_MS = 2_000;
+
+  /** Runs a ceremony to its end with fake timers: the URL moves, then it rests and lands. */
+  async function settle(run: Promise<unknown>): Promise<void> {
+    run.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + LAND_CAP_MS + LAND_QUIET_MS + 1_000);
+  }
+
+  it('signs in through 1Password: guard off, reload, click, guard back on', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    const click = vi.fn(async () => { url = AFTER; return { clicked: 'e7' }; });
+
+    vi.useFakeTimers();
+    let result: unknown;
+    let passkey: Record<string, unknown> = {};
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, {
+        source: '1password', rpIds: ['google.com', 'shopify.com'],
+      });
+      await settle(running);
+      ({ result, passkey } = await running);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(result).toEqual({ clicked: 'e7' });
+    expect(passkey).toEqual({
+      mode: 'use', host: 'accounts.google.com', ceremony: 'completed', passkeys: [],
+      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/',
+    });
+    const methods = (commands as Array<{ method: string }>).map((c) => c.method);
+    expect(methods).toContain('Page.removeScriptToEvaluateOnNewDocument'); // the pin, so 1Password can hook the reload
+    expect(methods).toContain('WebAuthn.disable');
+    expect(methods).not.toContain('WebAuthn.addCredential'); // no key of the agent is offered
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(methods[methods.length - 1]).toBe('Page.addScriptToEvaluateOnNewDocument'); // pin back on the new document
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the redirect chain and reports where it landed, without query or fragment', async () => {
+    const hops = [SIGNIN, 'https://accounts.google.com/v3/signin/challenge', 'https://myaccount.google.com/security?token=UNICO#top'];
+    let hop = 0;
+    fakeTab(() => hops[Math.min(hop, hops.length - 1)]);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    // Two more hops after the click: the first URL change is not the end of the sign-in.
+    const click = vi.fn(async () => {
+      hop = 1;
+      setTimeout(() => { hop = 2; }, 500);
+      return { clicked: 'e7' };
+    });
+
+    vi.useFakeTimers();
+    let passkey: Record<string, unknown> = {};
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds: ['google.com'] });
+      await settle(running);
+      passkey = (await running).passkey;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(passkey.landedOn).toBe('https://myaccount.google.com/security');
+    // The guard goes back only once the chain settled: one reload before the click, one after landing.
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails when the page ends on an error page of the same host', async () => {
+    let url = SIGNIN;
+    fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    const click = vi.fn(async () => {
+      url = 'https://accounts.google.com/v3/signin/challenge/pk/error?reason=no-key';
+      return { clicked: 'e7' };
+    });
+
+    let error: unknown;
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds: ['google.com'] });
+      running.catch((e) => { error = e; });
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + LAND_CAP_MS + LAND_QUIET_MS + 1_000);
+      await settle(running);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((error as Error).message).toBe(
+      '1Password did not complete the sign-in: the page ended at https://accounts.google.com/v3/signin/challenge/pk/error',
+    );
+  });
+
+  it('refuses a host that is not one of the allowed rpIds (myshopify.com included)', async () => {
+    for (const [host, rpIds] of [
+      ['myshopify.com', ['shopify.com']],
+      ['evil-shopify.com', ['shopify.com']],
+      ['accounts.google.com', ['shopify.com']],
+    ] as Array<[string, string[]]>) {
+      const url = `https://${host}/login`;
+      const commands = fakeTab(() => url);
+      const manager = new TabManager();
+      await manager.connectTab(101, url);
+      commands.length = 0;
+      const click = vi.fn(async () => ({ clicked: 'e1' }));
+
+      await expect(manager.runPasskeyCeremony(101, 'use', click, { source: '1password', rpIds }))
+        .rejects.toThrow(`${host} is not one of them`);
+      expect(click).not.toHaveBeenCalled();
+      expect(commands.map((c) => c.method)).not.toContain('WebAuthn.disable'); // the guard stays on
+    }
+  });
+
+  it('refuses enroll: the agent never enrolls a key into Dani\'s vault', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    const click = vi.fn(async () => ({ clicked: 'e1' }));
+
+    await expect(manager.runPasskeyCeremony(101, 'enroll', click, { source: '1password', rpIds: ['google.com'] }))
+      .rejects.toThrow('only sign in');
+    expect(click).not.toHaveBeenCalled();
+    expect(commands).toEqual([]);
+  });
+
+  it('puts the guard back when the click fails', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+
+    await expect(manager.runPasskeyCeremony(101, 'use', async () => { throw new Error('element not found'); }, {
+      source: '1password', rpIds: ['google.com'],
+    })).rejects.toThrow('element not found');
+
+    expect(commands.map((c) => c.method)).toContain('Page.removeScriptToEvaluateOnNewDocument');
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails loud when the page never moves, and still puts the guard back', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow('1Password is locked or holds no passkey for accounts.google.com');
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(guardBackOn(commands)).toHaveLength(1);
+  });
+});
+
 // INFRA-699: a page that never finishes loading must not hang new_tab, navigate or reload.
 describe('TabManager bounded load waits (INFRA-699)', () => {
   type Listener = (...args: unknown[]) => void;

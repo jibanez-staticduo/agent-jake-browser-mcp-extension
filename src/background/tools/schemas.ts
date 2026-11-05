@@ -26,9 +26,12 @@ export const schemas = {
   browser_click: z.object({ ...target }).refine(hasTarget, targetRequired),
 
   // INFRA-585: click the element that starts a passkey ceremony (enroll an agent passkey, or sign in with one).
+  // INFRA-374: source "1password" signs in with a passkey of Dani's vault; the server sends the rpIds it allows.
   browser_passkey: z.object({
     ...target,
     mode: z.enum(['enroll', 'use']),
+    source: z.enum(['agent', '1password']).default('agent'),
+    rpIds: z.array(z.string()).default([]),
   }).refine(hasTarget, targetRequired),
 
   browser_type: z.object({
