@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "116",
   "name": "Agent Jake Browser MCP",
-  "version": "2.6.0",
+  "version": "2.7.0",
   "description": "Control del navegador para agentes locales \u2014 DOM-first, WS local con token",
   "permissions": [
     "alarms",

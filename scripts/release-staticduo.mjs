@@ -65,7 +65,7 @@ async function main() {
   const build = Number(arg('--build') || git('rev-list', '--count', 'HEAD'));
   if (!Number.isInteger(build) || build < 1 || build > 65535) fail('Chrome build component must be 1..65535; bump base version before overflow');
   const sha = git('rev-parse', '--short=12', 'HEAD');
-  const version = `2.6.0.${build}`;
+  const version = `2.7.0.${build}`;
   const prev = arg('--previous');
   if (prev) {
     const previousBuild = JSON.parse(readFileSync(prev, 'utf8')).build;
