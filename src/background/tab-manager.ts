@@ -779,8 +779,10 @@ export class TabManager {
       await options.afterReload?.();
       options.signal?.throwIfAborted();
       result = await action();
-      osClick = await this.clickOnePasswordPrompt(tabId, tab.windowId, url, host);
-      const landed = await this.waitForSignInToLand(tabId, url);
+      options.signal?.throwIfAborted();
+      osClick = await this.clickOnePasswordPrompt(tabId, tab.windowId, url, host, options.signal);
+      options.signal?.throwIfAborted();
+      const landed = await this.waitForSignInToLand(tabId, url, options.signal);
       if (!landed) {
         // No second click: a stray click on :0 lands wherever the focus is (INFRA-1171, condition 2).
         throw new Error(`1Password did not sign after the click on its «Use passkey» prompt: the page never moved`);
@@ -796,7 +798,7 @@ export class TabManager {
       // the debugger cannot work with it in the page (condition 6, INFRA-1171). Only after the
       // redirects settled: reloading in the middle of them burns a single-use token.
       onePasswordCeremonyTabs.delete(tabId);
-      await purgeForeignExtensionFrames(tabId).catch(() => 0);
+      if (!options.signal?.aborted) await purgeForeignExtensionFrames(tabId).catch(() => 0);
       // Chrome may have dropped the debugger when the prompt came in: attaching again puts the guard back too.
       if (this.session(tabId).debuggerAttached) await this.installWebAuthnGuard(tabId);
       else await this.attachDebugger(tabId).catch((error) => log.warn('[Passkey] debugger not back after the 1Password ceremony:', error));
@@ -804,7 +806,7 @@ export class TabManager {
       if (!options.signal?.aborted) {
         await this.waitForNextTabLoad(tabId, () => chrome.tabs.reload(tabId)).catch(() => false);
       }
-      if (previous !== undefined) {
+      if (previous !== undefined && !options.signal?.aborted) {
         await chrome.tabs.update(previous, { active: true })
           .catch((error) => log.warn('[Passkey] previous tab not restored:', error));
       }
@@ -826,12 +828,13 @@ export class TabManager {
    * retitled to a nonce, and the x86's native host clicks there only if the focused window carries
    * that title. Returns false when the page moved on by itself: nothing to click.
    */
-  private async clickOnePasswordPrompt(tabId: number, windowId: number, from: string, host: string): Promise<boolean> {
+  private async clickOnePasswordPrompt(tabId: number, windowId: number, from: string, host: string, signal?: AbortSignal): Promise<boolean> {
     const deadline = Date.now() + PASSKEY_PROMPT_WAIT_MS;
     let shown = false;
     let point: PromptPoint | null = null;
     let viewport = { width: 0, height: 0 };
     for (;;) {
+      signal?.throwIfAborted();
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       if (tab?.url && tab.url !== from) return false;
       const [probe] = await chrome.scripting.executeScript({
@@ -844,6 +847,7 @@ export class TabManager {
       if (dpr > 0) {
         shown = true;
         const capture = await captureTopBand(windowId, dpr);
+        signal?.throwIfAborted();
         point = findUsePasskeyButton(capture.rgba, capture.width, capture.bandHeight, dpr);
         viewport = { width: capture.width, height: capture.height };
         if (point) break;
@@ -857,13 +861,16 @@ export class TabManager {
     }
 
     const nonce = `agent-jake-passkey-${crypto.randomUUID()}`;
+    signal?.throwIfAborted();
     await chrome.windows.update(windowId, { focused: true });
+    signal?.throwIfAborted();
     await chrome.scripting.executeScript({
       target: { tabId, frameIds: [0] },
       injectImmediately: true,
       args: [nonce],
       func: (title: string) => { document.title = title; },
     });
+    signal?.throwIfAborted();
     let answer: { ok?: boolean; error?: string } | undefined;
     try {
       answer = await chrome.runtime.sendNativeMessage(ONEPASSWORD_CLICK_HOST, { action: 'click', window: nonce, viewport, point });
@@ -905,9 +912,10 @@ export class TabManager {
    * when the page never moved. A chain that never settles counts as landed: the caller still gets
    * the error check on where it ended.
    */
-  private async waitForSignInToLand(tabId: number, from: string): Promise<string | null> {
+  private async waitForSignInToLand(tabId: number, from: string, signal?: AbortSignal): Promise<string | null> {
     const deadline = Date.now() + PASSKEY_CEREMONY_TIMEOUT_MS;
     for (;;) {
+      signal?.throwIfAborted();
       const url = (await chrome.tabs.get(tabId).catch(() => null))?.url ?? '';
       if (url && url !== from) break;
       if (Date.now() >= deadline) return null;
@@ -918,6 +926,7 @@ export class TabManager {
     let last = '';
     let quietSince = Date.now();
     for (;;) {
+      signal?.throwIfAborted();
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       const url = tab?.url ?? '';
       if (url !== last) {

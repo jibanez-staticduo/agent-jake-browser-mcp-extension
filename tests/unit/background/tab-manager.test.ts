@@ -1247,6 +1247,39 @@ describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
     expect(guardBackOn(commands)).toHaveLength(1);
   });
 
+  it('aborts during landing without native follow-up, reload, or previous-tab activation', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    promptShown();
+    mockChrome.tabs.get.mockImplementation(async () => ({ id: 101, active: false, windowId: 1, status: 'complete', url }));
+    mockChrome.tabs.query.mockResolvedValue([{ id: 55, active: true, windowId: 1 }]);
+    const controller = new AbortController();
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => {
+      url = AFTER;
+      controller.abort();
+      return { ok: true };
+    });
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'], signal: controller.signal,
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
+    expect(mockChrome.windows.update).toHaveBeenCalledWith(1, { focused: true });
+    expect(mockChrome.tabs.update).not.toHaveBeenCalledWith(55, { active: true });
+    expect(mockChrome.tabs.reload).toHaveBeenCalledTimes(1);
+  });
+
   it('fails loud, without a second click, when the native host refuses', async () => {
     const commands = fakeTab(() => SIGNIN);
     const manager = new TabManager();
