@@ -7,14 +7,16 @@
  * The copilot comes first: «Abrir Opciones» from the chat lands on the field that is missing,
  * visible and focused, and the MCP status below cannot cover the reason.
  */
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   copilotMissing,
   type CopilotField,
   type CopilotSettings,
 } from '@/types/copilot';
-import { UPDATE_STATE_KEY, type UpdateState } from '@/background/update-check';
+import { LAST_AUTO_KEY, UPDATE_STATE_KEY, type UpdateState } from '@/background/update-check';
+import type { LastAuto, SelfUpdateResult } from '@/background/self-update';
+import { NOT_RELOADED_TEXT, RELOAD_TIMEOUT_MS, RELOAD_WARNING, UPDATING_TEXT, isReloading, lastAutoLine, manualResultText } from './self-update-text';
 import { useActivityStore, useServerStore, useStatusStore } from '../popup/stores';
 import ActivityLog from '../popup/components/ActivityLog.vue';
 import ActivityModal from '../popup/components/ActivityModal.vue';
@@ -37,6 +39,42 @@ const activity = useActivityStore();
 const draft = ref<CopilotSettings>({ ...props.settings });
 const allowed = ref<string[]>([]);
 const update = ref<UpdateState | null>(null);
+const lastAuto = ref<LastAuto | null>(null);
+const updating = ref(false);
+const updateNote = ref('');
+// Only for the build the banner offers now: a skipped run of an older build is a stale excuse.
+const lastAutoSkip = computed(() => lastAutoLine(lastAuto.value, update.value?.latest?.build));
+let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+
+// A note belongs to the build that was offered when it was written: when a DIFFERENT build appears, the old one («No se puede
+// actualizar sola…») must not come back unasked, so it is cleared. The banner going away is NOT a reason to clear: that is what
+// the click's own fresh check does when nothing newer exists, and its answer («Ya tienes la última versión») must stay visible
+// whatever the order of the storage event and the message response. A click in flight keeps its note too.
+watch(() => update.value?.latest?.build, (now, before) => {
+  if (now !== undefined && now !== before && !updating.value) updateNote.value = '';
+});
+
+/** «Actualizar ahora»: the background re-checks and self-updates with the idle rule skipped; the extension reloads on `applied`. */
+async function updateNow() {
+  clearTimeout(reloadTimer);
+  updating.value = true;
+  updateNote.value = UPDATING_TEXT;
+  try {
+    const r = await chrome.runtime.sendMessage({ action: 'selfUpdateNow' }) as SelfUpdateResult | { success: false; error: string } | undefined;
+    if (!r || 'error' in r || !('status' in r)) updateNote.value = `La actualización falló: ${r && 'error' in r ? r.error : 'sin respuesta'}`;
+    else {
+      updateNote.value = manualResultText(r);
+      if (isReloading(r)) {
+        // `applied`: stays disabled, the reload is 300 ms away. If this panel is still here after RELOAD_TIMEOUT_MS it never happened.
+        reloadTimer = setTimeout(() => { updating.value = false; updateNote.value = NOT_RELOADED_TEXT; }, RELOAD_TIMEOUT_MS);
+        return;
+      }
+    }
+  } catch (e) {
+    updateNote.value = `La actualización falló: ${(e as Error).message}`;
+  }
+  updating.value = false;
+}
 
 // The same rule as the chat (copilotMissing), applied to what is typed.
 const missing = computed(() => copilotMissing(draft.value));
@@ -63,6 +101,7 @@ function goTo(field: CopilotField) {
 // New published build (background/update-check.ts writes it; cleared once up to date).
 const onStorage = (changes: Record<string, chrome.storage.StorageChange>) => {
   if (UPDATE_STATE_KEY in changes) update.value = (changes[UPDATE_STATE_KEY].newValue as UpdateState | undefined) ?? null;
+  if (LAST_AUTO_KEY in changes) lastAuto.value = (changes[LAST_AUTO_KEY].newValue as LastAuto | undefined) ?? null;
   if (COPILOT_ALLOWED_ORIGINS_KEY in changes) allowed.value = (changes[COPILOT_ALLOWED_ORIGINS_KEY].newValue as string[] | undefined) ?? [];
 };
 
@@ -72,8 +111,9 @@ async function forgetOrigin(origin: string) {
 }
 
 onMounted(async () => {
-  const stored = await chrome.storage.local.get([UPDATE_STATE_KEY, COPILOT_ALLOWED_ORIGINS_KEY]);
+  const stored = await chrome.storage.local.get([UPDATE_STATE_KEY, LAST_AUTO_KEY, COPILOT_ALLOWED_ORIGINS_KEY]);
   update.value = (stored[UPDATE_STATE_KEY] as UpdateState | undefined) ?? null;
+  lastAuto.value = (stored[LAST_AUTO_KEY] as LastAuto | undefined) ?? null;
   const origins = stored[COPILOT_ALLOWED_ORIGINS_KEY];
   allowed.value = Array.isArray(origins) ? origins as string[] : [];
   chrome.storage.onChanged.addListener(onStorage);
@@ -89,6 +129,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  clearTimeout(reloadTimer);
   chrome.storage.onChanged.removeListener(onStorage);
   status.stopPolling();
   server.stopPolling();
@@ -105,7 +146,13 @@ onUnmounted(() => {
     <div v-if="update?.available" class="update-banner">
       Versión nueva <strong>{{ update.latest?.version }}</strong> publicada · tienes la {{ update.current.version }}
       <a v-if="update.downloadUrl" :href="update.downloadUrl" target="_blank">Descargar</a>
+      <button type="button" class="primary now" :disabled="updating" :title="RELOAD_WARNING" @click="updateNow">Actualizar ahora</button>
+      <div class="note">{{ RELOAD_WARNING }}</div>
+      <div v-if="updateNote" class="note" role="status">{{ updateNote }}</div>
+      <div v-if="lastAutoSkip" class="note">{{ lastAutoSkip }}</div>
     </div>
+    <!-- The click's own fresh check removes the banner when nothing newer exists: the answer stays here. -->
+    <div v-else-if="updateNote" class="update-banner idle" role="status">{{ updateNote }}</div>
 
     <section class="summary" :class="{ bad: missing.length }" role="status">
       <template v-if="missing.length">
@@ -183,6 +230,9 @@ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var
 .goto { display: flex; flex-wrap: wrap; gap: 4px; }
 .update-banner { margin-bottom: 12px; padding: 10px 12px; border-radius: var(--radius-lg); border: 1px solid var(--accent-primary); font-size: 12px; }
 .update-banner a { margin-left: 6px; color: var(--accent-primary); }
+.update-banner .now { margin-left: 6px; }
+.update-banner .note { margin-top: 4px; color: var(--text-secondary); }
+.update-banner.idle { border-color: var(--text-secondary); color: var(--text-secondary); }
 .copilot { display: flex; flex-direction: column; gap: 8px; }
 .copilot label { display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); flex: 1; }
 .copilot label.check { flex-direction: row; align-items: center; gap: 6px; }

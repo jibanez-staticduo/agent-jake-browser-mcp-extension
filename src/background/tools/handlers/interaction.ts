@@ -8,8 +8,53 @@
  * wrong point of the page it falls back to a programmatic click inside the frame.
  */
 import { withSecretLogging } from '@/utils/logger';
+import type { PasskeyCeremonyOptions } from '@/background/tab-manager';
 import { schemas } from '../schemas';
 import type { HandlerContext, HandlerMap, Coordinates } from './types';
+
+/** How long the reloaded document gets to bring the passkey button back (INFRA-374). */
+const PASSKEY_TARGET_RELOCATE_MS = 5_000;
+
+/** What a ref pointed at, in a form that survives a reload. */
+interface PasskeyTarget {
+  tag: string;
+  role: string;
+  text: string;
+  index: number;
+}
+
+/**
+ * INFRA-374, run in the page: `describe` reads the element a selector points at, `mark` finds the
+ * one that matches a descriptor and tags it with a fresh data-hx the click can name. A ref belongs
+ * to its document and the 1Password ceremony reloads the page, so the button has to be recognised
+ * by what it is (tag, role, visible text, and which one of those it was) rather than by its ref.
+ * Self-contained on purpose: it is serialized for chrome.scripting.
+ */
+function passkeyTargetProbe(
+  mode: 'describe' | 'mark',
+  arg: string | PasskeyTarget,
+  mark?: string,
+): PasskeyTarget | boolean {
+  const selector = 'a,button,input[type="button"],input[type="submit"],input[type="image"],[role="button"]';
+  const textOf = (el: Element) => ((el as HTMLInputElement).value ?? el.textContent ?? '')
+    .trim().replace(/\s+/g, ' ').slice(0, 60);
+  const roleOf = (el: Element) => el.getAttribute('role') || el.tagName.toLowerCase();
+  const matches = (t: PasskeyTarget) => Array.from(document.querySelectorAll(selector))
+    .filter((el) => el.tagName.toLowerCase() === t.tag && roleOf(el) === t.role && textOf(el) === t.text);
+  if (mode === 'describe') {
+    const el = document.querySelector(arg as string);
+    if (!el) return false;
+    const target: PasskeyTarget = {
+      tag: el.tagName.toLowerCase(), role: roleOf(el), text: textOf(el), index: 0,
+    };
+    target.index = Math.max(0, matches(target).indexOf(el));
+    return target;
+  }
+  const found = matches(arg as PasskeyTarget)[(arg as PasskeyTarget).index];
+  if (!found) return false;
+  found.setAttribute('data-hx', String(mark));
+  return true;
+}
 
 export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
   const { sendToContent, sendToAllFrames, resolveTarget, waitForStableOrNavigation } = ctx;
@@ -69,6 +114,43 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     }
   }
 
+  /** INFRA-374: what the ref points at right now, before the ceremony reloads the page away. */
+  async function describePasskeyTarget(tabId: number, ref: string): Promise<PasskeyTarget> {
+    const { frameId, selector } = await resolveTarget({ ref });
+    if (frameId !== 0) {
+      throw new Error('A 1Password passkey is clicked on the page itself: a ref of an iframe (fN:) is not supported');
+    }
+    const [probe] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      injectImmediately: true,
+      args: ['describe', selector],
+      func: passkeyTargetProbe,
+    });
+    if (!probe || probe.result === false) {
+      throw new Error(`The button for ref ${ref} is not on the page: take a fresh browser_state and pass its ref`);
+    }
+    return probe.result as PasskeyTarget;
+  }
+
+  /** INFRA-374: find that same button in the reloaded document and return a selector that names it. */
+  async function relocatePasskeyTarget(tabId: number, target: PasskeyTarget): Promise<string> {
+    const mark = String(900000 + (Date.now() % 100000)); // clear of the refs a snapshot would give
+    const deadline = Date.now() + PASSKEY_TARGET_RELOCATE_MS;
+    for (;;) {
+      const [probe] = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        injectImmediately: true,
+        args: ['mark', target, mark],
+        func: passkeyTargetProbe,
+      });
+      if (probe?.result === true) return `[data-hx="${mark}"]`;
+      if (Date.now() >= deadline) {
+        throw new Error(`The "${target.text || target.tag}" button did not come back after the reload: the page is not the sign-in page anymore`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
   return {
     browser_snapshot: async () => {
       const frames = await sendToAllFrames<string>('generateSnapshot');
@@ -84,9 +166,22 @@ export function createInteractionHandlers(ctx: HandlerContext): HandlerMap {
     browser_click: async (payload) => clickElement(schemas.browser_click.parse(payload)),
 
     // INFRA-585: the click starts a passkey ceremony; the WebAuthn guard is lifted for it only.
+    // INFRA-374: with source "1password" the key is 1Password's and never reaches us, and the page
+    // reloads before the click, so a ref has to be recognised again by what the button is.
     browser_passkey: async (payload) => {
-      const { mode, ...element } = schemas.browser_passkey.parse(payload);
-      const { result, passkey } = await ctx.tabManager.runPasskeyCeremony(mode, () => clickElement(element));
+      const { mode, source, rpIds, ...element } = schemas.browser_passkey.parse(payload);
+      const options: PasskeyCeremonyOptions = { source, rpIds };
+      if (source === '1password' && element.ref) {
+        const tabId = await ctx.tabManager.tabId();
+        const target = await describePasskeyTarget(tabId, element.ref);
+        // clickElement reads the element when it runs, after the reload: pointing it at the fresh
+        // data-hx is what makes the click land on the button of the new document.
+        options.afterReload = async () => {
+          element.ref = undefined;
+          element.selector = await relocatePasskeyTarget(tabId, target);
+        };
+      }
+      const { result, passkey } = await ctx.tabManager.runPasskeyCeremony(mode, () => clickElement(element), options);
       return { ...result, passkey };
     },
 

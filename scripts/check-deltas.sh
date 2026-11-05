@@ -45,6 +45,9 @@ chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -
 chk "16c el panel puede dictar (permiso microphone)"    grep -q '"microphone"' manifest.json
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
+# INFRA-1040: un merge del upstream cambió el pin a la clave de StaticDuo y el publicar dejó de
+# verificar (la privada de la casa está en el secreto CI AJB_UPDATE_SIGNING_KEY). El valor es delta.
+chk "17b el pin de firma es la clave de la casa" grep -qF "8c8tp8Jvr8S8GnkZHdL79/6y9f/99sisBAooeem1wRQ=" src/config/update-key.ts
 # INFRA-699: new_tab, navigate y reload no se cuelgan esperando una página que no termina de cargar.
 chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" src/constants/timeouts.ts && grep -q "waitForNextTabLoad" src/background/tab-manager.ts'
 # INFRA-907: el debugger es por pestana (un TabSession por pestana manejada). No debe volver
@@ -52,5 +55,19 @@ chk "18 esperas de carga acotadas (INFRA-699)" bash -c 'grep -q "TAB_LOAD_WAIT" 
 # de otra, y por eso la cola global era la que evitaba pisarse.
 chk "19 el debugger es por pestana" bash -c 'grep -q "new Map<number, TabSession>()" src/background/tab-manager.ts'
 not "19b no hay pestana conectada unica"            grep -rq "getConnectedTabId" src/
-
+# INFRA-413: native passkey ceremony retains its explicit activation; ordinary tab routes do not.
+chk "20 session windows open without focus" grep -q "focused: false" src/background/agent-windows.ts
+chk "21 session window ownership uses live target UUIDs" bash -c 'grep -q "target.id === witness.targetId" src/background/agent-windows.ts && grep -q "windowPerSession: true" src/background/tools/handlers/tabs.ts'
+# INFRA-450 (INFRA-413 C7): las rutas de herramienta no activan pestanas ni enfocan ventanas. Las unicas
+# escrituras active:true que quedan en src/background son las de la ceremonia de passkey (excepcion
+# deliberada, ARCHITECTURE.md) en tab-manager.ts; las demas son lecturas tabs.query o comentarios.
+not "22 ninguna ruta de herramienta activa pestanas ni enfoca ventanas" bash -c "grep -rnE 'active: ?true|focused: ?true' src/background/tool-handlers.ts src/background/tools/ | grep -v 'tabs.query' | grep -vE ':[0-9]+: *//'"
+# INFRA-374: la única ventana que se enfoca es la de la ceremonia de 1Password, porque el host nativo
+# del x86 solo pulsa su aviso en la ventana enfocada (INFRA-1171, condición 2). Una sola llamada.
+not "22b windows.update solo en la ceremonia de 1Password" bash -c "grep -rn 'windows.update' src/background/ | grep -v '^src/background/tab-manager.ts:'"
+chk "22c una sola llamada a windows.update (clickOnePasswordPrompt)" bash -c '[ "$(grep -c "windows.update" src/background/tab-manager.ts)" -eq 1 ]'
+# INFRA-1111: el estado de la ultima pasada de tests (test-results/.last-run.json) no se trackea:
+# cambia en cada test y deja el checkout del sync sucio ("tiene cambios sin commitear"), con lo que
+# x86 deja de actualizarse. Un merge de upstream que lo devuelva al indice es un FALLO.
+not "23 test-results no esta trackeado" git ls-files --error-unmatch test-results/.last-run.json
 exit $fail
