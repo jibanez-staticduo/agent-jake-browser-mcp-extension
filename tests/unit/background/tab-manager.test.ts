@@ -57,8 +57,12 @@ const mockChrome = {
   scripting: {
     executeScript: vi.fn().mockResolvedValue([]),
   },
+  windows: {
+    update: vi.fn().mockResolvedValue(undefined),
+  },
   runtime: {
     id: 'own-extension-id',
+    sendNativeMessage: vi.fn(),
     getManifest: vi.fn(() => ({ content_scripts: [{ js: ['content.js'] }] })),
   },
   webNavigation: {
@@ -77,6 +81,17 @@ const mockChrome = {
 (globalThis as { chrome?: unknown }).chrome = mockChrome as unknown;
 
 vi.mock('@/utils/logger', () => import('../helpers/logger'));
+
+// The capture of 1Password's prompt (INFRA-374): node has no captureVisibleTab nor canvas, so the
+// tests hand the ceremony the top band they want it to see.
+const promptCapture = vi.hoisted(() => ({ band: null as null | { rgba: Uint8ClampedArray; width: number; height: number; bandHeight: number } }));
+vi.mock('@/background/onepassword-prompt', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/background/onepassword-prompt')>(),
+  captureTopBand: vi.fn(async () => {
+    if (!promptCapture.band) throw new Error('no capture in this test');
+    return promptCapture.band;
+  }),
+}));
 
 vi.mock('@/background/activity-log', () => ({
   logTab: vi.fn().mockResolvedValue(undefined),
@@ -981,7 +996,7 @@ describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
     expect(result).toEqual({ clicked: 'e7' });
     expect(passkey).toEqual({
       mode: 'use', host: 'accounts.google.com', ceremony: 'completed', passkeys: [],
-      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/',
+      source: '1password', rpId: 'google.com', landedOn: 'https://admin.google.com/', osClick: false,
     });
     const methods = (commands as Array<{ method: string }>).map((c) => c.method);
     expect(methods).toContain('Page.removeScriptToEvaluateOnNewDocument'); // the pin, so 1Password can hook the reload
@@ -1107,10 +1122,108 @@ describe('TabManager 1Password passkey ceremony (INFRA-374)', () => {
       });
       running.catch(() => undefined);
       await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
-      await expect(running).rejects.toThrow('1Password is locked or holds no passkey for accounts.google.com');
+      await expect(running).rejects.toThrow('1Password showed no prompt for accounts.google.com');
     } finally {
       vi.useRealTimers();
     }
+    expect(guardBackOn(commands)).toHaveLength(1);
+    expect(mockChrome.runtime.sendNativeMessage).not.toHaveBeenCalled();
+  });
+
+  /** 1Password's prompt in the page, and a capture with its blue «Use passkey» right of the centre. */
+  function promptShown(): void {
+    const width = 400;
+    const bandHeight = 110;
+    const rgba = new Uint8ClampedArray(width * bandHeight * 4).fill(255);
+    for (let y = 38; y < 52; y++) for (let x = 240; x < 300; x += 2) rgba.set([5, 100, 230, 255], (y * width + x) * 4);
+    promptCapture.band = { rgba, width, height: 300, bandHeight };
+    mockChrome.scripting.executeScript.mockImplementation(async (injection: { args?: unknown[] }) =>
+      (injection.args?.[0] === 'com-1password-uso' ? [{ result: 1 }] : []));
+  }
+
+  it('clicks 1Password\'s prompt through the native host, on the ceremony window only', async () => {
+    let url = SIGNIN;
+    const commands = fakeTab(() => url);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockImplementation(async () => { url = AFTER; return { ok: true, screen: [314, 290] }; });
+
+    vi.useFakeTimers();
+    let passkey: Record<string, unknown> = {};
+    let titles: unknown[] = [];
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      await settle(running);
+      passkey = (await running).passkey;
+      titles = mockChrome.scripting.executeScript.mock.calls
+        .map(([injection]: [{ args?: unknown[] }]) => injection.args?.[0])
+        .filter((arg: unknown) => typeof arg === 'string' && arg.startsWith('agent-jake-passkey-'));
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+
+    expect(passkey).toMatchObject({ ceremony: 'completed', osClick: true, landedOn: 'https://admin.google.com/' });
+    expect(mockChrome.windows.update).toHaveBeenCalledWith(1, { focused: true });
+    const [host, message] = mockChrome.runtime.sendNativeMessage.mock.calls[0];
+    expect(host).toBe('com.pocharlies.agent_jake_click');
+    expect(message).toEqual({
+      action: 'click',
+      window: expect.stringMatching(/^agent-jake-passkey-/),
+      viewport: { width: 400, height: 300 },
+      point: { x: 269, y: 45 },
+    });
+    // The host clicks only on the window carrying this title: the tab got it first.
+    expect(titles).toEqual([message.window]);
+  });
+
+  it('fails loud, without a second click, when the page never moves after the click', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockResolvedValue({ ok: true });
+
+    vi.useFakeTimers();
+    try {
+      const running = manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      });
+      running.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(PASSKEY_CEREMONY_TIMEOUT_MS + 1_000);
+      await expect(running).rejects.toThrow('1Password did not sign after the click on its «Use passkey» prompt');
+    } finally {
+      vi.useRealTimers();
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
+    expect(guardBackOn(commands)).toHaveLength(1);
+  });
+
+  it('fails loud, without a second click, when the native host refuses', async () => {
+    const commands = fakeTab(() => SIGNIN);
+    const manager = new TabManager();
+    await manager.connectTab(101, SIGNIN);
+    commands.length = 0;
+    promptShown();
+    mockChrome.runtime.sendNativeMessage.mockResolvedValue({ ok: false, error: "the focused window is not the ceremony's: 'Paseo - Google Chrome'" });
+
+    try {
+      await expect(manager.runPasskeyCeremony(101, 'use', async () => ({ clicked: 'e7' }), {
+        source: '1password', rpIds: ['google.com'],
+      })).rejects.toThrow("The native host did not click 1Password's prompt: the focused window is not the ceremony's");
+    } finally {
+      promptCapture.band = null;
+      mockChrome.scripting.executeScript.mockReset().mockResolvedValue([]);
+    }
+    expect(mockChrome.runtime.sendNativeMessage).toHaveBeenCalledTimes(1);
     expect(guardBackOn(commands)).toHaveLength(1);
   });
 });

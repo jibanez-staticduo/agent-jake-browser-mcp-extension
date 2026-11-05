@@ -16,7 +16,8 @@
     "notifications",
     "downloads",
     "downloads.ui",
-    "microphone"
+    "microphone",
+    "nativeMessaging"
   ],
   "host_permissions": [
     "<all_urls>"

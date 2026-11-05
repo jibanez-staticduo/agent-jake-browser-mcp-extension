@@ -11,6 +11,7 @@ import type { TabInfo } from '@/types/messages';
 import { DEBUGGER, TIMEOUTS } from '@/constants';
 import { PageEventLog } from './page-events';
 import { passkeysForHost, rpIdMatchesHost, savePasskeys, summarize, type PasskeySummary, type StoredPasskey } from './passkey-vault';
+import { captureTopBand, findUsePasskeyButton, ONEPASSWORD_CLICK_HOST, ONEPASSWORD_PROMPT_ELEMENT, type PromptPoint } from './onepassword-prompt';
 
 /**
  * Runs in every document of a controlled tab (see installWebAuthnGuard). Pins
@@ -94,6 +95,10 @@ const PASSKEY_POLL_MS = 250;
 const PASSKEY_LAND_QUIET_MS = 2_000;
 /** Extra room after the deadline for a redirect chain to settle before we call it landed anyway. */
 const PASSKEY_LAND_CAP_MS = 15_000;
+/** How long 1Password gets to show its «Use passkey» prompt after the site's button (INFRA-374). */
+const PASSKEY_PROMPT_WAIT_MS = 10_000;
+/** captureVisibleTab allows two calls a second. */
+const PASSKEY_PROMPT_POLL_MS = 500;
 
 /** The URL as it is reported: a query string can carry a single-use token, and it is nobody's business. */
 function withoutQueryAndFragment(url: string): string {
@@ -134,6 +139,8 @@ export interface PasskeyOutcome {
   rpId?: string;
   /** Only for a 1Password ceremony: where the tab ended up, without query or fragment. */
   landedOn?: string;
+  /** Only for a 1Password ceremony: the x86's native host clicked 1Password's prompt (INFRA-1171, condition 2). */
+  osClick?: boolean;
 }
 
 interface CdpCredential {
@@ -720,8 +727,9 @@ export class TabManager {
    * extension can sign with it, so nothing here holds a key — we get out of its way and watch the
    * page. The guard comes off and the tab reloads, because the pin leaves `get`/`create`
    * non-configurable in a document that is already loaded: 1Password can only hook a fresh one.
-   * Then the click starts the ceremony, and the site navigating away is the only sign of a
-   * signature we can see. Afterwards the guard always goes back on, with a reload so the pin is
+   * Then the click starts the ceremony, 1Password shows its prompt and the x86's native host clicks
+   * it (`clickOnePasswordPrompt`), and the site navigating away is the only sign of a signature we
+   * can see. Afterwards the guard always goes back on, with a reload so the pin is
    * in the document the session is left in (the cookies keep the login).
    */
   private async runOnePasswordCeremony<T>(
@@ -748,6 +756,7 @@ export class TabManager {
     const url = tab.url ?? '';
     let result: T;
     let landedOn = '';
+    let osClick = false;
     let guardRestored = true;
     try {
       await this.dropWebAuthnGuard(tabId);
@@ -755,9 +764,11 @@ export class TabManager {
       // The refs of the reloaded document are its own: the handler points the click at the button again.
       await options.afterReload?.();
       result = await action();
+      osClick = await this.clickOnePasswordPrompt(tabId, tab.windowId, url, host);
       const landed = await this.waitForSignInToLand(tabId, url);
       if (!landed) {
-        throw new Error(`1Password is locked or holds no passkey for ${host}: the page never moved`);
+        // No second click: a stray click on :0 lands wherever the focus is (INFRA-1171, condition 2).
+        throw new Error(`1Password did not sign after the click on its «Use passkey» prompt: the page never moved`);
       }
       // Still on the sign-in host and on a page that says it went wrong: the ceremony failed.
       const where = new URL(landed);
@@ -782,10 +793,66 @@ export class TabManager {
     return {
       result,
       passkey: {
-        mode, host, ceremony: 'completed', passkeys: [], source: '1password', rpId, landedOn,
+        mode, host, ceremony: 'completed', passkeys: [], source: '1password', rpId, landedOn, osClick,
         ...(guardRestored ? {} : { guardRestored: false as const }),
       },
     };
+  }
+
+  /**
+   * 1Password answers the site's request with its «Use passkey» prompt and signs only after a real
+   * click on it, which the debugger cannot give (see onepassword-prompt.ts). Once the prompt is in
+   * the page, its button is found in a capture of this ceremony, the window is focused and the tab
+   * retitled to a nonce, and the x86's native host clicks there only if the focused window carries
+   * that title. Returns false when the page moved on by itself: nothing to click.
+   */
+  private async clickOnePasswordPrompt(tabId: number, windowId: number, from: string, host: string): Promise<boolean> {
+    const deadline = Date.now() + PASSKEY_PROMPT_WAIT_MS;
+    let shown = false;
+    let point: PromptPoint | null = null;
+    let viewport = { width: 0, height: 0 };
+    for (;;) {
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (tab?.url && tab.url !== from) return false;
+      const [probe] = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        injectImmediately: true,
+        args: [ONEPASSWORD_PROMPT_ELEMENT],
+        func: (element: string) => (document.querySelector(element) ? window.devicePixelRatio : 0),
+      }).catch(() => []);
+      const dpr = typeof probe?.result === 'number' ? probe.result : 0;
+      if (dpr > 0) {
+        shown = true;
+        const capture = await captureTopBand(windowId, dpr);
+        point = findUsePasskeyButton(capture.rgba, capture.width, capture.bandHeight, dpr);
+        viewport = { width: capture.width, height: capture.height };
+        if (point) break;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(shown
+          ? '1Password\'s prompt is in the page but its «Use passkey» button was not found in the capture'
+          : `1Password showed no prompt for ${host}: it is locked or holds no passkey here`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, PASSKEY_PROMPT_POLL_MS));
+    }
+
+    const nonce = `agent-jake-passkey-${crypto.randomUUID()}`;
+    await chrome.windows.update(windowId, { focused: true });
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      injectImmediately: true,
+      args: [nonce],
+      func: (title: string) => { document.title = title; },
+    });
+    let answer: { ok?: boolean; error?: string } | undefined;
+    try {
+      answer = await chrome.runtime.sendNativeMessage(ONEPASSWORD_CLICK_HOST, { action: 'click', window: nonce, viewport, point });
+    } catch (error) {
+      throw new Error(`The native host ${ONEPASSWORD_CLICK_HOST} did not answer (agent-browser-sync installs it on the x86): ${(error as Error).message}`);
+    }
+    if (!answer?.ok) throw new Error(`The native host did not click 1Password's prompt: ${answer?.error ?? 'no answer'}`);
+    log.info(`[Passkey] OS click on 1Password's prompt for ${host}`);
+    return true;
   }
 
   /**
