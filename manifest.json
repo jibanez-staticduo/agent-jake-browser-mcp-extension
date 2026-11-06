@@ -16,7 +16,6 @@
     "notifications",
     "downloads",
     "downloads.ui",
-    "microphone",
     "nativeMessaging"
   ],
   "host_permissions": [

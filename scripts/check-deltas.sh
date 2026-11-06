@@ -41,8 +41,8 @@ chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "U
 # todas las de la ventana y te persigue al cambiar.
 chk "16 el botón abre el side panel de su pestaña, sin popup" bash -c 'grep -q "open({ tabId" src/background/panel-open.ts && grep -q "disablePanelByDefault(chrome.sidePanel)" src/background/index.ts && ! grep -q default_popup manifest.json'
 chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
-# El dictado del panel es getUserMedia desde una página de extensión: sin el permiso declarado, NotAllowedError.
-chk "16c el panel puede dictar (permiso microphone)"    grep -q '"microphone"' manifest.json
+# Dictation uses the web getUserMedia permission prompt, not a manifest permission.
+chk "16c dictation requests audio without an invalid manifest permission" bash -c '! grep -q "\"microphone\"" manifest.json && grep -q "getUserMedia({ audio: true })" src/sidepanel/App.vue'
 # Autoactualización: motor, permisos de descargas y clave pública fijada.
 chk "17 autoactualización firmada" bash -c 'test -f src/background/self-update.ts && grep -q "\"downloads.ui\"" manifest.json && grep -q PINNED_UPDATE_PUBLIC_KEY src/config/update-key.ts'
 # INFRA-1040: un merge del upstream cambió el pin a la clave de StaticDuo y el publicar dejó de
