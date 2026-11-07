@@ -6,6 +6,20 @@
 import MIME from '@/config/update-mime.json';
 
 export const INSTALL_DIR = 'agent-jake-browser';
+export const INSTALL_INSTANCES = ['nas', 'fedora', 'ari'] as const;
+export type InstallInstance = typeof INSTALL_INSTANCES[number];
+
+/** Maps the packaged install identity to a Chrome Downloads-relative path. */
+export function installDirFor(instance: InstallInstance | undefined): string {
+  return instance ? `${INSTALL_DIR}/${instance}` : INSTALL_DIR;
+}
+
+export function parseInstallInstance(value: unknown): InstallInstance | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === 'string' && (INSTALL_INSTANCES as readonly string[]).includes(value)
+    ? value as InstallInstance
+    : null;
+}
 export const FILES_NAME = 'update-files.json';
 export const SIG_NAME = 'update-files.json.sig';
 
