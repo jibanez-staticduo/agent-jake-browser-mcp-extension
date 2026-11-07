@@ -213,6 +213,34 @@ describe('config.json fallbacks (all silent, never reject)', () => {
   });
 });
 
+describe('packaged install identity', () => {
+  it.each(['nas', 'fedora', 'ari'] as const)('accepts %s as an immutable install identity', async (installInstance) => {
+    fetchMock.mockImplementation(() => bundleResponse({ version: 1, wsUrl: 'wss://one.example/ws', installInstance }));
+    const runtime = await loadRuntime();
+    await expect(runtime.fetchBundleInstallConfig()).resolves.toMatchObject({ installInstance });
+  });
+
+  it('rejects an explicit invalid install identity instead of falling back', async () => {
+    fetchMock.mockImplementation(() => bundleResponse({ version: 1, wsUrl: 'wss://one.example/ws', installInstance: 'root' }));
+    const runtime = await loadRuntime();
+    await expect(runtime.fetchBundleInstallConfig()).resolves.toBe('invalid');
+  });
+
+  it('keeps legacy root behavior when installInstance is missing', async () => {
+    fetchMock.mockImplementation(() => bundleResponse({ version: 1, wsUrl: 'wss://one.example/ws' }));
+    const runtime = await loadRuntime();
+    await expect(runtime.fetchBundleInstallConfig()).resolves.toMatchObject({ server: { hostname: 'one.example' } });
+  });
+
+  it('does not let a manual URL change the packaged install identity', async () => {
+    fetchMock.mockImplementation(() => bundleResponse({ version: 1, wsUrl: 'wss://one.example/ws', installInstance: 'ari' }));
+    const runtime = await loadRuntime();
+    await runtime.setServerUrl('ws://manual.example:8765/other');
+    await expect(runtime.fetchBundleInstallConfig()).resolves.toMatchObject({ installInstance: 'ari' });
+    await expect(runtime.getEffectiveConfig()).resolves.toMatchObject({ hostname: 'manual.example', source: 'manual' });
+  });
+});
+
 describe('config.json load caching', () => {
   it('fetches config.json once per service-worker lifetime', async () => {
     const { getEffectiveConfig } = await loadRuntime();

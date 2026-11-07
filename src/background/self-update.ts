@@ -9,9 +9,10 @@ import { UPDATE_PUBLIC_KEY } from '@/config/update-key';
 import { activityLog } from './activity-log';
 import { log } from '@/utils/logger';
 import { LAST_AUTO_KEY, type PublishedBuild, type UpdateState } from './update-check';
-import { FILES_NAME, INSTALL_DIR, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
+import { FILES_NAME, INSTALL_DIR, installDirFor, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
+import { loadBundleInstallConfig } from '@/config/runtime';
 
-export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed' | 'probe-failed' | 'not-applied' | 'unsupported-browser';
+export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed' | 'probe-failed' | 'not-applied' | 'unsupported-browser' | 'invalid-install-config';
 export type SelfUpdateStatus = 'applied' | 'up-to-date' | 'locked' | 'busy' | 'not-eligible' | 'rejected' | 'failed';
 export interface SelfUpdateResult { status: SelfUpdateStatus; reason?: string }
 /** `manual`: a person clicked «Actualizar ahora». It skips ONLY the busy (idle) rule; every other safeguard stays. */
@@ -43,12 +44,15 @@ export interface SelfUpdateDeps {
   lastToolActivityAt(): Promise<number | null>;
   storage: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void>; remove(key: string): Promise<void> };
   reload(): void;
-  notify(problem: SelfUpdateProblem, build: number): Promise<void>;
+  notify(problem: SelfUpdateProblem, build: number, installDir?: string): Promise<void>;
   now(): number;
   randomId(): string;
   /** Keeps the service worker alive while an update runs; returns the stop function. */
   keepAlive(): () => void;
   supportsEd25519(): Promise<boolean>;
+  /** Validated target directory; omitted by legacy mocks for root compatibility. */
+  installDir?: string;
+  resolveInstallDir?: () => Promise<string>;
 }
 
 export const LOCK_KEY = 'ajb.selfUpdate.lock';
@@ -74,7 +78,7 @@ interface Pending { build: number; previous: FileMap; written: FileMap }
 async function warnOnce(deps: SelfUpdateDeps, problem: SelfUpdateProblem, build: number) {
   const mark = `${problem}:${build}`;
   if ((await deps.storage.get(NOTIFIED_KEY)) === mark) return;
-  await deps.notify(problem, build);
+  await deps.notify(problem, build, deps.installDir);
   await deps.storage.set(NOTIFIED_KEY, mark);
 }
 
@@ -138,6 +142,11 @@ export async function applyUpdate(latest: PublishedBuild, zipUrl: string, deps: 
       if (!await deps.supportsEd25519()) {
         await warnOnce(deps, 'unsupported-browser', latest.build);
         return { status: 'not-eligible', reason: 'unsupported-browser' };
+      }
+
+      if (deps.resolveInstallDir) {
+        try { deps.installDir = await deps.resolveInstallDir(); }
+        catch { await warnOnce(deps, 'invalid-install-config', latest.build); return { status: 'not-eligible', reason: 'invalid-install-config' }; }
       }
 
       const eligible = await probe(deps);
@@ -235,6 +244,7 @@ const NOTICE_TEXT: Record<SelfUpdateProblem, string> = {
   'probe-failed': 'Agent Jake no pudo comprobar su carpeta de instalación; se reintenta en 30 min',
   'not-applied': 'Agent Jake no arrancó la versión nueva tras actualizarse; revisa el modo desarrollador en chrome://extensions',
   'unsupported-browser': 'Este Chrome no soporta Ed25519: actualiza Chrome para que Agent Jake se actualice sola',
+  'invalid-install-config': 'La configuracion de instalacion no es valida; no se escribio ningun archivo',
 };
 
 const quietly = async (f: () => unknown) => { try { await f(); } catch { /* best effort */ } };
@@ -248,7 +258,7 @@ const discard = async (id: number) => {
  * download was interrupted, finished under another name, or stalled past STALL_MS. USER_CANCELED is what the
  * "ask where to save each file" prompt produces when headless, so it counts as a stall.
  */
-export function waitForDownload(id: number, path: string): Promise<number> {
+export function waitForDownload(id: number, path: string, installDir = INSTALL_DIR): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     let settled = false;
     const settle = (fn: () => void) => {
@@ -272,7 +282,8 @@ export function waitForDownload(id: number, path: string): Promise<number> {
       const [item] = await chrome.downloads.search({ id });
       if (!item || settled) return;
       if (item.state === 'complete') {
-        if (item.filename.replace(/\\/g, '/').endsWith(`/${INSTALL_DIR}/${path}`)) settle(() => resolve(id));
+        const target = `${installDir}/${path}`;
+        if (item.filename.replace(/\\/g, '/').endsWith(`/${target}`)) settle(() => resolve(id));
         else await fail(new DownloadError('renamed: ' + item.filename.split(/[\\/]/).pop(), id));
       } else if (item.state === 'interrupted') {
         const msg = `download interrupted: ${path} (${item.error ?? 'unknown'})`;
@@ -289,6 +300,14 @@ export function waitForDownload(id: number, path: string): Promise<number> {
 }
 
 export function chromeSelfUpdateDeps(): SelfUpdateDeps {
+  let targetDir: string | undefined;
+  let targetDirPromise: Promise<string> | undefined;
+  const resolveTargetDir = () => targetDirPromise ??= loadBundleInstallConfig().then((config) => {
+    if (!config) return INSTALL_DIR;
+    if (config === 'invalid') throw new Error('invalid-install-config');
+    targetDir = installDirFor(config.installInstance);
+    return targetDir;
+  });
   return {
     currentBuild: CONFIG.BUILD_NUMBER,
     publicKey: UPDATE_PUBLIC_KEY,
@@ -299,8 +318,9 @@ export function chromeSelfUpdateDeps(): SelfUpdateDeps {
       return new Uint8Array(await res.arrayBuffer());
     },
     async writeFile(path, url) {
-      const id = await chrome.downloads.download({ url, filename: `${INSTALL_DIR}/${path}`, conflictAction: 'overwrite', saveAs: false });
-      return waitForDownload(id, path);
+      const dir = targetDir ?? await resolveTargetDir();
+      const id = await chrome.downloads.download({ url, filename: `${dir}/${path}`, conflictAction: 'overwrite', saveAs: false });
+      return waitForDownload(id, path, dir);
     },
     removeFile: (id) => chrome.downloads.removeFile(id),
     erase: async (id) => { await chrome.downloads.erase({ id }); },
@@ -324,12 +344,14 @@ export function chromeSelfUpdateDeps(): SelfUpdateDeps {
       remove: (key) => chrome.storage.local.remove(key),
     },
     reload: () => { setTimeout(() => chrome.runtime.reload(), 300); },
-    async notify(problem, build) {
+    async notify(problem, build, installDir) {
       await chrome.notifications.create('ajb-self-update-' + problem, {
         type: 'basic',
         iconUrl: chrome.runtime.getURL('icons/icon128.png'),
         title: 'Agent Jake',
-        message: NOTICE_TEXT[problem],
+        message: problem === 'not-in-downloads'
+          ? `${NOTICE_TEXT[problem]} (${installDir ?? INSTALL_DIR})`
+          : NOTICE_TEXT[problem],
         contextMessage: `Build ${build}`,
       });
     },
@@ -338,6 +360,10 @@ export function chromeSelfUpdateDeps(): SelfUpdateDeps {
       return () => clearInterval(t);
     },
     supportsEd25519,
+    resolveInstallDir: async () => {
+      targetDir = await resolveTargetDir();
+      return targetDir;
+    },
     now: Date.now,
     randomId: () => crypto.randomUUID().slice(0, 8),
   };

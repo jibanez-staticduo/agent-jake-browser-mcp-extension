@@ -13,6 +13,7 @@ const NOT_ELIGIBLE: Record<string, string> = {
   'download-prompt': 'desactiva "Preguntar dónde guardar cada archivo" en los ajustes de Chrome',
   'probe-failed': 'no pudo comprobar su carpeta de instalación',
   'unsupported-browser': 'este Chrome no soporta Ed25519; actualízalo',
+  'invalid-install-config': 'la configuración de instalación no es válida; no se escribió ningún archivo',
 };
 
 const FAILED: Record<string, string> = {

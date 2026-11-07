@@ -28,7 +28,9 @@ const check = (ok, msg) => { say(`${ok ? 'PASS' : 'FAIL'} ${msg}`); if (!ok) fai
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ajb-e2e-')));
 const dl = join(root, 'dl');
 const prof = join(root, 'profile');
-const installDir = join(dl, 'agent-jake-browser');
+const installInstance = process.env.AJB_INSTALL_INSTANCE;
+if (installInstance && !['nas', 'fedora', 'ari'].includes(installInstance)) throw new Error('Invalid test install instance');
+const installDir = join(dl, 'agent-jake-browser', ...(installInstance ? [installInstance] : []));
 let chrome = null;
 let server = null;
 let pipeId = 0, pipeBuffer = '', pipePending = new Map();
@@ -172,8 +174,10 @@ async function main() {
     savefile: { default_directory: dl },
   }));
   // A is the "initial install": the unpacked folder inside Downloads.
+  mkdirSync(join(dl, 'agent-jake-browser'), { recursive: true });
+  if (!installInstance) rmSync(installDir, { recursive: true });
   execFileSync('cp', ['-R', dist.A, installDir]);
-  const configBytes = JSON.stringify({ wsUrl: `ws://127.0.0.1:${httpPort}/ws`, browserName: 'preserve-instance-config' }) + '\n';
+  const configBytes = JSON.stringify({ version: 1, wsUrl: `ws://127.0.0.1:${httpPort}/ws`, browserName: 'preserve-instance-config', ...(installInstance ? { installInstance } : {}) }) + '\n';
   writeFileSync(join(installDir, 'config.json'), configBytes);
   const diskA = snapshot(installDir);
 

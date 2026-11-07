@@ -20,6 +20,7 @@
  */
 
 import { CONFIG } from '@/types/config';
+import { parseInstallInstance, type InstallInstance } from '@/background/update-package';
 
 export const STORAGE_KEYS = {
   serverUrl: 'ajb.serverUrl',
@@ -52,6 +53,7 @@ export interface RuntimeServerConfig extends ParsedServerUrl {
 }
 
 export type ServerConfigSource = 'manual' | 'config.json' | 'build';
+export interface BundleInstallConfig { server: ParsedServerUrl; installInstance?: InstallInstance }
 
 function storageGet(keys: string[]): Promise<Record<string, unknown>> {
   return chrome.storage.local.get(keys) as Promise<Record<string, unknown>>;
@@ -117,22 +119,37 @@ export const BUNDLE_CONFIG_FILE = 'config.json';
 let bundleConfigCache: Promise<ParsedServerUrl | null> | null = null;
 
 async function fetchBundleConfig(): Promise<ParsedServerUrl | null> {
+  const config = await fetchBundleInstallConfig();
+  return config && config !== 'invalid' ? config.server : null;
+}
+
+export async function fetchBundleInstallConfig(): Promise<BundleInstallConfig | 'invalid' | null> {
   try {
     const response = await fetch(chrome.runtime.getURL(BUNDLE_CONFIG_FILE));
     // Missing extension resources may surface as an error status or as an
     // opaque synthesized page; json() then throws and we catch below.
     if (response.status && response.status >= 400) return null;
-    const raw = await response.json() as { version?: unknown; wsUrl?: unknown };
-    if (!raw || typeof raw !== 'object') return null;
-    if (raw.version !== 1) return null;
-    if (typeof raw.wsUrl !== 'string') return null;
+    let raw: { version?: unknown; wsUrl?: unknown; installInstance?: unknown };
+    try { raw = await response.json() as typeof raw; } catch { return 'invalid'; }
+    if (!raw || typeof raw !== 'object') return 'invalid';
+    if (raw.version !== 1) return 'invalid';
+    if (typeof raw.wsUrl !== 'string') return 'invalid';
+    const installInstance = parseInstallInstance(raw.installInstance);
+    if (installInstance === null) return 'invalid';
     const trimmed = raw.wsUrl.trim();
     // The embedded config must be an explicit ws/wss URL — no bare hosts.
-    if (!/^wss?:\/\//i.test(trimmed)) return null;
-    return parseWsUrl(trimmed);
+    if (!/^wss?:\/\//i.test(trimmed)) return 'invalid';
+    const server = parseWsUrl(trimmed);
+    return server ? { server, ...(installInstance ? { installInstance } : {}) } : 'invalid';
   } catch {
     return null;
   }
+}
+
+let bundleInstallConfigCache: Promise<BundleInstallConfig | 'invalid' | null> | null = null;
+export function loadBundleInstallConfig(): Promise<BundleInstallConfig | 'invalid' | null> {
+  if (!bundleInstallConfigCache) bundleInstallConfigCache = fetchBundleInstallConfig();
+  return bundleInstallConfigCache;
 }
 
 /**

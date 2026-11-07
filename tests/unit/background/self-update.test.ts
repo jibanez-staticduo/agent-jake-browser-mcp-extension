@@ -49,6 +49,13 @@ type D = ReturnType<typeof deps>;
 const pkgWrites = (d: D) => d.writes.filter((p) => !p.startsWith('agent-jake-probe-'));
 
 describe('applyUpdate', () => {
+  it('rejects an invalid packaged installation before any file write', async () => {
+    const d = deps({ resolveInstallDir: async () => { throw new Error('invalid identity'); } });
+    expect(await run(d)).toEqual({ status: 'not-eligible', reason: 'invalid-install-config' });
+    expect(d.writes).toEqual([]);
+    expect(d.notes).toContain('invalid-install-config');
+  });
+
   it.each(['version', 'sha', 'manifest', 'config'])('rejects a signed package with invalid %s identity before writing extension files', async (kind) => {
     const files = { ...FILES, ...(kind === 'manifest' ? { 'manifest.json': '{"version":"9.9.9"}' } : {}), ...(kind === 'config' ? { 'config.json': '{"wsUrl":"wss://other.test"}' } : {}) };
     const meta = { version: LATEST.version, build: LATEST.build, sha: LATEST.sha, ...(kind === 'version' ? { version: '9.9.9' } : {}), ...(kind === 'sha' ? { sha: 'wrong' } : {}) };
