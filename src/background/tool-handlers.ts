@@ -124,6 +124,7 @@ export function pinnedToTab(tabManager: TabManager, routed: number | null, fence
       if (prop === 'currentTabId') return () => resolved;
       const value = Reflect.get(target, prop);
       if (typeof value !== 'function') return value;
+      if (prop === 'closeWindow') return (windowId: number, tabIds: number[]) => value.call(target, windowId, tabIds, fence);
       if (SYNC_PINNED.has(prop)) return (...args: unknown[]) => value.apply(target, [currentTab(), ...args]);
       if (OPTIONAL_PINNED.has(prop)) return (tab?: number, ...args: unknown[]) => value.apply(target, [tab ?? currentTab(), ...args]);
       if (ASYNC_PINNED.has(prop)) return async (...args: unknown[]) => {
