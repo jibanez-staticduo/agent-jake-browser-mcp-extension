@@ -27,6 +27,19 @@ describe('waitForDownload (chrome layer)', () => {
     await expect(waitForDownload(7, 'assets/a.js')).resolves.toBe(7);
   });
 
+  it.each(['nas', 'fedora', 'ari'] as const)('accepts the isolated %s destination', async (instance) => {
+    fakeChrome({ state: 'complete', filename: `/Users/x/Downloads/agent-jake-browser/${instance}/assets/a.js` });
+    await expect(waitForDownload(7, 'assets/a.js', `agent-jake-browser/${instance}`)).resolves.toBe(7);
+  });
+
+  it('rejects a sibling destination and cleans only that download entry', async () => {
+    const c = fakeChrome({ state: 'complete', filename: '/Users/x/Downloads/agent-jake-browser/fedora/assets/a.js' });
+    const err = await waitForDownload(7, 'assets/a.js', 'agent-jake-browser/nas').catch((e) => e);
+    expect(err).toBeInstanceOf(DownloadError);
+    expect(c.downloads.removeFile).toHaveBeenCalledWith(7);
+    expect(c.downloads.erase).toHaveBeenCalledWith({ id: 7 });
+  });
+
   it('sees a download that completed before the listener attached (initial search)', async () => {
     const c = fakeChrome({ state: 'complete', filename: OK });
     const p = waitForDownload(7, 'assets/a.js');

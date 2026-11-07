@@ -196,6 +196,10 @@ La build que publica el CI (`scripts/publicar.sh`, tras cada merge a `main`) est
 instalada en `~/Downloads/agent-jake-browser/` se reescribe sola desde ella y se recarga; no hace falta volver a
 cargarla ni desplegar nada por navegador. Detalle del mecanismo en `ARCHITECTURE.md` («Autoactualización»).
 
+Para instalaciones aisladas, el servidor entrega `config.json` con `{ "version": 1, "wsUrl": "...", "installInstance": "nas" | "fedora" | "ari" }`.
+La actualización escribe solo en `Downloads/agent-jake-browser/<installInstance>/`; la identidad empaquetada no se deriva de la URL manual.
+Si falta `installInstance`, se conserva la instalación heredada en `Downloads/agent-jake-browser/`. Un valor explícito inválido detiene la actualización sin escribir.
+
 Condiciones (si no se cumplen, avisa una vez y no toca nada):
 
 - La carpeta es exactamente `Descargas/agent-jake-browser` (la ruta de descargas por defecto de Chrome).
@@ -209,6 +213,9 @@ Migración (una vez por navegador):
 3. Token en Opciones (o pairing): lo pone el usuario, la build no lo lleva. El zip de `/download` ya trae un `config.json` con la URL del pod (lo inyecta el servidor), así que x86 y MacBook Casa (`wss://browser-mcp.lan.e-dani.com/ws`) solo necesitan el token. Un navegador que habla con un servidor LOCAL (Mac de CloudBlue, `ws://127.0.0.1:8765`) debe borrar `config.json` de la carpeta tras descomprimir (los valores por defecto de la build son 127.0.0.1:8765) o fijar la URL en Opciones.
 4. Copiloto: endpoint y key en Opciones (la build neutra ya no los siembra).
 5. En el pod, actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
+
+Para pasar una instalación existente a `nas`, `fedora` o `ari`, carga la nueva carpeta como una extensión distinta después de descomprimir el ZIP servido para esa instancia.
+Chrome asigna un id de extensión y almacenamiento local distintos a la carpeta nueva: hay que volver a emparejarla o importar explícitamente los datos mediante un procedimiento seguro aprobado; la actualización no mueve esos datos automáticamente.
 
 Prueba manual con Chrome desechable: `node scripts/e2e-self-update.mjs` (y `--tamper`, `--prompt`).
 
