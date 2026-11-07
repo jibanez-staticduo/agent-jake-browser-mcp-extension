@@ -92,7 +92,7 @@ describe('Copilot bridge lease', () => {
     setup();
     vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpUrl: 'https://gateway.test/mcp' } });
     expect((await loadCopilotSettings()).mcpToken).toBe('');
-    vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpToken: 'saved-secret' } });
+    vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpUrl: 'https://gateway.test/mcp', mcpTokenUrl: 'https://gateway.test/mcp', mcpToken: 'saved-secret' } });
     expect((await loadCopilotSettings()).mcpToken).toBe('saved-secret');
     expect(chrome.storage.local.get).toHaveBeenCalledWith(COPILOT_SETTINGS_KEY);
   });
@@ -127,11 +127,12 @@ describe('Copilot bridge lease', () => {
   });
 
   // INFRA-909: lo que anuncia el servidor son herramientas del copiloto; lo que no es suyo no toca la pestaña.
-  it('sends a plugin call to the server and never to the tab', async () => {
+  it.each(['same', 'changed', 'new'])('sends plugin calls with endpoint-bound credentials (%s)', async (scenario) => {
+    const endpoint = scenario === 'new' ? 'https://new.test/mcp' : 'https://jake.test/mcp';
     const { panel, handler } = setup();
     vi.mocked(chrome.storage.local.get).mockResolvedValue({
       [COPILOT_SETTINGS_KEY]: {
-        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: 'https://jake.test/mcp', mcpToken: 'plugin-secret',
+        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: endpoint, mcpToken: 'plugin-secret', mcpTokenUrl: scenario === 'changed' ? 'https://old.test/mcp' : endpoint,
       },
     });
     const seen: string[] = [];
@@ -159,8 +160,10 @@ describe('Copilot bridge lease', () => {
 
     expect(seen).toContain('tools/call');
     for (const [input, init] of vi.mocked(fetch).mock.calls) {
-      expect(input).toBe('https://jake.test/mcp');
-      expect(init).toMatchObject({ redirect: 'error', headers: { Authorization: 'Bearer plugin-secret' } });
+      expect(input).toBe(endpoint);
+      expect(init).toMatchObject({ redirect: 'error' });
+      const headers = new Headers(init?.headers);
+      expect(headers.get('Authorization')).toBe(scenario === 'changed' ? null : 'Bearer plugin-secret');
     }
     expect(outcome).toEqual({ ok: true, result: 'trabajo aceptado' });
     expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'delegar' }), expect.anything());

@@ -32,6 +32,8 @@ export interface CopilotSettings {
   mcpUrl: string;
   /** Optional Bearer credential, persisted only in local extension settings. */
   mcpToken: string;
+  /** Exact endpoint this credential was entered for; never reuse it after a URL change. */
+  mcpTokenUrl: string;
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
@@ -44,6 +46,7 @@ export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   stepsView: 'compact',
   mcpUrl: '',
   mcpToken: '',
+  mcpTokenUrl: '',
 };
 
 export type CopilotField = 'baseUrl' | 'apiKey' | 'model';

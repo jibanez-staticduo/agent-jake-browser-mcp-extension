@@ -37,6 +37,10 @@ const server = useServerStore();
 const activity = useActivityStore();
 
 const draft = ref<CopilotSettings>({ ...props.settings });
+watch(() => draft.value.mcpUrl, () => {
+  draft.value.mcpToken = '';
+  draft.value.mcpTokenUrl = '';
+}, { flush: 'sync' });
 const allowed = ref<string[]>([]);
 const update = ref<UpdateState | null>(null);
 const lastAuto = ref<LastAuto | null>(null);
@@ -198,6 +202,7 @@ onUnmounted(() => {
       </label>
       <label>Token MCP (opcional)
         <input v-model="draft.mcpToken" type="password" autocomplete="off" spellcheck="false"
+          @input="draft.mcpTokenUrl = draft.mcpUrl"
           placeholder="Bearer token">
         <span class="help">Se guarda en este navegador y se envía solo a la URL MCP configurada. Vacío: sin autenticación.</span>
       </label>

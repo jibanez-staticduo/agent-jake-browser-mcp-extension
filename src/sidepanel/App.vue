@@ -24,6 +24,7 @@ import { imageParts, promptWithFiles, readAttachment, transcribe, type Attachmen
 import ModelPicker from './ModelPicker.vue';
 import { explainError, isControllable, missingText as describeMissing } from './setup';
 import OptionsView from './OptionsView.vue';
+import { saveCopilotSettings } from '@/utils/copilot-settings';
 import RequestCard from './RequestCard.vue';
 import {
   chatModels,
@@ -423,7 +424,7 @@ async function removeChat(c: Chat) {
 async function saveSettings(next?: CopilotSettings) {
   if (next) settings.value = next;
   if (!isCopilotConfigured(settings.value)) return;
-  await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: { ...settings.value } });
+  settings.value = await saveCopilotSettings({ ...settings.value });
   if (next) void loadModels();
 }
 
