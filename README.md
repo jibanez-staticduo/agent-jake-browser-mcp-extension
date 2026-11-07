@@ -202,17 +202,17 @@ Si falta `installInstance`, se conserva la instalación heredada en `Downloads/a
 
 Condiciones (si no se cumplen, avisa una vez y no toca nada):
 
-- La carpeta es exactamente `Descargas/agent-jake-browser` (la ruta de descargas por defecto de Chrome).
+- La carpeta es `Descargas/agent-jake-browser/nas`, `fedora` o `ari`, segun la identidad del paquete. La raiz `Descargas/agent-jake-browser` se conserva solo para instalaciones antiguas sin identidad.
 - **Modo desarrollador** activado en `chrome://extensions` (sin él, tras recargar la extensión queda deshabilitada).
 - **«Preguntar dónde guardar cada archivo» desactivado** en los ajustes de Chrome (Descargas); con él activado Chrome cancela las descargas.
 
 Migración (una vez por navegador):
 
-1. Bajar el zip de `https://browser-mcp.lan.e-dani.com/download` y descomprimirlo en `~/Downloads/agent-jake-browser/`.
-2. Quitar la extensión vieja en `chrome://extensions` y «Cargar descomprimida» esa carpeta. No hay `key` en el manifest: el id lo fija la carpeta y no cambia entre actualizaciones.
-3. Token en Opciones (o pairing): lo pone el usuario, la build no lo lleva. El zip de `/download` ya trae un `config.json` con la URL del pod (lo inyecta el servidor), así que x86 y MacBook Casa (`wss://browser-mcp.lan.e-dani.com/ws`) solo necesitan el token. Un navegador que habla con un servidor LOCAL (Mac de CloudBlue, `ws://127.0.0.1:8765`) debe borrar `config.json` de la carpeta tras descomprimir (los valores por defecto de la build son 127.0.0.1:8765) o fijar la URL en Opciones.
-4. Copiloto: endpoint y key en Opciones (la build neutra ya no los siembra).
-5. En el pod, actualizar `AGENT_BROWSER_CONNECTION_LABELS` con los `connectionId` nuevos.
+1. Descarga el ZIP de tu instancia: [NAS](https://agent-browser.staticduo.com/download), [Fedora](https://agent-browser.defend.tech/download) o [Ari](https://opencode-ari.staticduo.com/download).
+2. Descomprime su contenido directamente en `Descargas/agent-jake-browser/nas`, `fedora` o `ari`. `manifest.json` y `config.json` deben estar en esa subcarpeta, sin otro nivel adicional.
+3. En `chrome://extensions`, carga esa subcarpeta con "Cargar descomprimida". Conserva la instalacion anterior hasta comprobar la conexion de la nueva.
+4. Empareja la nueva instalacion con su servidor y configura de nuevo el copiloto si procede. No publiques ni copies tokens a archivos de diagnostico.
+5. Comprueba la nueva version y conexion antes de retirar la instalacion anterior. Las siguientes actualizaciones mantienen la ruta y configuracion de cada instalacion.
 
 Para pasar una instalación existente a `nas`, `fedora` o `ari`, carga la nueva carpeta como una extensión distinta después de descomprimir el ZIP servido para esa instancia.
 Chrome asigna un id de extensión y almacenamiento local distintos a la carpeta nueva: hay que volver a emparejarla o importar explícitamente los datos mediante un procedimiento seguro aprobado; la actualización no mueve esos datos automáticamente.
