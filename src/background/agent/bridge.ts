@@ -9,7 +9,6 @@ import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
-  DEFAULT_COPILOT_SETTINGS,
   isCopilotConfigured,
   type CopilotSettings,
   type PanelToWorker,
@@ -22,6 +21,7 @@ import { log } from '@/utils/logger';
 import { AgentStopped, runAgent, type ToolOutcome } from './loop';
 import { LOCAL_TOOL_NAMES, INTERNAL_TOOL_NAMES } from './tools-catalog';
 import { openServer, type ServerPlugin } from './mcp-server';
+import { normalizeCopilotSettings } from '@/utils/copilot-settings';
 import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage, signal?: AbortSignal) => Promise<OutgoingMessage>;
@@ -170,7 +170,7 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
 
 export async function loadCopilotSettings(): Promise<CopilotSettings> {
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-  return { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined) };
+  return normalizeCopilotSettings(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
 }
 
 async function allowedOrigins(): Promise<string[]> {
@@ -300,7 +300,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           takeSteering: () => steering.splice(0),
           serverTools: async () => {
             if (!settings.mcpUrl) return [];
-            plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal);
+            plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal, settings.mcpToken);
             pluginNames = new Set(
               plugin.tools.map((t) => t.function.name).filter((n) => !LOCAL_TOOL_NAMES.has(n) && !INTERNAL_TOOL_NAMES.has(n)),
             );

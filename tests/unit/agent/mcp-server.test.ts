@@ -37,8 +37,49 @@ describe('plugins del servidor MCP (INFRA-909)', () => {
 
     expect(calls.map((c) => c.method)).toEqual(['initialize', 'notifications/initialized', 'tools/list']);
     expect(calls[2].headers['Mcp-Session-Id']).toBe('sess-1');
+    expect(calls.every((c) => !('Authorization' in c.headers))).toBe(true);
     expect(plugin.tools.map((t) => t.function.name)).toEqual(['browser_state', 'delegar']);
     expect(plugin.tools[1].function.parameters).toMatchObject({ required: ['orden'], additionalProperties: false });
+  });
+
+  it('authenticates every RPC only at the configured URL and rejects redirects', async () => {
+    const calls: { method: string; headers: Record<string, string> }[] = [];
+    const fetcher = vi.mocked(fakeServer(calls));
+    const plugin = await openServer(fetcher, 'https://gateway.test/mcp', undefined, ' token-secret ');
+    await plugin.call('delegar', {});
+    expect(calls).toHaveLength(4);
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(url).toBe('https://gateway.test/mcp');
+      expect(init).toMatchObject({ redirect: 'error', headers: { Authorization: 'Bearer token-secret' } });
+    }
+  });
+
+  it('treats a blank credential as unauthenticated', async () => {
+    const calls: { method: string; headers: Record<string, string> }[] = [];
+    await openServer(fakeServer(calls), 'https://gateway.test/mcp', undefined, '   ');
+    expect(calls.every((c) => !('Authorization' in c.headers))).toBe(true);
+  });
+
+  it.each(['http', 'rpc', 'json', 'network'])('does not expose secrets from %s errors', async (kind) => {
+    const secret = 'token-secret';
+    const fetcher = vi.fn(async () => {
+      if (kind === 'network') throw new Error(`failed ${secret}`);
+      return new Response(kind === 'rpc'
+        ? JSON.stringify({ error: { code: -1, message: secret } })
+        : secret, { status: kind === 'http' ? 401 : 200 });
+    }) as unknown as typeof fetch;
+    await expect(openServer(fetcher, 'https://gateway.test/mcp', undefined, secret)).rejects.toThrow(/MCP/);
+    await expect(openServer(fetcher, 'https://gateway.test/mcp', undefined, secret)).rejects.not.toThrow(secret);
+  });
+
+  it('redacts credentials echoed in tool errors', async () => {
+    const calls: { method: string; headers: Record<string, string> }[] = [];
+    const fetcher = vi.mocked(fakeServer(calls));
+    const plugin = await openServer(fetcher, 'https://gateway.test/mcp', undefined, 'token-secret');
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ result: {
+      isError: true, content: [{ type: 'text', text: 'bad token-secret' }],
+    } })));
+    expect(await plugin.call('delegar', {})).toEqual({ ok: false, error: 'bad [redacted]' });
   });
 
   it('calls a plugin through tools/call and hands back its text', async () => {
