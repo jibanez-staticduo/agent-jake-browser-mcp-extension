@@ -300,7 +300,7 @@ export function registerCopilotBridge(getDeps: () => Promise<BridgeDeps>): void 
           takeSteering: () => steering.splice(0),
           serverTools: async () => {
             if (!settings.mcpUrl) return [];
-            plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal);
+            plugin = await openServer((input, init) => fetch(input, init), settings.mcpUrl, runController.signal, settings.mcpToken);
             pluginNames = new Set(
               plugin.tools.map((t) => t.function.name).filter((n) => !LOCAL_TOOL_NAMES.has(n) && !INTERNAL_TOOL_NAMES.has(n)),
             );

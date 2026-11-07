@@ -30,6 +30,8 @@ export interface CopilotSettings {
   stepsView: 'compact' | 'extended';
   /** MCP (streamable HTTP) del servidor emparejado: lo que anuncia entra como herramientas. Vacío: sin plugins. */
   mcpUrl: string;
+  /** Optional Bearer credential, persisted only in local extension settings. */
+  mcpToken: string;
 }
 
 export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
@@ -41,6 +43,7 @@ export const DEFAULT_COPILOT_SETTINGS: CopilotSettings = {
   vision: false,
   stepsView: 'compact',
   mcpUrl: '',
+  mcpToken: '',
 };
 
 export type CopilotField = 'baseUrl' | 'apiKey' | 'model';

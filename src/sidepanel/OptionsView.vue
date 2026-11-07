@@ -196,6 +196,11 @@ onUnmounted(() => {
           placeholder="http://127.0.0.1:8790/browser · vacío: sin plugins">
         <span class="why">Lo que ese servidor anuncie en tools/list entra como herramienta del copiloto (solo en modo Auto). Las que el panel ya ejecuta se ignoran por nombre; las demás actúan sobre los navegadores del servidor, no sobre esta pestaña.</span>
       </label>
+      <label>Token MCP (opcional)
+        <input v-model="draft.mcpToken" type="password" autocomplete="off" spellcheck="false"
+          placeholder="Bearer token">
+        <span class="help">Se guarda en este navegador y se envía solo a la URL MCP configurada. Vacío: sin autenticación.</span>
+      </label>
       <div v-if="allowed.length" class="allowed">
         <span>Sitios con permiso permanente (modo Preguntar):</span>
         <div v-for="o in allowed" :key="o" class="origin">

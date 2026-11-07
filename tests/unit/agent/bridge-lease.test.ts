@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentStopped, runAgent, type AgentDeps, type ToolOutcome } from '@/background/agent/loop';
-import { createCopilotTrafficGate, registerCopilotBridge } from '@/background/agent/bridge';
+import { createCopilotTrafficGate, loadCopilotSettings, registerCopilotBridge } from '@/background/agent/bridge';
 import { COPILOT_PORT, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 import type { TabManager } from '@/background/tab-manager';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
@@ -88,6 +88,15 @@ const untilStopped = (deps: AgentDeps) => new Promise<string>((_resolve, reject)
 });
 
 describe('Copilot bridge lease', () => {
+  it('defaults legacy settings to no MCP token and reads a locally saved credential', async () => {
+    setup();
+    vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpUrl: 'https://gateway.test/mcp' } });
+    expect((await loadCopilotSettings()).mcpToken).toBe('');
+    vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpToken: 'saved-secret' } });
+    expect((await loadCopilotSettings()).mcpToken).toBe('saved-secret');
+    expect(chrome.storage.local.get).toHaveBeenCalledWith(COPILOT_SETTINGS_KEY);
+  });
+
   it("keeps MCP out of the copilot's tab while it runs, and nowhere else", async () => {
     const { panel, gate, handler } = setup();
     const running = runs(untilStopped);
@@ -122,7 +131,7 @@ describe('Copilot bridge lease', () => {
     const { panel, handler } = setup();
     vi.mocked(chrome.storage.local.get).mockResolvedValue({
       [COPILOT_SETTINGS_KEY]: {
-        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: 'https://jake.test/mcp',
+        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: 'https://jake.test/mcp', mcpToken: 'plugin-secret',
       },
     });
     const seen: string[] = [];
@@ -149,6 +158,10 @@ describe('Copilot bridge lease', () => {
     await running;
 
     expect(seen).toContain('tools/call');
+    for (const [input, init] of vi.mocked(fetch).mock.calls) {
+      expect(input).toBe('https://jake.test/mcp');
+      expect(init).toMatchObject({ redirect: 'error', headers: { Authorization: 'Bearer plugin-secret' } });
+    }
     expect(outcome).toEqual({ ok: true, result: 'trabajo aceptado' });
     expect(handler).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'delegar' }), expect.anything());
   });
