@@ -9,7 +9,7 @@ import { UPDATE_PUBLIC_KEY } from '@/config/update-key';
 import { activityLog } from './activity-log';
 import { log } from '@/utils/logger';
 import { LAST_AUTO_KEY, type PublishedBuild, type UpdateState } from './update-check';
-import { FILES_NAME, INSTALL_DIR, installDirFor, SIG_NAME, mimeFor, parseUpdateFiles, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
+import { FILES_NAME, INSTALL_DIR, installDirFor, SIG_NAME, mimeFor, parseUpdateFiles, sha256Hex, supportsEd25519, toDataUrl, verifySignature, writeOrder, type UpdateFiles } from './update-package';
 import { loadBundleInstallConfig } from '@/config/runtime';
 
 export type SelfUpdateProblem = 'not-in-downloads' | 'download-prompt' | 'bad-package' | 'write-failed' | 'probe-failed' | 'not-applied' | 'unsupported-browser' | 'invalid-install-config';
