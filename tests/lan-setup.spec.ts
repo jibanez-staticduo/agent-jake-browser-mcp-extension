@@ -178,10 +178,10 @@ test.describe('StaticDuo LAN setup with a built server', () => {
         const panel = await browser.newPage();
         await panel.goto(`${extensionOrigin}/src/sidepanel/index.html`);
         await panel.getByRole('button', { name: 'Abrir Opciones', exact: true }).click();
-        await panel.getByRole('combobox', { name: 'Emparejar con servidor' }).selectOption({ label: instance.name });
         const [approval] = await Promise.all([
           browser.waitForEvent('page', { timeout: 10000 }),
-          panel.getByRole('button', { name: 'Emparejar con servidor', exact: true }).click(),
+          panel.getByRole('group', { name: 'Emparejar con servidor' })
+            .getByRole('button', { name: instance.name, exact: true }).click(),
         ]);
         await expect(approval).toHaveURL(`${instance.origin}/setup`);
         const host = approval.getByLabel('Nombre del equipo');
