@@ -80,6 +80,7 @@ export async function transcribe(
   form.append('file', audio, `dictado.${audio.type.includes('ogg') ? 'ogg' : 'webm'}`);
   const res = await fetchFn(`${base}/audio/transcriptions`, {
     method: 'POST',
+    redirect: 'error',
     headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
     body: form,
   });

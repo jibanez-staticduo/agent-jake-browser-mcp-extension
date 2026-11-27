@@ -1,6 +1,7 @@
 /**
  * Shared TypeScript interfaces for popup components.
  */
+import type { SetupPairingInfo } from '@/config/setup-instances';
 
 export interface AuthUser {
   id: number;
@@ -80,4 +81,5 @@ export interface ServerConfigInfo {
   connectionId: string;
   connected: boolean;
   pairing: PairingInfo;
+  setupPairing?: SetupPairingInfo;
 }

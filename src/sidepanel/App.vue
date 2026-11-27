@@ -4,14 +4,13 @@
  * The loop runs in the service worker (background/agent); this page renders the
  * conversation, answers the agent's requests, and owns model/mode/tab selection.
  */
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   COPILOT_PORT,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
   copilotMissing,
   type CopilotField,
-  isCopilotConfigured,
   type ChatTurn,
   type CopilotMode,
   type CopilotSettings,
@@ -22,12 +21,12 @@ import {
 import { renderMarkdown } from './markdown';
 import { imageParts, promptWithFiles, readAttachment, transcribe, type Attachment } from './attachments';
 import ModelPicker from './ModelPicker.vue';
+import { loadChatModelCatalog } from './model-catalog';
 import { explainError, isControllable, missingText as describeMissing } from './setup';
 import OptionsView from './OptionsView.vue';
-import { saveCopilotSettings } from '@/utils/copilot-settings';
+import { normalizeCopilotSettings, saveCopilotPreference, saveCopilotSettings } from '@/utils/copilot-settings';
 import RequestCard from './RequestCard.vue';
 import {
-  chatModels,
   blocksOf,
   chatOfScope,
   currentChatId,
@@ -68,6 +67,10 @@ const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
 const models = ref<string[]>([]);
 const modelsError = ref('');
 const modelsLoading = ref(false);
+let catalogRequest: AbortController | undefined;
+const preferenceError = ref('');
+const pendingPreferences: Partial<Pick<CopilotSettings, 'model' | 'mode'>> = {};
+let settingsRevision = 0;
 /** Result of the last model listing, shown under the endpoint in Opciones («Guardar y probar»). */
 const check = ref<{ state: 'idle' | 'ok' | 'error'; text: string }>({ state: 'idle', text: '' });
 const planOpen = ref(true);
@@ -188,8 +191,7 @@ function onWorker(event: WorkerToPanel) {
       planOpen.value = true;
       break;
     case 'mode':
-      settings.value.mode = event.mode;
-      void saveSettings();
+      updatePreference('mode', event.mode);
       break;
     case 'target':
       agentTab.value = event.title;
@@ -357,8 +359,7 @@ function cycleMode() {
 }
 
 function setMode(mode: CopilotMode) {
-  settings.value.mode = mode;
-  void saveSettings();
+  updatePreference('mode', mode);
 }
 
 function onModeSelect(e: Event) {
@@ -421,38 +422,67 @@ async function removeChat(c: Chat) {
   }
 }
 
-async function saveSettings(next?: CopilotSettings) {
-  if (next) settings.value = next;
-  if (!isCopilotConfigured(settings.value)) return;
-  settings.value = await saveCopilotSettings({ ...settings.value });
-  if (next) void loadModels();
-}
-
-async function loadModels() {
-  modelsError.value = '';
-  check.value = { state: 'idle', text: '' };
-  if (!isCopilotConfigured(settings.value)) return;
-  modelsLoading.value = true;
+async function saveSettings(next: CopilotSettings, baseline?: CopilotSettings) {
+  const { baseUrl, apiKey } = settings.value;
+  const revision = settingsRevision;
   try {
-    const base = settings.value.baseUrl.trim().replace(/\/+$/, '');
-    const res = await fetch(`${base}/models`, {
-      headers: settings.value.apiKey ? { Authorization: `Bearer ${settings.value.apiKey}` } : {},
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json() as { data?: { id: string }[] };
-    models.value = chatModels((data.data ?? []).map((m) => m.id));
-    check.value = { state: 'ok', text: `Conecta: ${models.value.length} modelos de chat disponibles.` };
-  } catch (error) {
-    const msg = (error as Error).message;
-    modelsError.value = /HTTP 40[13]/.test(msg) ? 'La key no vale.' : `No pude listar modelos: ${msg}.`;
-    check.value = { state: 'error', text: /HTTP 40[13]/.test(msg) ? 'El endpoint responde pero la API key no vale.' : `No llego al endpoint (${msg}).` };
-  } finally {
-    modelsLoading.value = false;
+    const saved = await saveCopilotSettings(next, baseline);
+    if (settingsRevision === revision) settings.value = { ...saved, ...pendingPreferences };
+    if (settings.value.baseUrl === baseUrl && settings.value.apiKey === apiKey) void loadModels();
+  } catch {
+    check.value = { state: 'error', text: 'No se pudo guardar la configuración del copiloto.' };
   }
 }
 
-function onModelChange() {
-  void saveSettings();
+async function loadModels() {
+  catalogRequest?.abort();
+  const controller = new AbortController();
+  catalogRequest = controller;
+  models.value = [];
+  modelsError.value = '';
+  modelsLoading.value = false;
+  check.value = { state: 'idle', text: '' };
+  if (missing.value.includes('baseUrl') || missing.value.includes('apiKey')) return;
+  const { baseUrl, apiKey } = settings.value;
+  modelsLoading.value = true;
+  const timeout = setTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), 10_000);
+  try {
+    const available = await loadChatModelCatalog(baseUrl.trim(), apiKey.trim(), controller.signal);
+    if (catalogRequest !== controller || controller.signal.aborted) return;
+    models.value = available;
+    check.value = { state: 'ok', text: `Conecta: ${available.length} modelos de chat disponibles.` };
+  } catch (error) {
+    if (catalogRequest !== controller || controller.signal.reason?.name === 'AbortError') return;
+    const httpStatus = error instanceof Error ? /^HTTP (\d+)$/.exec(error.message)?.[1] : undefined;
+    modelsError.value = httpStatus === '401' || httpStatus === '403'
+      ? 'La API key no tiene acceso al catálogo.'
+      : httpStatus ? `El endpoint respondió HTTP ${httpStatus}.` : 'El catálogo no respondió como se esperaba.';
+    check.value = { state: 'error', text: modelsError.value };
+  } finally {
+    clearTimeout(timeout);
+    if (catalogRequest === controller) modelsLoading.value = false;
+  }
+}
+
+watch(
+  [() => settings.value.baseUrl, () => settings.value.apiKey],
+  loadModels,
+  { flush: 'sync' },
+);
+
+function updatePreference<K extends 'model' | 'mode'>(key: K, value: CopilotSettings[K]) {
+  pendingPreferences[key] = value;
+  settings.value[key] = value;
+  preferenceError.value = '';
+  void saveCopilotPreference({ [key]: value }).catch(() => {
+    preferenceError.value = 'No se pudo guardar la preferencia del copiloto.';
+  }).finally(() => {
+    if (pendingPreferences[key] === value) delete pendingPreferences[key];
+  });
+}
+
+function onModelChange(id: string) {
+  updatePreference('model', id);
 }
 
 const focusField = ref<CopilotField | null>(null);
@@ -505,14 +535,20 @@ const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrom
 
 // The service worker may seed the settings (provision.ts) after the panel is open.
 const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-  const next = changes[COPILOT_SETTINGS_KEY]?.newValue as Partial<CopilotSettings> | undefined;
-  if (area === 'local' && next) settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...next };
+  if (area !== 'local' || !(COPILOT_SETTINGS_KEY in changes)) return;
+  const next = changes[COPILOT_SETTINGS_KEY].newValue as Partial<CopilotSettings> | undefined;
+  settingsRevision += 1;
+  settings.value = { ...normalizeCopilotSettings(next), ...pendingPreferences };
 };
 
 onMounted(async () => {
+  chrome.storage.onChanged.addListener(onStorage);
   windowId = (await chrome.windows.getCurrent()).id ?? null;
+  const revision = settingsRevision;
   const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-  settings.value = { ...DEFAULT_COPILOT_SETTINGS, ...(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings>) };
+  if (settingsRevision === revision) {
+    settings.value = normalizeCopilotSettings(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
+  }
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -523,13 +559,12 @@ onMounted(async () => {
     }
   }
   await bindOwnTab();
-  void loadModels();
   void scroll();
   chrome.tabs.onUpdated.addListener(onUpdated);
-  chrome.storage.onChanged.addListener(onStorage);
 });
 
 onUnmounted(() => {
+  catalogRequest?.abort();
   chrome.tabs.onUpdated.removeListener(onUpdated);
   chrome.storage.onChanged.removeListener(onStorage);
   port?.disconnect();
@@ -664,6 +699,7 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
           </span>
         </div>
         <p v-if="attachError" class="attach-err" role="alert">{{ attachError }}</p>
+        <p v-if="preferenceError" class="attach-err" role="alert">{{ preferenceError }}</p>
         <input ref="fileInput" type="file" multiple hidden @change="onFiles">
         <textarea ref="textarea" v-model="input" rows="3" aria-label="Mensaje para el copiloto"
           :placeholder="placeholder" @keydown="onKey" @paste="onPaste" />
@@ -680,8 +716,8 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
             <span aria-hidden="true">▾</span>
           </label>
           <div class="right">
-            <ModelPicker v-model="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
-              @update:model-value="onModelChange" @options="openOptions" />
+            <ModelPicker :model-value="settings.model" :models="models" :loading="modelsLoading" :error="modelsError"
+              @update:model-value="onModelChange" @retry="loadModels" @options="openOptions" />
             <button type="button" class="icon mic" :class="{ on: recording }" :disabled="transcribing"
               :aria-label="recording ? 'Parar de grabar' : 'Dictar por micrófono'"
               :title="recording ? 'Parar de grabar' : 'Dictar: se transcribe y lo puedes editar antes de enviar'"

@@ -19,8 +19,11 @@ import {
   getEffectiveConfig,
   hasStoredServerUrl,
   httpOrigin,
+  buildDisplayUrl,
 } from '@/config/runtime';
+import { SETUP_INSTANCES } from '@/config/setup-instances';
 import { log } from '@/utils/logger';
+import { updateSettings } from './settings-update';
 
 const OTP_LENGTH = 8;
 // Ambiguity-free alphabet (no 0/O/1/I).
@@ -41,6 +44,7 @@ export interface PairingInfo {
 interface ActivePairing {
   otp: string;
   origin: string;
+  wsUrl: string;
   state: PairingStatusState;
   error?: string;
   startedAt: number;
@@ -98,12 +102,12 @@ async function storePairCode(otp: string): Promise<void> {
   await chrome.storage.local.set({ [STORAGE_KEYS.pairCode]: otp });
 }
 
-async function clearPairCode(): Promise<void> {
+export async function clearPairCode(): Promise<void> {
   await chrome.storage.local.remove([STORAGE_KEYS.pairCode]);
 }
 
-async function finishApproved(token: string): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.token]: token });
+async function finishApproved(attempt: ActivePairing, token: string): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEYS.token]: token, [STORAGE_KEYS.tokenUrl]: attempt.wsUrl });
   await clearPairCode();
   if (active) {
     active.state = 'approved';
@@ -116,47 +120,48 @@ async function finishApproved(token: string): Promise<void> {
 /**
  * Single poll of /pair/status. Exported for tests and popup-triggered checks.
  */
+let polling: ActivePairing | undefined;
+
 export async function pollPairStatusOnce(): Promise<'pending' | 'approved' | 'expired'> {
-  if (!active) return 'pending';
+  const attempt = active;
+  if (!attempt || attempt.state !== 'pending' || polling === attempt) return 'pending';
+  polling = attempt;
 
-  const url = `${active.origin}/pair/status?otp=${encodeURIComponent(active.otp)}`;
-  const response = await fetch(url, { method: 'GET' });
-  if (!response.ok) {
-    throw new Error(`pair/status failed: HTTP ${response.status}`);
-  }
-  const body = await response.json() as { state?: string; token?: string };
-
-  if (body.state === 'approved' && typeof body.token === 'string' && body.token) {
-    await finishApproved(body.token);
-    return 'approved';
-  }
-  if (body.state === 'expired') {
-    if (active) {
-      active.state = 'expired';
+  try {
+    const url = `${attempt.origin}/pair/status?otp=${encodeURIComponent(attempt.otp)}`;
+    const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) {
+      throw new Error(`pair/status failed: HTTP ${response.status}`);
     }
-    stopPolling();
-    await clearPairCode();
-    return 'expired';
-  }
+    const body = await response.json() as { state?: string; token?: string };
 
-  if (Date.now() - active.startedAt > PAIRING_TTL_MS) {
-    active.state = 'expired';
-    stopPolling();
-    await clearPairCode();
-    return 'expired';
+    return await updateSettings(async () => {
+      if (attempt !== active) return 'pending';
+      if (body.state === 'approved' && typeof body.token === 'string' && body.token) {
+        await finishApproved(attempt, body.token);
+        return 'approved';
+      }
+      if (body.state === 'expired' || Date.now() - attempt.startedAt > PAIRING_TTL_MS) {
+        attempt.state = 'expired';
+        stopPolling();
+        await clearPairCode();
+        return 'expired';
+      }
+      return 'pending';
+    });
+  } finally {
+    if (polling === attempt) polling = undefined;
   }
-
-  return 'pending';
 }
 
 function schedulePolling(): void {
   stopPolling();
   if (!active) return;
   active.pollTimer = setInterval(() => {
-    pollPairStatusOnce().catch((error) => {
+    pollPairStatusOnce().catch(() => {
       // Transient network errors keep the flow pending; the popup shows
       // them only if pairing finally expires.
-      log.warn('[Pairing] status poll failed:', error);
+      log.warn('[Pairing] Status poll failed');
     });
   }, POLL_INTERVAL_MS);
 }
@@ -175,18 +180,22 @@ export async function startPairing(): Promise<{ otp: string; approveUrl: string 
 
   const cfg = await getEffectiveConfig();
   const origin = httpOrigin(cfg);
+  const wsUrl = buildDisplayUrl(cfg);
   const otp = generateOtp();
 
   const response = await fetch(`${origin}/pair/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ otp, connectionId: cfg.connectionId }),
+    redirect: 'error',
+    signal: AbortSignal.timeout(10_000),
   });
 
   if (!response.ok) {
     active = {
       otp,
       origin,
+      wsUrl,
       state: 'error',
       error: `pair/start failed: HTTP ${response.status}`,
       startedAt: Date.now(),
@@ -196,9 +205,9 @@ export async function startPairing(): Promise<{ otp: string; approveUrl: string 
   }
 
   await storePairCode(otp);
-  active = { otp, origin, state: 'pending', startedAt: Date.now(), pollTimer: null };
+  active = { otp, origin, wsUrl, state: 'pending', startedAt: Date.now(), pollTimer: null };
   schedulePolling();
-  log.info(`[Pairing] OTP ${otp} registered at ${origin}`);
+  log.info('[Pairing] Manual approval requested');
 
   return { otp, approveUrl: buildApproveUrl(origin, otp) };
 }
@@ -223,12 +232,13 @@ export async function maybeAutoStartPairing(): Promise<void> {
     active = {
       otp: pendingCode,
       origin,
+      wsUrl: buildDisplayUrl(cfg),
       state: 'pending',
       startedAt: Date.now(),
       pollTimer: null,
     };
     schedulePolling();
-    log.info(`[Pairing] Resumed pending pairing for OTP ${pendingCode}`);
+    log.info('[Pairing] Resumed pending manual approval');
     return;
   }
 
@@ -243,6 +253,8 @@ export async function maybeAutoStartPairing(): Promise<void> {
   // against the bare build default (a LAN server would get spammed and the
   // open-LAN mode must keep working without pairing).
   if (!(await hasStoredServerUrl()) && (await loadBundleConfig()) === null) return;
+  const origin = httpOrigin(await getEffectiveConfig());
+  if (Object.values(SETUP_INSTANCES).some((instance) => instance.origin === origin)) return;
 
   try {
     await startPairing();

@@ -25,6 +25,7 @@ import { parseInstallInstance, type InstallInstance } from '@/background/update-
 export const STORAGE_KEYS = {
   serverUrl: 'ajb.serverUrl',
   token: 'ajb.token',
+  tokenUrl: 'ajb.tokenUrl',
   label: 'ajb.label',
   connectionId: 'ajb.connectionId',
   pairCode: 'ajb.pairCode',
@@ -166,7 +167,16 @@ export function loadBundleConfig(): Promise<ParsedServerUrl | null> {
 /**
  * Ensure the persistent per-install connection UUID exists and return it.
  */
-export async function ensureConnectionId(): Promise<string> {
+let connectionIdRequest: Promise<string> | undefined;
+
+export function ensureConnectionId(): Promise<string> {
+  if (!connectionIdRequest) {
+    connectionIdRequest = loadOrCreateConnectionId().finally(() => { connectionIdRequest = undefined; });
+  }
+  return connectionIdRequest;
+}
+
+async function loadOrCreateConnectionId(): Promise<string> {
   const stored = await storageGet([STORAGE_KEYS.connectionId]);
   const existing = stored[STORAGE_KEYS.connectionId];
   if (typeof existing === 'string' && existing.length > 0) {
@@ -185,7 +195,7 @@ export async function ensureConnectionId(): Promise<string> {
  * (an explicitly stored empty string clears the token for open-LAN setups).
  */
 export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
-  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.label]);
+  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl, STORAGE_KEYS.label, STORAGE_KEYS.connectionId]);
   const rawUrl = typeof stored[STORAGE_KEYS.serverUrl] === 'string'
     ? (stored[STORAGE_KEYS.serverUrl] as string)
     : '';
@@ -212,15 +222,18 @@ export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
     }
   }
 
+  const scheme = base.secure ? 'wss' : 'ws';
+  const tokenUrl = stored[STORAGE_KEYS.tokenUrl];
   const token = typeof stored[STORAGE_KEYS.token] === 'string'
-    ? (stored[STORAGE_KEYS.token] as string)
+    ? (!tokenUrl || tokenUrl === buildDisplayUrl({ ...base, scheme }) ? stored[STORAGE_KEYS.token] as string : '')
     : CONFIG.WS_TOKEN;
 
-  const connectionId = await ensureConnectionId();
+  const storedId = stored[STORAGE_KEYS.connectionId];
+  const connectionId = typeof storedId === 'string' && storedId ? storedId : await ensureConnectionId();
 
   return {
     ...base,
-    scheme: base.secure ? 'wss' : 'ws',
+    scheme,
     token,
     label: normalizeLabel(stored[STORAGE_KEYS.label]),
     connectionId,
@@ -246,12 +259,16 @@ export async function setServerUrl(url: string | null): Promise<void> {
  * rather than falling back to the build default. Pass null to remove the
  * override entirely and fall back to CONFIG.WS_TOKEN.
  */
-export async function setToken(token: string | null): Promise<void> {
+export async function setToken(token: string | null, boundUrl?: string): Promise<void> {
   if (token === null) {
-    await storageRemove([STORAGE_KEYS.token]);
+    await storageRemove([STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl]);
     return;
   }
-  await storageSet({ [STORAGE_KEYS.token]: token });
+  const stored = await storageGet([STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl]);
+  await storageSet({
+    [STORAGE_KEYS.token]: token,
+    [STORAGE_KEYS.tokenUrl]: boundUrl ?? (token === stored[STORAGE_KEYS.token] ? stored[STORAGE_KEYS.tokenUrl] ?? '' : ''),
+  });
 }
 
 /** Remove control characters and bound the manual connection name. */
@@ -286,7 +303,7 @@ export function buildWsUrl(cfg: RuntimeServerConfig): string {
 }
 
 /** Endpoint without the handshake query, for display in the popup. */
-export function buildDisplayUrl(cfg: RuntimeServerConfig): string {
+export function buildDisplayUrl(cfg: ParsedServerUrl & Pick<RuntimeServerConfig, 'scheme'>): string {
   const defaultPort = cfg.secure ? 443 : 80;
   const portSuffix = cfg.port === defaultPort ? '' : `:${cfg.port}`;
   return `${cfg.scheme}://${cfg.hostname}${portSuffix}${cfg.path}`;

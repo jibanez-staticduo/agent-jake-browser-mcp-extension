@@ -213,6 +213,75 @@ test('copilot panel opens in a fresh install without contacting a model', async 
   }
 });
 
+test('copilot model picker refreshes the paired catalog and persists the model for the next prompt', async () => {
+  const served: { model: string; authorization?: string }[] = [];
+  const catalogAuth: (string | undefined)[] = [];
+  const catalog = http.createServer(async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/old/v1/models?include_metadata=true') {
+      catalogAuth.push(req.headers.authorization);
+      res.end(JSON.stringify({ data: [{ id: 'old-model', mode: 'chat' }] }));
+    } else if (req.url === '/new/v1/models?include_metadata=true') {
+      catalogAuth.push(req.headers.authorization);
+      res.end(JSON.stringify({ data: [
+        { id: 'gpt-6.2-sol', mode: 'responses' },
+        { id: 'new-embedding', mode: 'embedding' },
+        { id: 'chatgpt-account2/gpt-6.2-sol', mode: 'chat' },
+      ] }));
+    } else if (req.url === '/new/v1/chat/completions') {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const { model } = JSON.parse(Buffer.concat(chunks).toString());
+      served.push({ model, authorization: req.headers.authorization });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'Fixture response' } }] }));
+    } else {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise<void>((resolve) => catalog.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(catalog.address() as AddressInfo).port}`;
+  const panel = await context.newPage();
+  const target = await context.newPage();
+  const worker = await getExtensionServiceWorker(context);
+  const previous = await worker.evaluate(() => chrome.storage.local.get('copilotSettings'));
+  async function writeSettings(instance: 'old' | 'new') {
+    await worker.evaluate(({ baseUrl, apiKey }) => chrome.storage.local.set({
+      copilotSettings: { baseUrl, apiKey, model: 'manual-alias' },
+    }), { baseUrl: `${origin}/${instance}/v1`, apiKey: `${instance}-fixture-key` });
+  }
+
+  try {
+    await target.goto(`${fixtureOrigin}/fixture`);
+    await target.bringToFront();
+    await writeSettings('old');
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await panel.getByRole('button', { name: /Manual Alias/ }).click();
+    await expect(panel.getByRole('option', { name: /old-model/ })).toBeVisible();
+
+    await writeSettings('new');
+    const choice = panel.getByRole('option', { name: /gpt-6.2-sol/i });
+    await expect(choice).toHaveCount(1);
+    await expect(panel.getByRole('option', { name: /old-model|new-embedding|manual-alias/i })).toHaveCount(0);
+    await choice.click();
+    await expect.poll(() => worker.evaluate(async () => (
+      (await chrome.storage.local.get('copilotSettings')).copilotSettings.model
+    ))).toBe('gpt-6.2-sol');
+
+    const composer = panel.getByRole('textbox', { name: 'Mensaje para el copiloto' });
+    await composer.fill('Use the fixture');
+    await composer.press('Enter');
+    await expect(panel.getByText('Fixture response')).toBeVisible();
+    expect(served).toEqual([{ model: 'gpt-6.2-sol', authorization: 'Bearer new-fixture-key' }]);
+    expect(catalogAuth).toEqual(['Bearer old-fixture-key', 'Bearer new-fixture-key']);
+  } finally {
+    if ('copilotSettings' in previous) await worker.evaluate((previous) => chrome.storage.local.set(previous), previous);
+    else await worker.evaluate(() => chrome.storage.local.remove('copilotSettings'));
+    await panel.close();
+    await target.close();
+    await new Promise<void>((resolve) => catalog.close(() => resolve()));
+  }
+});
+
 test('content script injects on page load and answers the extension', async () => {
   const fixtureUrl = `${fixtureOrigin}/fixture`;
   const page = await context.newPage();

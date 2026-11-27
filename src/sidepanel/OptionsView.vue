@@ -8,6 +8,7 @@
  * visible and focused, and the MCP status below cannot cover the reason.
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { COPILOT_CREDENTIAL_FIELDS } from '@/utils/copilot-settings';
 import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   copilotMissing,
@@ -30,17 +31,34 @@ const props = defineProps<{
   focusField: CopilotField | null;
   check: { state: 'idle' | 'ok' | 'error'; text: string };
 }>();
-const emit = defineEmits<{ back: []; save: [settings: CopilotSettings] }>();
+const emit = defineEmits<{ back: []; save: [settings: CopilotSettings, baseline: CopilotSettings] }>();
 
 const status = useStatusStore();
 const server = useServerStore();
 const activity = useActivityStore();
 
 const draft = ref<CopilotSettings>({ ...props.settings });
-watch(() => draft.value.mcpUrl, () => {
+watch(() => props.settings, (next, previous) => {
+  const fields = Object.keys(draft.value) as (keyof CopilotSettings)[];
+  const edits = new Set(fields.filter((field) => draft.value[field] !== previous[field] && draft.value[field] !== next[field]));
+  for (const group of COPILOT_CREDENTIAL_FIELDS) {
+    if (group.some((field) => edits.has(field))) group.forEach((field) => edits.add(field));
+  }
+  const pending = Object.fromEntries([...edits].map((field) => [field, draft.value[field]]));
+  draft.value = { ...next, ...pending };
+});
+
+function onBaseUrlInput() {
+  if (!draft.value.apiKeyUrl || draft.value.apiKeyUrl === draft.value.baseUrl) return;
+  draft.value.apiKey = '';
+  draft.value.apiKeyUrl = '';
+}
+
+function onMcpUrlInput() {
+  if (draft.value.mcpTokenUrl === draft.value.mcpUrl) return;
   draft.value.mcpToken = '';
   draft.value.mcpTokenUrl = '';
-}, { flush: 'sync' });
+}
 const allowed = ref<string[]>([]);
 const update = ref<UpdateState | null>(null);
 const lastAuto = ref<LastAuto | null>(null);
@@ -169,15 +187,15 @@ onUnmounted(() => {
     </section>
 
     <h2>Copiloto</h2>
-    <form class="copilot" @submit.prevent="emit('save', { ...draft })">
+    <form class="copilot" @submit.prevent="emit('save', { ...draft }, { ...settings })">
       <label>Endpoint (OpenAI-compatible)
         <input :id="FIELD_IDS.baseUrl" v-model="draft.baseUrl" :class="{ bad: missing.includes('baseUrl') }" placeholder="https://…/v1"
-          spellcheck="false" :aria-invalid="missing.includes('baseUrl')">
+          spellcheck="false" :aria-invalid="missing.includes('baseUrl')" @input="onBaseUrlInput">
         <span v-if="missing.includes('baseUrl')" class="why">{{ FIELD_WHY.baseUrl }}</span>
       </label>
       <label>API key
         <input :id="FIELD_IDS.apiKey" v-model="draft.apiKey" type="password" autocomplete="off" :class="{ bad: missing.includes('apiKey') }"
-          :aria-invalid="missing.includes('apiKey')">
+          :aria-invalid="missing.includes('apiKey')" @input="draft.apiKeyUrl = draft.baseUrl">
         <span v-if="missing.includes('apiKey')" class="why">{{ FIELD_WHY.apiKey }}</span>
       </label>
       <label>Modelo (id del alias)
@@ -185,7 +203,7 @@ onUnmounted(() => {
         <span v-if="missing.includes('model')" class="why">{{ FIELD_WHY.model }}</span>
       </label>
       <div class="row">
-        <label>Pasos máx.<input v-model.number="draft.maxSteps" type="number" min="1" max="100"></label>
+        <label>Pasos máx.<input v-model.number="draft.maxSteps" type="number" min="1" max="200"></label>
         <label class="check"><input v-model="draft.vision" type="checkbox"> Visión (capturas al modelo)</label>
       </div>
       <label>Vista de pasos
@@ -196,7 +214,7 @@ onUnmounted(() => {
       </label>
       <!-- INFRA-909: la capacidad nueva vive en el servidor; aquí solo se le dice cuál es. -->
       <label>MCP del servidor (plugins)
-        <input v-model="draft.mcpUrl" type="url" spellcheck="false"
+        <input v-model="draft.mcpUrl" type="url" spellcheck="false" @input="onMcpUrlInput"
           placeholder="http://127.0.0.1:8790/browser · vacío: sin plugins">
         <span class="why">Lo que ese servidor anuncie en tools/list entra como herramienta del copiloto (solo en modo Auto). Las que el panel ya ejecuta se ignoran por nombre; las demás actúan sobre los navegadores del servidor, no sobre esta pestaña.</span>
       </label>

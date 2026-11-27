@@ -157,7 +157,8 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
   checklist with `update_plan`, pinned above the composer.
 - **Steering**: while a run is going, Enter does not queue — it drops your message into the
   conversation and the loop hands it to the model before its next round (attachments included).
-- **Model selector** fed by `GET {endpoint}/models` (embeddings/audio/image filtered out).
+- **Model selector** discovers chat-compatible aliases from LiteLLM. It hides
+  account-specific `chatgpt*/...` routes and non-chat models.
 - Streamed answers (text and reasoning) rendered as safe Markdown (everything escaped,
   http(s) links only); tool steps collapse into "N pasos" blocks.
 - Conversations are saved (✚ new, 🕘 history). Endpoint, key, step cap, vision and the
@@ -167,6 +168,19 @@ agent drives the page with the same `browser_*` handlers the MCP path uses.
   (`src/sidepanel/`) only renders it and answers its requests. Stop / Esc aborts.
 
 ## Installation
+
+### StaticDuo LAN pairing
+
+In **Opciones**, choose **NAS**, **Defend (Fedora)**, or **Ari** under
+**Emparejar con servidor**. On a configured LAN, the approval page asks only for
+the missing parts of `HOST - Perfil`. The extension saves the browser server,
+LiteLLM and MCP settings, and defaults to vision on, 200 steps and expanded view.
+You can edit these settings afterward. The existing manual flow remains available
+for servers without LAN setup enabled.
+
+NAS and Ari use the NAS LiteLLM and Jake MCP profile. Defend uses the Fedora
+LiteLLM and its own Jake MCP profile. Enable the server's LAN setup routes and
+the matching authenticated gateway profiles before using these buttons in production.
 
 ### Load as Unpacked Extension
 
