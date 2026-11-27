@@ -26,7 +26,11 @@ const OTP_LENGTH = 8;
 // Ambiguity-free alphabet (no 0/O/1/I).
 const OTP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const POLL_INTERVAL_MS = 2000;
+const PAIR_REQUEST_TIMEOUT_MS = 10_000;
 const PAIRING_TTL_MS = 10 * 60 * 1000;
+// The server starts its TTL after registration and may retain an approved token.
+// Allow for the registration request, the next poll, and its response.
+const PAIRING_RECOVERY_MS = PAIR_REQUEST_TIMEOUT_MS + POLL_INTERVAL_MS + PAIR_REQUEST_TIMEOUT_MS;
 
 export type PairingStatusState = 'idle' | 'pending' | 'approved' | 'expired' | 'error';
 
@@ -110,9 +114,9 @@ function isCurrent(pending: PendingPairing, { effectiveUrl, serverRevision, conf
     && pending.connectionId === config.connectionId;
 }
 
-function isLive({ startedAt }: PendingPairing): boolean {
+function canRecover({ startedAt }: PendingPairing): boolean {
   const age = Date.now() - startedAt;
-  return age >= 0 && age < PAIRING_TTL_MS;
+  return age >= 0 && age < PAIRING_TTL_MS + PAIRING_RECOVERY_MS;
 }
 
 function readPendingPairing(value: unknown): PendingPairing | null {
@@ -159,9 +163,9 @@ export async function pollPairStatusOnce(): Promise<'pending' | 'approved' | 'ex
   try {
     const current = await getServerSettings();
     if (attempt !== active) return 'pending';
-    if (!isLive(attempt) || !isCurrent(attempt, current)) return await updateSettings(() => expire(attempt));
+    if (!canRecover(attempt) || !isCurrent(attempt, current)) return await updateSettings(() => expire(attempt));
     const url = `${attempt.origin}/pair/status?otp=${encodeURIComponent(attempt.otp)}`;
-    const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(PAIR_REQUEST_TIMEOUT_MS) });
     if (!response.ok) {
       throw new Error(`pair/status failed: HTTP ${response.status}`);
     }
@@ -169,11 +173,13 @@ export async function pollPairStatusOnce(): Promise<'pending' | 'approved' | 'ex
 
     return await updateSettings(async () => {
       if (attempt !== active) return 'pending';
-      if (body.state === 'expired' || !isLive(attempt)) {
+      if (body.state === 'expired' || !canRecover(attempt)) {
         return expire(attempt);
       }
       if (body.state === 'approved' && typeof body.token === 'string' && body.token) {
-        if (!isCurrent(attempt, await getServerSettings()) || !isLive(attempt)) return expire(attempt);
+        const latest = await getServerSettings();
+        if (attempt !== active) return 'pending';
+        if (!isCurrent(attempt, latest) || !canRecover(attempt)) return expire(attempt);
         await finishApproved(attempt, body.token);
         return 'approved';
       }
@@ -202,7 +208,7 @@ function schedulePolling(): void {
  */
 export async function startPairing(): Promise<{ otp: string; approveUrl: string }> {
   const current = await getServerSettings();
-  if (active?.state === 'pending' && isCurrent(active, current) && isLive(active)) {
+  if (active?.state === 'pending' && isCurrent(active, current) && canRecover(active)) {
     return {
       otp: active.otp,
       approveUrl: buildApproveUrl(active.origin, active.otp),
@@ -225,7 +231,7 @@ export async function startPairing(): Promise<{ otp: string; approveUrl: string 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ otp, connectionId: pending.connectionId }),
     redirect: 'error',
-    signal: AbortSignal.timeout(10_000),
+    signal: AbortSignal.timeout(PAIR_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -259,7 +265,7 @@ export async function maybeAutoStartPairing(): Promise<void> {
   const origin = httpOrigin(current.config);
   const raw = stored[STORAGE_KEYS.pairCode];
   const pending = readPendingPairing(raw);
-  if (pending && isCurrent(pending, current) && isLive(pending)) {
+  if (pending && isCurrent(pending, current) && canRecover(pending)) {
     active = { ...pending, origin, state: 'pending', pollTimer: null };
     schedulePolling();
     log.info('[Pairing] Resumed pending manual approval');

@@ -3,6 +3,7 @@ import { SETUP_INSTANCES } from '@/config/setup-instances';
 const ACCOUNT_ROUTE = /^chatgpt(?:-[^/]+)?\//i;
 const GENERAL_GPT = /^gpt-\d[^/]*$/i;
 const NON_CHAT_ID = /(?:^|[-_./])(?:bge|embeddings?|embed|rerank(?:er)?|whisper|stt|tts|realtime|transcrib(?:e|er)|transcription|gpt-live|omnivoice|imagine|image|video|probe|moderation|dall-e)(?=$|[-_./])/i;
+const RESPONSES_ONLY_OPENAI_ID = /^(?:gpt-5(?:\.\d+)?-codex)(?:-|$)/i;
 const MANAGED_BASES = new Set<string>(Object.values(SETUP_INSTANCES).map(({ baseUrl }) => baseUrl));
 
 interface ModelMetadata {
@@ -96,7 +97,7 @@ export async function loadChatModelCatalog(
         // previous name filter for those entries on manually configured APIs.
         for (const model of available) {
           if (unresolved.has(model.id) && model.object === 'model' && typeof model.owned_by === 'string' &&
-              !NON_CHAT_ID.test(model.id)) models.add(model.id);
+              !NON_CHAT_ID.test(model.id) && !RESPONSES_ONLY_OPENAI_ID.test(model.id)) models.add(model.id);
         }
         return [...models].sort();
       }

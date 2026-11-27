@@ -73,6 +73,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -152,12 +153,53 @@ describe('pollPairStatusOnce', () => {
     pairing.cancelPairing();
   });
 
-  it('expires a local attempt before polling if its lifetime has elapsed', async () => {
+  it('stores an approval that arrives after the local cutoff when registration was delayed', async () => {
+    vi.useFakeTimers();
+    const pairing = await loadPairing();
+    const ttl = 10 * 60 * 1000;
+    const startedAt = Date.now();
+    let serverExpiresAt = 0;
+    let approved = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/pair/start')) {
+        return new Promise(resolve => setTimeout(() => {
+          serverExpiresAt = Date.now() + ttl;
+          resolve(jsonResponse({ state: 'pending', expiresAt: new Date(serverExpiresAt).toISOString() }, true, 201));
+        }, 1500));
+      }
+      if (approved) {
+        return new Promise(resolve => setTimeout(() => {
+          resolve(jsonResponse({ state: 'approved', token: 'late-token', connectionId: 'cid-1' }));
+        }, 700));
+      }
+      return jsonResponse({ state: Date.now() < serverExpiresAt ? 'pending' : 'expired' });
+    });
+    const onApproved = vi.fn();
+    pairing.setOnTokenApproved(onApproved);
+
+    const registration = pairing.startPairing();
+    await vi.advanceTimersByTimeAsync(1500);
+    await registration;
+    await vi.advanceTimersByTimeAsync(ttl - 2500);
+    expect(Date.now()).toBe(startedAt + ttl - 1000);
+    approved = Date.now() < serverExpiresAt;
+    expect(approved).toBe(true);
+    await vi.advanceTimersByTimeAsync(1200);
+
+    expect(Date.now()).toBe(startedAt + ttl + 200);
+    expect(store[STORAGE_KEYS.token]).toBe('late-token');
+    expect(store[STORAGE_KEYS.tokenUrl]).toBe('wss://pair.example.com');
+    expect(store[STORAGE_KEYS.pairCode]).toBeNull();
+    expect(onApproved).toHaveBeenCalledTimes(1);
+    expect(pairing.getPairingInfo().state).toBe('approved');
+  });
+
+  it('expires a local attempt without polling after the recovery window', async () => {
     const pairing = await loadPairing();
     fetchMock.mockReturnValue(jsonResponse({ ok: true }));
     await pairing.startPairing();
     fetchMock.mockClear();
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000 + 22_000);
 
     try {
       expect(await pairing.pollPairStatusOnce()).toBe('expired');
@@ -167,6 +209,45 @@ describe('pollPairStatusOnce', () => {
       clock.mockRestore();
       pairing.cancelPairing();
     }
+  });
+
+  it('honors server expiry during the recovery window', async () => {
+    vi.useFakeTimers();
+    const pairing = await loadPairing();
+    const startedAt = Date.now();
+    fetchMock.mockReturnValueOnce(jsonResponse({ ok: true }));
+    await pairing.startPairing();
+
+    vi.setSystemTime(startedAt + 10 * 60 * 1000 + 200);
+    fetchMock.mockReturnValueOnce(jsonResponse({ state: 'expired' }));
+    expect(await pairing.pollPairStatusOnce()).toBe('expired');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
+    expect(store[STORAGE_KEYS.token]).toBeUndefined();
+  });
+
+  it.each(['cancellation', 'destination change', 'identity change'])('discards a late approval after %s', async (change) => {
+    vi.useFakeTimers();
+    const pairing = await loadPairing();
+    const startedAt = Date.now();
+    fetchMock.mockReturnValueOnce(jsonResponse({ ok: true }));
+    await pairing.startPairing();
+    vi.setSystemTime(startedAt + 10 * 60 * 1000 + 200);
+
+    let releaseStatus!: () => void;
+    fetchMock.mockReturnValueOnce(new Promise(resolve => {
+      releaseStatus = () => resolve(jsonResponse({ state: 'approved', token: 'late-token' }));
+    }));
+    const status = pairing.pollPairStatusOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    if (change === 'cancellation') pairing.cancelPairing();
+    if (change === 'destination change') store[STORAGE_KEYS.serverUrl] = 'wss://other.example.com';
+    if (change === 'identity change') store[STORAGE_KEYS.connectionId] = 'cid-2';
+    releaseStatus();
+
+    expect(await status).toBe(change === 'cancellation' ? 'pending' : 'expired');
+    expect(store[STORAGE_KEYS.token]).toBeUndefined();
   });
 });
 

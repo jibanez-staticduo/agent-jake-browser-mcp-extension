@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentStopped, runAgent, type AgentDeps, type ToolOutcome } from '@/background/agent/loop';
 import { createCopilotTrafficGate, loadCopilotSettings, registerCopilotBridge } from '@/background/agent/bridge';
+import { provisionCopilot, type ProvisionStorage } from '@/background/provision';
 import { COPILOT_PORT, COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 import { sha256 } from '@/utils/copilot-settings';
 import type { TabManager } from '@/background/tab-manager';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
-import type { PanelToWorker, WorkerToPanel } from '@/types/copilot';
+import type { CopilotSettings, PanelToWorker, WorkerToPanel } from '@/types/copilot';
 
 vi.mock('@/utils/logger', () => ({ log: { warn: vi.fn() } }));
 vi.mock('@/background/agent/loop', async (importOriginal) => ({
@@ -38,7 +39,7 @@ function setup(active = 1) {
   vi.stubGlobal('chrome', {
     runtime: { onConnect: { addListener: onConnect } },
     storage: { local: { get: vi.fn(async () => ({
-      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat' },
+      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', apiKeyUrl: 'https://model.test/v1', model: 'chat' },
     })) } },
     tabs: {
       get: vi.fn(async (id: number) => ({ id, url: `https://tab${id}.test/` })),
@@ -95,7 +96,7 @@ describe('Copilot bridge lease', () => {
     expect((await loadCopilotSettings()).mcpToken).toBe('');
     vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpUrl: 'https://gateway.test/mcp', mcpTokenUrl: 'https://gateway.test/mcp', mcpToken: 'saved-secret' } });
     expect((await loadCopilotSettings()).mcpToken).toBe('saved-secret');
-    expect(chrome.storage.local.get).toHaveBeenCalledWith([COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY]);
+    expect(chrome.storage.local.get).toHaveBeenCalledWith(COPILOT_SETTINGS_KEY);
   });
 
   it('does not start chat with a legacy provisioned key at a manually configured endpoint', async () => {
@@ -109,6 +110,54 @@ describe('Copilot bridge lease', () => {
     await client.prompt(2);
     expect(runAgent).not.toHaveBeenCalled();
     expect(client.events).toContainEqual(expect.objectContaining({ type: 'error' }));
+  });
+
+  it('requires re-entry after older builds seeded a key and then changed only the endpoint', async () => {
+    const { panel } = setup();
+    const raw: Record<string, unknown> = {};
+    vi.mocked(chrome.storage.local.get).mockResolvedValue(raw);
+    const storage: ProvisionStorage = {
+      get: async (keys) => chrome.storage.local.get(keys),
+      set: async (values) => { Object.assign(raw, values); },
+    };
+    const endpointA = 'https://seed-a.test/v1';
+    const endpointB = 'https://seed-b.test/v1';
+    const apiKey = 'seed-a-fixture-key';
+
+    // The legacy provisioner wrote settings and updated only the hashes for the fields it seeded.
+    const legacySeed = async (build: { baseUrl: string; apiKey?: string }) => {
+      const stored = raw[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
+      const hashes = raw[COPILOT_PROVISIONED_KEY] as { apiKey?: string } | undefined;
+      await storage.set({ [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, ...stored, ...build } });
+      await storage.set({
+        [COPILOT_PROVISIONED_KEY]: {
+          ...hashes,
+          baseUrl: await sha256(build.baseUrl),
+          ...(build.apiKey && { apiKey: await sha256(build.apiKey) }),
+        },
+      });
+    };
+    await legacySeed({ baseUrl: endpointA, apiKey });
+    await legacySeed({ baseUrl: endpointB });
+    expect(raw[COPILOT_SETTINGS_KEY]).toMatchObject({ baseUrl: endpointB, apiKey });
+    expect(raw[COPILOT_PROVISIONED_KEY]).toEqual({ baseUrl: await sha256(endpointB), apiKey: await sha256(apiKey) });
+
+    const expectChatBlocked = async () => {
+      const client = panel();
+      await client.prompt(2);
+      expect(runAgent).not.toHaveBeenCalled();
+      expect(client.events).toContainEqual(expect.objectContaining({ type: 'error' }));
+    };
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await expectChatBlocked();
+
+    expect(await provisionCopilot({ baseUrl: '', apiKey: '' }, storage)).toBe(true);
+    expect(raw[COPILOT_SETTINGS_KEY]).toMatchObject({ baseUrl: endpointB, apiKey: '' });
+    expect(raw[COPILOT_SETTINGS_KEY]).not.toHaveProperty('apiKeyUrl');
+    expect(await loadCopilotSettings()).toMatchObject({ baseUrl: endpointB, apiKey: '' });
+    await expectChatBlocked();
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("keeps MCP out of the copilot's tab while it runs, and nowhere else", async () => {
@@ -146,7 +195,7 @@ describe('Copilot bridge lease', () => {
     const { panel, handler } = setup();
     vi.mocked(chrome.storage.local.get).mockResolvedValue({
       [COPILOT_SETTINGS_KEY]: {
-        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', model: 'chat', mcpUrl: endpoint, mcpToken: 'plugin-secret', mcpTokenUrl: scenario === 'changed' ? 'https://old.test/mcp' : endpoint,
+        ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', apiKeyUrl: 'https://model.test/v1', model: 'chat', mcpUrl: endpoint, mcpToken: 'plugin-secret', mcpTokenUrl: scenario === 'changed' ? 'https://old.test/mcp' : endpoint,
       },
     });
     const seen: string[] = [];

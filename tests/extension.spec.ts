@@ -248,7 +248,7 @@ test('copilot model picker refreshes the paired catalog and persists the model f
   const previous = await worker.evaluate(keys => chrome.storage.local.get(keys), storageKeys);
   async function writeSettings(instance: 'old' | 'new') {
     await worker.evaluate(({ baseUrl, apiKey }) => chrome.storage.local.set({
-      copilotSettings: { baseUrl, apiKey, model: 'manual-alias' },
+      copilotSettings: { baseUrl, apiKey, apiKeyUrl: baseUrl, model: 'manual-alias' },
     }), { baseUrl: `${origin}/${instance}/v1`, apiKey: `${instance}-fixture-key` });
   }
 
@@ -261,7 +261,7 @@ test('copilot model picker refreshes the paired catalog and persists the model f
     }), {
       baseUrl: `${origin}/old/v1`,
       keyHash: createHash('sha256').update('legacy-fixture-key').digest('hex'),
-      urlHash: createHash('sha256').update(`${origin}/different/v1`).digest('hex'),
+      urlHash: createHash('sha256').update(`${origin}/old/v1`).digest('hex'),
     });
     await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
     await expect.poll(() => catalogAuth.slice()).toEqual([undefined]);

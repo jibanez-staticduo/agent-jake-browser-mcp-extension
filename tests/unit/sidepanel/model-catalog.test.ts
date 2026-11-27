@@ -65,12 +65,21 @@ describe('loadChatModelCatalog', () => {
     const rows = [
       'gpt-4.1-mini', 'text-embedding-3-small', 'chatgpt-defend1/gpt-4.1',
       'gpt-realtime', 'gpt-live-1.1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe-diarize',
+      'gpt-5-codex', 'gpt-5.2-codex-2026-01-14', 'gpt-5.1-codex-mini',
     ].map(id => ({
       id, object: 'model', created: 123, owned_by: 'fixture',
     }));
     const request = vi.fn<typeof fetch>().mockResolvedValueOnce(response(rows))
       .mockResolvedValueOnce(new Response(null, { status: 404 }));
     await expect(loadChatModelCatalog(base, 'example-key', signal, request)).resolves.toEqual(['gpt-4.1-mini']);
+  });
+
+  it('offers a Codex alias when LiteLLM explicitly advertises its Chat Completions bridge', async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(response([
+      { id: 'gpt-5-codex', mode: 'responses', supported_endpoints: ['/v1/chat/completions'] },
+    ]));
+    await expect(loadChatModelCatalog(SETUP_INSTANCES.nas.baseUrl, 'example-key', signal, request))
+      .resolves.toEqual(['gpt-5-codex']);
   });
 
   it('requires capability metadata on the configured LiteLLM endpoints', async () => {

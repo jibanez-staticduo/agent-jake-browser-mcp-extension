@@ -7,10 +7,9 @@
  * A key is seeded or rotated only at its build endpoint. SHA-256 hashes in
  * copilotProvisioned identify earlier seeds without storing the key twice.
  */
-import { CONFIG } from '@/types/config';
-import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY } from '@/types/copilot';
+import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
 import {
-  copilotStorageSnapshot, matchesProvisionedHash, resolveStoredCopilotSettings, sha256, type Provisioned,
+  matchesProvisionedHash, normalizeCopilotSettings, sha256, type Provisioned,
 } from '@/utils/copilot-settings';
 
 export interface ProvisionStorage {
@@ -18,16 +17,12 @@ export interface ProvisionStorage {
   set(values: Record<string, unknown>): Promise<void>;
 }
 
-export function buildProvision(): Provisioned {
-  return { baseUrl: CONFIG.COPILOT_BASE_URL.trim(), apiKey: CONFIG.COPILOT_API_KEY.trim() };
-}
-
 /** Returns true when it wrote something. */
 export async function provisionCopilot(build: Provisioned, storage: ProvisionStorage): Promise<boolean> {
-  const { stored, provisioned: last } = copilotStorageSnapshot(await storage.get([
-    COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY,
-  ]));
-  const settings = await resolveStoredCopilotSettings(stored, last);
+  const raw = await storage.get([COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY]);
+  const stored = (raw[COPILOT_SETTINGS_KEY] ?? {}) as Partial<CopilotSettings>;
+  const last = (raw[COPILOT_PROVISIONED_KEY] ?? {}) as Partial<Provisioned>;
+  const settings = normalizeCopilotSettings(stored, build);
   const provisioned: Partial<Provisioned> = { ...last };
   if (build.baseUrl) {
     const seededEndpoint = await matchesProvisionedHash(settings.baseUrl, last.baseUrl);

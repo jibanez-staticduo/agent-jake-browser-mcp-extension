@@ -27,7 +27,7 @@ import {
 import { cancelSetup, getSetupPairingInfo, resumeSetup, setOnSetupApproved, startSetup } from './setup-pairing';
 import { updateSettings } from './settings-update';
 import { log } from '@/utils/logger';
-import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
+import { chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
 import { disablePanelByDefault, openPanelForTab } from './panel-open';
 import {
@@ -48,8 +48,8 @@ import {
   writeServerSettings,
 } from '@/config/runtime';
 import { isSetupInstance } from '@/config/setup-instances';
-import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
-import { copilotStorageSnapshot, resolveStoredCopilotSettings } from '@/utils/copilot-settings';
+import { COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
+import { buildProvision, normalizeCopilotSettings } from '@/utils/copilot-settings';
 
 // Keep-alive alarm name - fires every 12 seconds to prevent service worker sleep
 const KEEPALIVE_ALARM = 'keepalive';
@@ -377,10 +377,9 @@ async function handlePopupMessage(message: {
       await initialized;
       const changes = payload as Partial<CopilotSettings>;
       const settings = await updateSettings(async () => {
-        const { stored, provisioned } = copilotStorageSnapshot(await chrome.storage.local.get([
-          COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY,
-        ]));
-        const next = await resolveStoredCopilotSettings({ ...stored, ...changes }, provisioned);
+        const raw = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
+        const stored = raw[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
+        const next = normalizeCopilotSettings({ ...stored, ...changes });
         await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: next });
         return next;
       });

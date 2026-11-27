@@ -1,26 +1,25 @@
-import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS, type CopilotSettings } from '@/types/copilot';
+import { COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS, type CopilotSettings } from '@/types/copilot';
 import { CONFIG } from '@/types/config';
 
 export type CopilotPreference = Partial<Pick<CopilotSettings, 'model' | 'mode'>>;
+export type Provisioned = Pick<CopilotSettings, 'baseUrl' | 'apiKey'>;
 export const COPILOT_CREDENTIAL_FIELDS = [
   ['baseUrl', 'apiKey', 'apiKeyUrl'],
   ['mcpUrl', 'mcpToken', 'mcpTokenUrl'],
 ] as const;
 
-/** Remove credentials whose endpoint binding is stale. */
-export function normalizeCopilotSettings(input?: Partial<CopilotSettings>): CopilotSettings {
+export function buildProvision(): Provisioned {
+  return { baseUrl: CONFIG.COPILOT_BASE_URL.trim(), apiKey: CONFIG.COPILOT_API_KEY.trim() };
+}
+
+/** Keep credentials with a matching endpoint binding or a pair supplied by this build. */
+export function normalizeCopilotSettings(input?: Partial<CopilotSettings>, build = buildProvision()): CopilotSettings {
   const settings = { ...DEFAULT_COPILOT_SETTINGS, ...input };
-  const buildKey = CONFIG.COPILOT_API_KEY.trim();
-  const buildUrl = CONFIG.COPILOT_BASE_URL.trim();
-  if (!settings.apiKeyUrl && buildKey && settings.apiKey === buildKey) {
-    if (!buildUrl || buildUrl !== settings.baseUrl) {
-      settings.apiKey = '';
-      delete settings.apiKeyUrl;
-    } else {
-      settings.apiKeyUrl = buildUrl;
-    }
+  // Legacy provisioning updated endpoint and key independently. Only a complete build pair can restore a missing binding.
+  if (!settings.apiKeyUrl && build.baseUrl && build.apiKey && settings.baseUrl === build.baseUrl && settings.apiKey === build.apiKey) {
+    settings.apiKeyUrl = build.baseUrl;
   }
-  if (settings.apiKeyUrl && settings.apiKeyUrl !== settings.baseUrl) {
+  if ((settings.apiKey || settings.apiKeyUrl) && (!settings.apiKeyUrl || settings.apiKeyUrl !== settings.baseUrl)) {
     settings.apiKey = '';
     delete settings.apiKeyUrl;
   }
@@ -30,8 +29,6 @@ export function normalizeCopilotSettings(input?: Partial<CopilotSettings>): Copi
   }
   return settings;
 }
-
-export type Provisioned = Pick<CopilotSettings, 'baseUrl' | 'apiKey'>;
 
 /** Hex SHA-256 of a seeded value; copilotProvisioned holds these, never the values. */
 export async function sha256(text: string): Promise<string> {
@@ -43,33 +40,9 @@ export async function matchesProvisionedHash(value?: string, hash?: string): Pro
   return Boolean(value && hash && await sha256(value) === hash);
 }
 
-export async function resolveStoredCopilotSettings(
-  stored: Partial<CopilotSettings>,
-  provisioned: Partial<Provisioned>,
-): Promise<CopilotSettings> {
-  if (!stored.apiKeyUrl && await matchesProvisionedHash(stored.apiKey, provisioned.apiKey)) {
-    if (await matchesProvisionedHash(stored.baseUrl, provisioned.baseUrl)) {
-      return normalizeCopilotSettings({ ...stored, apiKeyUrl: stored.baseUrl });
-    }
-    const safe = { ...stored, apiKey: '' };
-    delete safe.apiKeyUrl;
-    return normalizeCopilotSettings(safe);
-  }
-  return normalizeCopilotSettings(stored);
-}
-
-export function copilotStorageSnapshot(raw: Record<string, unknown>) {
-  return {
-    stored: (raw[COPILOT_SETTINGS_KEY] ?? {}) as Partial<CopilotSettings>,
-    provisioned: (raw[COPILOT_PROVISIONED_KEY] ?? {}) as Partial<Provisioned>,
-  };
-}
-
 export async function readCopilotSettings(): Promise<CopilotSettings> {
-  const { stored, provisioned } = copilotStorageSnapshot(await chrome.storage.local.get([
-    COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY,
-  ]));
-  return resolveStoredCopilotSettings(stored, provisioned);
+  const raw = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
+  return normalizeCopilotSettings(raw[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
 }
 
 async function save(changes: Partial<CopilotSettings>): Promise<CopilotSettings> {

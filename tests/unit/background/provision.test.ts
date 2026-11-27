@@ -28,18 +28,19 @@ describe('provisionCopilot', () => {
     expect(JSON.stringify(store.get(COPILOT_PROVISIONED_KEY))).not.toContain(BUILD.apiKey);
   });
 
-  it('does not overwrite what the user changed', async () => {
+  it('does not overwrite a key explicitly bound to a user-configured endpoint', async () => {
+    const manual = { baseUrl: 'https://mine.example/v1', apiKey: 'mine', apiKeyUrl: 'https://mine.example/v1' };
     const { store, storage } = mem({
-      [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://mine.example/v1', apiKey: 'mine' },
+      [COPILOT_SETTINGS_KEY]: manual,
       [COPILOT_PROVISIONED_KEY]: await hashes({ baseUrl: 'https://old.example/v1', apiKey: 'old' }),
     });
     expect(await provisionCopilot(BUILD, storage)).toBe(false);
-    expect(store.get(COPILOT_SETTINGS_KEY)).toEqual({ baseUrl: 'https://mine.example/v1', apiKey: 'mine' });
+    expect(store.get(COPILOT_SETTINGS_KEY)).toEqual(manual);
   });
 
   it('replaces a rotated key when the stored value is the last seeded one', async () => {
     const { store, storage } = mem({
-      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, ...BUILD, maxSteps: 10 },
+      [COPILOT_SETTINGS_KEY]: { ...DEFAULT_COPILOT_SETTINGS, ...BUILD, apiKeyUrl: BUILD.baseUrl, maxSteps: 10 },
       [COPILOT_PROVISIONED_KEY]: await hashes(BUILD),
     });
     expect(await provisionCopilot({ ...BUILD, apiKey: 'test-key-2' }, storage)).toBe(true);
@@ -91,17 +92,27 @@ describe('provisionCopilot', () => {
     expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...moved, apiKeyUrl: moved.baseUrl });
   });
 
-  it.each([undefined, BUILD.baseUrl])('migrates a legacy seed on a neutral build with endpoint evidence %s', async (provenance) => {
+  it.each([
+    ['no hashes', async () => ({})],
+    ['only a matching key hash', async () => ({ apiKey: await sha256(BUILD.apiKey) })],
+    ['matching hashes for both fields', () => hashes(BUILD)],
+  ] as const)('clears an unbound key on a neutral build with %s', async (_label, legacyHashes) => {
     const { store, storage } = mem({
       [COPILOT_SETTINGS_KEY]: { ...BUILD },
-      [COPILOT_PROVISIONED_KEY]: { apiKey: await sha256(BUILD.apiKey), baseUrl: provenance && await sha256(provenance) },
+      [COPILOT_PROVISIONED_KEY]: await legacyHashes(),
     });
     const neutral = { baseUrl: '', apiKey: '' };
     expect(await provisionCopilot(neutral, storage)).toBe(true);
-    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject(provenance
-      ? { ...BUILD, apiKeyUrl: BUILD.baseUrl }
-      : { baseUrl: BUILD.baseUrl, apiKey: '' });
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: BUILD.baseUrl, apiKey: '' });
+    expect(store.get(COPILOT_SETTINGS_KEY)).not.toHaveProperty('apiKeyUrl');
     expect(await provisionCopilot(neutral, storage)).toBe(false);
+  });
+
+  it('restores the binding when the current build supplies the exact stored pair', async () => {
+    const { store, storage } = mem({ [COPILOT_SETTINGS_KEY]: { ...BUILD } });
+    expect(await provisionCopilot(BUILD, storage)).toBe(true);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...BUILD, apiKeyUrl: BUILD.baseUrl });
+    expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual({ apiKey: await sha256(BUILD.apiKey) });
   });
 
   it('keeps a key explicitly bound to a manual endpoint even if it matches an old seed', async () => {
