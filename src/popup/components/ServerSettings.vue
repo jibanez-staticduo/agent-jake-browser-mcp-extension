@@ -84,6 +84,7 @@ const sourceLabel = computed(() => {
             type="text"
             spellcheck="false"
             placeholder="wss://agent-browser.example.com"
+            :disabled="server.saving"
             @input="server.markDraftTouched('serverUrlInput')"
           >
           <span class="field-hint">
@@ -105,10 +106,14 @@ const sourceLabel = computed(() => {
             spellcheck="false"
             autocomplete="off"
             placeholder="token de seguridad"
+            :disabled="server.saving"
             @input="server.markDraftTouched('tokenInput')"
           >
           <span v-if="server.info && server.info.hasToken && !server.tokenInput" class="field-hint">
             Token activo presente (compilado o emparejado).
+          </span>
+          <span v-else-if="server.info?.hasUnboundToken" class="field-hint">
+            Vuelve a introducir el token para este servidor o empareja el navegador.
           </span>
         </div>
 
@@ -122,6 +127,7 @@ const sourceLabel = computed(() => {
             maxlength="128"
             spellcheck="false"
             placeholder="Portátil / Chrome"
+            :disabled="server.saving"
             aria-describedby="server-label-hint"
             @input="server.markDraftTouched('labelInput')"
           >

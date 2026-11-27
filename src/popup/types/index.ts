@@ -79,6 +79,7 @@ export interface ServerConfigInfo {
   serverRevision: string | null;
   label?: string;
   hasToken: boolean;
+  hasUnboundToken?: boolean;
   connectionId: string;
   connected: boolean;
   pairing: PairingInfo;

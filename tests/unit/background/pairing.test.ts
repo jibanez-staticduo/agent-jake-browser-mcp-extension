@@ -40,6 +40,11 @@ vi.mock('@/utils/logger', () => ({
   },
 }));
 
+vi.mock('@/types/config', async (importOriginal) => {
+  const { CONFIG } = await importOriginal<typeof import('@/types/config')>();
+  return { CONFIG: { ...CONFIG, WS_HOST: 'build.example', WS_PORT: 443, WS_SECURE: true, WS_TOKEN: 'compiled-token' } };
+});
+
 import { STORAGE_KEYS } from '@/config/runtime';
 
 type PairingModule = typeof import('@/background/pairing');
@@ -93,7 +98,10 @@ describe('startPairing', () => {
       body: JSON.stringify({ otp: result.otp, connectionId: 'cid-1' }),
     });
 
-    expect(store[STORAGE_KEYS.pairCode]).toBe(result.otp);
+    expect(store[STORAGE_KEYS.pairCode]).toMatchObject({
+      otp: result.otp, wsUrl: 'wss://pair.example.com', serverRevision: null,
+      connectionId: 'cid-1', startedAt: expect.any(Number),
+    });
     expect(pairing.getPairingInfo().state).toBe('pending');
     pairing.cancelPairing();
   });
@@ -126,7 +134,7 @@ describe('pollPairStatusOnce', () => {
     expect(state).toBe('approved');
     expect(store[STORAGE_KEYS.token]).toBe('tok-123');
     expect(store[STORAGE_KEYS.serverRevision]).toMatch(/^[0-9a-f-]{36}$/);
-    expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
+    expect(store[STORAGE_KEYS.pairCode]).toBeNull();
     expect(onApproved).toHaveBeenCalledTimes(1);
     expect(pairing.getPairingInfo().state).toBe('approved');
     pairing.cancelPairing();
@@ -142,6 +150,23 @@ describe('pollPairStatusOnce', () => {
     expect(await pairing.pollPairStatusOnce()).toBe('expired');
     expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
     pairing.cancelPairing();
+  });
+
+  it('expires a local attempt before polling if its lifetime has elapsed', async () => {
+    const pairing = await loadPairing();
+    fetchMock.mockReturnValue(jsonResponse({ ok: true }));
+    await pairing.startPairing();
+    fetchMock.mockClear();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10 * 60 * 1000);
+
+    try {
+      expect(await pairing.pollPairStatusOnce()).toBe('expired');
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
+    } finally {
+      clock.mockRestore();
+      pairing.cancelPairing();
+    }
   });
 });
 
@@ -165,6 +190,7 @@ describe('maybeAutoStartPairing', () => {
   it('does nothing when a token already exists', async () => {
     const pairing = await loadPairing();
     store[STORAGE_KEYS.token] = 'already-set';
+    store[STORAGE_KEYS.tokenUrl] = 'wss://pair.example.com';
 
     await pairing.maybeAutoStartPairing();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -185,43 +211,83 @@ describe('maybeAutoStartPairing', () => {
     pairing.cancelPairing();
   });
 
-  it('resumes a pending pairing from storage without re-posting the OTP', async () => {
+  it.each(['wss://pair.example.com', 'wss://other.example/ws'])('resumes approval after restart with a stored token for %s', async (tokenUrl) => {
+    store[STORAGE_KEYS.token] = 'prior-token';
+    store[STORAGE_KEYS.tokenUrl] = tokenUrl;
+    store[STORAGE_KEYS.serverRevision] = 'rev-1';
+    const beforeRestart = await loadPairing();
+    fetchMock.mockReturnValue(jsonResponse({ ok: true }));
+    const { otp, approveUrl } = await beforeRestart.startPairing();
+    beforeRestart.cancelPairing();
+    fetchMock.mockClear();
     const pairing = await loadPairing();
-    store[STORAGE_KEYS.pairCode] = 'PENDING1';
-
-    await pairing.maybeAutoStartPairing();
-
-    const startPosts = fetchMock.mock.calls.filter(
-      (call) => String(call[0]).includes('/pair/start'),
-    );
-    expect(startPosts).toHaveLength(0);
-    const info = pairing.getPairingInfo();
-    expect(info.state).toBe('pending');
-    expect(info.otp).toBe('PENDING1');
-    expect(info.approveUrl).toBe('https://pair.example.com/pair?otp=PENDING1');
-    pairing.cancelPairing();
-  });
-
-  it('resumes the saved code when the existing token is bound to a different endpoint', async () => {
-    const pairing = await loadPairing();
-    store[STORAGE_KEYS.token] = 'prior-server-token';
-    store[STORAGE_KEYS.tokenUrl] = 'wss://other.example/ws';
-    store[STORAGE_KEYS.pairCode] = 'PENDING1';
-    fetchMock.mockImplementation(() => jsonResponse({ state: 'pending' }));
+    fetchMock.mockReturnValue(jsonResponse({ state: 'approved', token: 'renewed-token' }));
 
     try {
       await pairing.maybeAutoStartPairing();
-      expect(pairing.getPairingInfo()).toMatchObject({ state: 'pending', otp: 'PENDING1' });
-      expect(store[STORAGE_KEYS.pairCode]).toBe('PENDING1');
-      expect(await pairing.pollPairStatusOnce()).toBe('pending');
+      expect(pairing.getPairingInfo()).toMatchObject({ state: 'pending', otp, approveUrl });
+      expect(await pairing.pollPairStatusOnce()).toBe('approved');
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock).toHaveBeenCalledWith(
-        'https://pair.example.com/pair/status?otp=PENDING1',
+        `https://pair.example.com/pair/status?otp=${otp}`,
         expect.objectContaining({ method: 'GET' }),
       );
+      expect(store[STORAGE_KEYS.token]).toBe('renewed-token');
+      expect(store[STORAGE_KEYS.tokenUrl]).toBe('wss://pair.example.com');
     } finally {
       pairing.cancelPairing();
     }
+  });
+
+  it('resumes a manual renewal after restart when only the compiled token exists', async () => {
+    delete store[STORAGE_KEYS.serverUrl];
+    fetchMock.mockImplementation((url: string) => url.endsWith('config.json')
+      ? jsonResponse({}, false, 404) : jsonResponse({ state: 'approved', token: 'renewed-token' }));
+    const beforeRestart = await loadPairing();
+    const { getEffectiveConfig } = await import('@/config/runtime');
+    expect((await getEffectiveConfig()).token).toBe('compiled-token');
+    const { otp } = await beforeRestart.startPairing();
+    beforeRestart.cancelPairing();
+    fetchMock.mockClear();
+
+    const pairing = await loadPairing();
+    try {
+      await pairing.maybeAutoStartPairing();
+      expect(pairing.getPairingInfo()).toMatchObject({ state: 'pending', otp });
+      expect(await pairing.pollPairStatusOnce()).toBe('approved');
+      expect(fetchMock).toHaveBeenCalledWith(`https://build.example/pair/status?otp=${otp}`, expect.anything());
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/pair/start'))).toBe(false);
+      expect(store[STORAGE_KEYS.token]).toBe('renewed-token');
+      expect(store[STORAGE_KEYS.tokenUrl]).toBe('wss://build.example');
+    } finally {
+      pairing.cancelPairing();
+    }
+  });
+
+  it.each([
+    ['changed endpoint', { wsUrl: 'wss://other.example' }],
+    ['changed revision', { serverRevision: 'old-revision' }],
+    ['changed connection identity', { connectionId: 'other-identity' }],
+    ['expired lifetime', { startedAt: 0 }],
+  ])('drops a saved attempt with %s', async (_reason, overrides) => {
+    const pairing = await loadPairing();
+    store[STORAGE_KEYS.pairCode] = {
+      otp: 'PENDNG23', wsUrl: 'wss://pair.example.com', serverRevision: null,
+      connectionId: 'cid-1', startedAt: Date.now(), ...overrides,
+    };
+    await pairing.maybeAutoStartPairing();
+    expect(pairing.getPairingInfo().state).toBe('idle');
+    expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('clears a bare legacy code without sending it to the current endpoint', async () => {
+    const pairing = await loadPairing();
+    store[STORAGE_KEYS.pairCode] = 'PENDNG23';
+    await pairing.maybeAutoStartPairing();
+    expect(pairing.getPairingInfo().state).toBe('idle');
+    expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

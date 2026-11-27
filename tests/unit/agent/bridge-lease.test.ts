@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentStopped, runAgent, type AgentDeps, type ToolOutcome } from '@/background/agent/loop';
 import { createCopilotTrafficGate, loadCopilotSettings, registerCopilotBridge } from '@/background/agent/bridge';
-import { COPILOT_PORT, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
+import { COPILOT_PORT, COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
+import { sha256 } from '@/utils/copilot-settings';
 import type { TabManager } from '@/background/tab-manager';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 import type { PanelToWorker, WorkerToPanel } from '@/types/copilot';
@@ -94,7 +95,20 @@ describe('Copilot bridge lease', () => {
     expect((await loadCopilotSettings()).mcpToken).toBe('');
     vi.mocked(chrome.storage.local.get).mockResolvedValueOnce({ [COPILOT_SETTINGS_KEY]: { mcpUrl: 'https://gateway.test/mcp', mcpTokenUrl: 'https://gateway.test/mcp', mcpToken: 'saved-secret' } });
     expect((await loadCopilotSettings()).mcpToken).toBe('saved-secret');
-    expect(chrome.storage.local.get).toHaveBeenCalledWith(COPILOT_SETTINGS_KEY);
+    expect(chrome.storage.local.get).toHaveBeenCalledWith([COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY]);
+  });
+
+  it('does not start chat with a legacy provisioned key at a manually configured endpoint', async () => {
+    const { panel } = setup();
+    const apiKey = 'earlier-build-key';
+    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://manual.test/v1', apiKey },
+      [COPILOT_PROVISIONED_KEY]: { baseUrl: await sha256('https://seed.test/v1'), apiKey: await sha256(apiKey) },
+    });
+    const client = panel();
+    await client.prompt(2);
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(client.events).toContainEqual(expect.objectContaining({ type: 'error' }));
   });
 
   it("keeps MCP out of the copilot's tab while it runs, and nowhere else", async () => {

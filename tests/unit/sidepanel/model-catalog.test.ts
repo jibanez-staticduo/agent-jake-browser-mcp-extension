@@ -62,12 +62,15 @@ describe('loadChatModelCatalog', () => {
   });
 
   it('offers standard OpenAI models from a manual endpoint without a model info route', async () => {
-    const rows = ['gpt-4.1', 'text-embedding-3-small', 'chatgpt-defend1/gpt-4.1'].map(id => ({
+    const rows = [
+      'gpt-4.1-mini', 'text-embedding-3-small', 'chatgpt-defend1/gpt-4.1',
+      'gpt-realtime', 'gpt-live-1.1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe-diarize',
+    ].map(id => ({
       id, object: 'model', created: 123, owned_by: 'fixture',
     }));
     const request = vi.fn<typeof fetch>().mockResolvedValueOnce(response(rows))
       .mockResolvedValueOnce(new Response(null, { status: 404 }));
-    await expect(loadChatModelCatalog(base, 'example-key', signal, request)).resolves.toEqual(['gpt-4.1']);
+    await expect(loadChatModelCatalog(base, 'example-key', signal, request)).resolves.toEqual(['gpt-4.1-mini']);
   });
 
   it('requires capability metadata on the configured LiteLLM endpoints', async () => {

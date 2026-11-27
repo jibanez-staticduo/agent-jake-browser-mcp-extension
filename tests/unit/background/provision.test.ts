@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { provisionCopilot, sha256, type ProvisionStorage } from '@/background/provision';
+import { provisionCopilot, type ProvisionStorage } from '@/background/provision';
+import { sha256 } from '@/utils/copilot-settings';
 import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 
 const hashes = async (v: { baseUrl: string; apiKey: string }) => ({ baseUrl: await sha256(v.baseUrl), apiKey: await sha256(v.apiKey) });
@@ -8,8 +9,8 @@ const BUILD = { baseUrl: 'https://litellm.example/v1', apiKey: 'test-key-1' };
 function mem(initial: Record<string, unknown> = {}) {
   const store = new Map<string, unknown>(Object.entries(initial));
   const storage: ProvisionStorage = {
-    get: async (k) => store.get(k),
-    set: async (k, v) => { store.set(k, v); },
+    get: async (keys) => Object.fromEntries(keys.map((key) => [key, store.get(key)])),
+    set: async (values) => { for (const [key, value] of Object.entries(values)) store.set(key, value); },
   };
   return { store, storage };
 }
@@ -68,7 +69,7 @@ describe('provisionCopilot', () => {
     const { store, storage } = mem();
     await provisionCopilot(BUILD, storage);
     const manual = { baseUrl: 'https://mine.example/v1', apiKey: '', apiKeyUrl: '' };
-    await storage.set(COPILOT_SETTINGS_KEY, manual);
+    await storage.set({ [COPILOT_SETTINGS_KEY]: manual });
     expect(await provisionCopilot(BUILD, storage)).toBe(false);
     expect(store.get(COPILOT_SETTINGS_KEY)).toEqual(manual);
   });
@@ -88,6 +89,30 @@ describe('provisionCopilot', () => {
     const moved = { baseUrl: 'https://replacement.example/v1', apiKey: 'new-key' };
     await provisionCopilot(moved, storage);
     expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...moved, apiKeyUrl: moved.baseUrl });
+  });
+
+  it.each([undefined, BUILD.baseUrl])('migrates a legacy seed on a neutral build with endpoint evidence %s', async (provenance) => {
+    const { store, storage } = mem({
+      [COPILOT_SETTINGS_KEY]: { ...BUILD },
+      [COPILOT_PROVISIONED_KEY]: { apiKey: await sha256(BUILD.apiKey), baseUrl: provenance && await sha256(provenance) },
+    });
+    const neutral = { baseUrl: '', apiKey: '' };
+    expect(await provisionCopilot(neutral, storage)).toBe(true);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject(provenance
+      ? { ...BUILD, apiKeyUrl: BUILD.baseUrl }
+      : { baseUrl: BUILD.baseUrl, apiKey: '' });
+    expect(await provisionCopilot(neutral, storage)).toBe(false);
+  });
+
+  it('keeps a key explicitly bound to a manual endpoint even if it matches an old seed', async () => {
+    const manual = { baseUrl: 'https://mine.example/v1', apiKey: BUILD.apiKey, apiKeyUrl: 'https://mine.example/v1' };
+    const { store, storage } = mem({
+      [COPILOT_SETTINGS_KEY]: manual,
+      [COPILOT_PROVISIONED_KEY]: await hashes(BUILD),
+    });
+    expect(await provisionCopilot({ baseUrl: '', apiKey: '' }, storage)).toBe(false);
+    expect(await provisionCopilot(BUILD, storage)).toBe(false);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toEqual(manual);
   });
 
   it('never seeds a build key without its own configured endpoint', async () => {

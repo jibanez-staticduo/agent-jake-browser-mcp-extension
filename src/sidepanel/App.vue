@@ -7,6 +7,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
   COPILOT_PORT,
+  COPILOT_PROVISIONED_KEY,
   COPILOT_SETTINGS_KEY,
   DEFAULT_COPILOT_SETTINGS,
   copilotMissing,
@@ -24,7 +25,7 @@ import ModelPicker from './ModelPicker.vue';
 import { loadChatModelCatalog } from './model-catalog';
 import { explainError, isControllable, missingText as describeMissing } from './setup';
 import OptionsView from './OptionsView.vue';
-import { normalizeCopilotSettings, saveCopilotPreference, saveCopilotSettings } from '@/utils/copilot-settings';
+import { readCopilotSettings, saveCopilotPreference, saveCopilotSettings } from '@/utils/copilot-settings';
 import RequestCard from './RequestCard.vue';
 import {
   blocksOf,
@@ -533,22 +534,21 @@ const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrom
   }
 };
 
-// The service worker may seed the settings (provision.ts) after the panel is open.
+async function refreshCopilotSettings() {
+  const revision = ++settingsRevision;
+  const stored = await readCopilotSettings().catch(() => ({ ...DEFAULT_COPILOT_SETTINGS }));
+  if (settingsRevision === revision) settings.value = { ...stored, ...pendingPreferences };
+}
+
 const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-  if (area !== 'local' || !(COPILOT_SETTINGS_KEY in changes)) return;
-  const next = changes[COPILOT_SETTINGS_KEY].newValue as Partial<CopilotSettings> | undefined;
-  settingsRevision += 1;
-  settings.value = { ...normalizeCopilotSettings(next), ...pendingPreferences };
+  if (area !== 'local' || !(COPILOT_SETTINGS_KEY in changes || COPILOT_PROVISIONED_KEY in changes)) return;
+  void refreshCopilotSettings();
 };
 
 onMounted(async () => {
   chrome.storage.onChanged.addListener(onStorage);
   windowId = (await chrome.windows.getCurrent()).id ?? null;
-  const revision = settingsRevision;
-  const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-  if (settingsRevision === revision) {
-    settings.value = normalizeCopilotSettings(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
-  }
+  await refreshCopilotSettings();
   const id = await currentChatId();
   const last = id ? (await listChats()).find((c) => c.id === id) : undefined;
   if (last) {
@@ -564,6 +564,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  settingsRevision += 1;
   catalogRequest?.abort();
   chrome.tabs.onUpdated.removeListener(onUpdated);
   chrome.storage.onChanged.removeListener(onStorage);

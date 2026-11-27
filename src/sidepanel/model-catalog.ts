@@ -2,7 +2,7 @@ import { SETUP_INSTANCES } from '@/config/setup-instances';
 
 const ACCOUNT_ROUTE = /^chatgpt(?:-[^/]+)?\//i;
 const GENERAL_GPT = /^gpt-\d[^/]*$/i;
-const NON_CHAT_ID = /(?:^|[-_./])(?:bge|embeddings?|embed|rerank(?:er)?|whisper|stt|tts|omnivoice|imagine|image|video|probe|moderation|dall-e)(?=$|[-_./])/i;
+const NON_CHAT_ID = /(?:^|[-_./])(?:bge|embeddings?|embed|rerank(?:er)?|whisper|stt|tts|realtime|transcrib(?:e|er)|transcription|gpt-live|omnivoice|imagine|image|video|probe|moderation|dall-e)(?=$|[-_./])/i;
 const MANAGED_BASES = new Set<string>(Object.values(SETUP_INSTANCES).map(({ baseUrl }) => baseUrl));
 
 interface ModelMetadata {

@@ -48,8 +48,8 @@ import {
   writeServerSettings,
 } from '@/config/runtime';
 import { isSetupInstance } from '@/config/setup-instances';
-import { COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
-import { normalizeCopilotSettings } from '@/utils/copilot-settings';
+import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
+import { copilotStorageSnapshot, resolveStoredCopilotSettings } from '@/utils/copilot-settings';
 
 // Keep-alive alarm name - fires every 12 seconds to prevent service worker sleep
 const KEEPALIVE_ALARM = 'keepalive';
@@ -87,6 +87,9 @@ async function initialize(): Promise<void> {
   log.info('Initializing Agent Jake Browser MCP Extension');
 
   await preparePrivateStorage();
+  await updateSettings(() => provisionCopilot(buildProvision(), chromeProvisionStorage())).catch((error) => {
+    log.warn('[Provision] Copilot settings initialization failed:', error);
+  });
 
   // Create tab manager
   tabManager = new TabManager();
@@ -163,15 +166,7 @@ async function ensureUpdateAlarm(): Promise<void> {
   }
 }
 
-/** Copilot endpoint/key seeded by the build (provision.ts); runs on install, reload and browser start. */
-function runProvision(): void {
-  void initialized?.then(() => updateSettings(() => provisionCopilot(buildProvision(), chromeProvisionStorage()))).catch((error) => {
-    log.warn('[Provision] copilot settings not seeded:', error);
-  });
-}
-
 chrome.runtime.onStartup.addListener(() => {
-  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });
@@ -297,13 +292,14 @@ async function handlePopupMessage(message: {
 
     case 'getServerConfig': {
       await initialized;
-      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision } = await getServerSettings();
+      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision, hasUnboundToken } = await getServerSettings();
       return {
         effectiveUrl,
         fromStorage: cfg.fromStorage,
         source: cfg.source,
         storedServerUrl,
         storedToken,
+        hasUnboundToken,
         serverRevision,
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
@@ -381,9 +377,10 @@ async function handlePopupMessage(message: {
       await initialized;
       const changes = payload as Partial<CopilotSettings>;
       const settings = await updateSettings(async () => {
-        const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-        const previous = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
-        const next = normalizeCopilotSettings({ ...previous, ...changes });
+        const { stored, provisioned } = copilotStorageSnapshot(await chrome.storage.local.get([
+          COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY,
+        ]));
+        const next = await resolveStoredCopilotSettings({ ...stored, ...changes }, provisioned);
         await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: next });
         return next;
       });
@@ -454,7 +451,6 @@ async function handlePopupMessage(message: {
  */
 chrome.runtime.onInstalled.addListener((details) => {
   log.info(`Extension installed: ${details.reason}`);
-  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });

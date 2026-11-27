@@ -5,7 +5,7 @@
 
 import { CONFIG } from '@/types/config';
 import { log } from '@/utils/logger';
-import { buildDisplayUrl, buildWsUrl, getEffectiveConfig, serverRequiresToken, type RuntimeServerConfig } from '@/config/runtime';
+import { buildDisplayUrl, buildWsUrl, getEffectiveConfig, serverRequiresToken } from '@/config/runtime';
 import { logConnection, logError } from './activity-log';
 import type { IncomingMessage, OutgoingMessage } from '@/types/messages';
 
@@ -17,18 +17,22 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface ConnectionAttempt {
+  resolve: (connected: boolean) => void;
+  reject: (error: unknown) => void;
+}
+
 export class WebSocketClient {
   private socket: WebSocket | null = null;
   private messageHandler: MessageHandler | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
-  private isConnecting = false;
+  private connectionAttempt: ConnectionAttempt | null = null;
   private shouldReconnect = true;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private effectiveUrl = '';
   private awaitingTokenUrl = '';
-  private connectionGeneration = 0;
 
   isAwaitingToken(): boolean {
     return this.awaitingTokenUrl !== '';
@@ -60,7 +64,8 @@ export class WebSocketClient {
    * The endpoint comes from the runtime config (chrome.storage overrides
    * win over build-time defaults) and the handshake query always carries
    * `connectionId`, plus `token` when one is available. Returns false while
-   * waiting for credentials or another connection attempt.
+   * waiting for credentials or another connection attempt and when disconnected
+   * before the attempt completes.
    */
   async connect(): Promise<boolean> {
     log.info(`[WS] connect() called, current state: ${this.socket?.readyState ?? 'no socket'}, attempts: ${this.reconnectAttempts}`);
@@ -70,102 +75,98 @@ export class WebSocketClient {
       return true;
     }
 
-    if (this.isConnecting) {
+    if (this.connectionAttempt) {
       log.debug('[WS] Connection in progress');
       return false;
     }
 
-    this.isConnecting = true;
     this.shouldReconnect = true;
-    const generation = this.connectionGeneration;
-
-    let cfg: RuntimeServerConfig;
-    try {
-      cfg = await getEffectiveConfig();
-      this.effectiveUrl = buildDisplayUrl(cfg);
-      // The legacy loopback build default uses a dedicated WS port without HTTP.
-      // Other destinations probe auth metadata, with WS-only 426 handled by runtime.
-      const legacyLocalDefault = cfg.source === 'build' && !cfg.secure && cfg.scheme === 'ws'
-        && ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(cfg.hostname);
-      if (!cfg.token && !legacyLocalDefault
-        && (this.awaitingTokenUrl === this.effectiveUrl || await serverRequiresToken(cfg) === true)) {
-        if (generation !== this.connectionGeneration) return false;
-        this.awaitingTokenUrl = this.effectiveUrl;
-        this.isConnecting = false;
-        this.shouldReconnect = false;
-        log.info('[WS] Server requires authentication; waiting for pairing or a configured token');
-        return false;
-      }
-      if (generation !== this.connectionGeneration) return false;
-      this.awaitingTokenUrl = '';
-    } catch (error) {
-      if (generation !== this.connectionGeneration) return false;
-      this.isConnecting = false;
-      throw error;
-    }
-
-    return new Promise((resolve, reject) => {
-      try {
-        const url = buildWsUrl(cfg);
-        const displayUrl = buildDisplayUrl(cfg);
-        log.info(`Connecting to ${displayUrl}`);
-
-        this.socket = new WebSocket(url);
-        const socket = this.socket;
-
-        this.socket.onopen = () => {
-          log.info('WebSocket connected');
-          this.isConnecting = false;
-          this.reconnectAttempts = 0;
-          logConnection('ws_connect', `Connected to browser-mcp at ${displayUrl}`, true, { url: displayUrl });
-          this.startHeartbeat();
-          resolve(true);
-        };
-
-        this.socket.onclose = (event) => {
-          // Ignore late events from a socket replaced by reload()/disconnect().
-          if (this.socket !== socket) {
-            log.debug('[WS] Ignoring close from stale socket');
-            return;
-          }
-          log.info(`WebSocket closed: ${event.code} ${event.reason}`);
-          this.isConnecting = false;
-          this.stopHeartbeat();
-          this.socket = null;
-          logConnection('ws_close', `WebSocket closed: ${event.code} ${event.reason || 'No reason'}`, true, { code: event.code, reason: event.reason });
-          reject(new Error(`WebSocket closed before connecting (code ${event.code})`));
-          this.handleDisconnect();
-        };
-
-        this.socket.onerror = () => {
-          if (this.socket !== socket) {
-            return;
-          }
-          const diagnostic = cfg.token
-            ? 'WebSocket connection failed; check server availability and the configured token or pair again'
-            : 'WebSocket connection failed; check server availability';
-          log.error(diagnostic);
-          this.isConnecting = false;
-          logError('ws_error', diagnostic);
-          reject(new Error(diagnostic));
-        };
-
-        this.socket.onmessage = (event) => {
-          this.handleMessage(socket, event.data);
-        };
-      } catch (error) {
-        this.isConnecting = false;
-        reject(error);
-      }
+    return new Promise<boolean>((resolve, reject) => {
+      const attempt = { resolve, reject };
+      this.connectionAttempt = attempt;
+      this.openSocket(attempt).catch((error) => this.failConnection(attempt, error));
     });
+  }
+
+  private completeConnection(attempt: ConnectionAttempt, connected: boolean): void {
+    if (this.connectionAttempt !== attempt) return;
+    this.connectionAttempt = null;
+    attempt.resolve(connected);
+  }
+
+  private failConnection(attempt: ConnectionAttempt, error: unknown): void {
+    if (this.connectionAttempt !== attempt) return;
+    this.connectionAttempt = null;
+    attempt.reject(error);
+  }
+
+  /** Read runtime config and register handlers for the current attempt. */
+  private async openSocket(attempt: ConnectionAttempt): Promise<void> {
+    const cfg = await getEffectiveConfig();
+    if (this.connectionAttempt !== attempt) return;
+
+    const displayUrl = buildDisplayUrl(cfg);
+    this.effectiveUrl = displayUrl;
+    // The legacy loopback build default uses a dedicated WS port without HTTP.
+    // Other destinations probe auth metadata, with WS-only 426 handled by runtime.
+    const legacyLocalDefault = cfg.source === 'build' && !cfg.secure && cfg.scheme === 'ws'
+      && ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(cfg.hostname);
+    const waitingForToken = !cfg.token && !legacyLocalDefault
+      && (this.awaitingTokenUrl === displayUrl || await serverRequiresToken(cfg) === true);
+    if (this.connectionAttempt !== attempt) return;
+
+    if (waitingForToken) {
+      this.awaitingTokenUrl = displayUrl;
+      this.shouldReconnect = false;
+      log.info('[WS] Server requires authentication; waiting for pairing or a configured token');
+      this.completeConnection(attempt, false);
+      return;
+    }
+    this.awaitingTokenUrl = '';
+
+    log.info(`Connecting to ${displayUrl}`);
+    const socket = new WebSocket(buildWsUrl(cfg));
+    this.socket = socket;
+
+    socket.onopen = () => {
+      if (this.socket !== socket || this.connectionAttempt !== attempt) return;
+      log.info('WebSocket connected');
+      this.reconnectAttempts = 0;
+      logConnection('ws_connect', `Connected to browser-mcp at ${displayUrl}`, true, { url: displayUrl });
+      this.startHeartbeat();
+      this.completeConnection(attempt, true);
+    };
+
+    socket.onclose = (event) => {
+      if (this.socket !== socket) return;
+      log.info(`WebSocket closed: ${event.code} ${event.reason}`);
+      this.stopHeartbeat();
+      this.socket = null;
+      logConnection('ws_close', `WebSocket closed: ${event.code} ${event.reason || 'No reason'}`, true, { code: event.code, reason: event.reason });
+      this.failConnection(attempt, new Error(`WebSocket closed before connecting (code ${event.code})`));
+      this.handleDisconnect();
+    };
+
+    socket.onerror = () => {
+      if (this.socket !== socket) return;
+      const diagnostic = cfg.token
+        ? 'WebSocket connection failed; check server availability and the configured token or pair again'
+        : 'WebSocket connection failed; check server availability';
+      log.error(diagnostic);
+      logError('ws_error', diagnostic);
+      this.failConnection(attempt, new Error(diagnostic));
+    };
+
+    socket.onmessage = (event) => {
+      this.handleMessage(socket, event.data);
+    };
   }
 
   /**
    * Disconnect from the server.
    */
   disconnect(): void {
-    this.connectionGeneration++;
-    this.isConnecting = false;
+    if (this.connectionAttempt) this.completeConnection(this.connectionAttempt, false);
     this.awaitingTokenUrl = '';
     this.shouldReconnect = false;
 
@@ -177,8 +178,9 @@ export class WebSocketClient {
     this.stopHeartbeat();
 
     if (this.socket) {
-      this.socket.close(1000, 'Client disconnect');
+      const socket = this.socket;
       this.socket = null;
+      socket.close(1000, 'Client disconnect');
     }
 
     // Reject all pending requests
@@ -215,7 +217,7 @@ export class WebSocketClient {
    * Check if a connection attempt or scheduled reconnect is already pending.
    */
   isReconnecting(): boolean {
-    return this.isConnecting || this.reconnectTimer !== null;
+    return this.connectionAttempt !== null || this.reconnectTimer !== null;
   }
 
   /**

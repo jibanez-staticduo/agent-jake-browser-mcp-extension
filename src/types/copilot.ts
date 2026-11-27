@@ -20,7 +20,7 @@ export interface CopilotSettings {
   /** OpenAI-compatible base URL, e.g. https://litellm.example.com/v1 */
   baseUrl: string;
   apiKey: string;
-  /** Exact endpoint associated with an automatically provisioned API key. */
+  /** Exact endpoint where the API key was provisioned or entered. */
   apiKeyUrl?: string;
   model: string;
   mode: CopilotMode;

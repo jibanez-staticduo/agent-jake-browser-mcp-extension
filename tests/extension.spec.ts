@@ -22,6 +22,7 @@
  */
 import { test, expect, chromium, type BrowserContext, type Worker } from '@playwright/test';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -240,10 +241,11 @@ test('copilot model picker refreshes the paired catalog and persists the model f
   });
   await new Promise<void>((resolve) => catalog.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(catalog.address() as AddressInfo).port}`;
-  const panel = await context.newPage();
+  let panel = await context.newPage();
   const target = await context.newPage();
   const worker = await getExtensionServiceWorker(context);
-  const previous = await worker.evaluate(() => chrome.storage.local.get('copilotSettings'));
+  const storageKeys = ['copilotSettings', 'copilotProvisioned'];
+  const previous = await worker.evaluate(keys => chrome.storage.local.get(keys), storageKeys);
   async function writeSettings(instance: 'old' | 'new') {
     await worker.evaluate(({ baseUrl, apiKey }) => chrome.storage.local.set({
       copilotSettings: { baseUrl, apiKey, model: 'manual-alias' },
@@ -253,7 +255,23 @@ test('copilot model picker refreshes the paired catalog and persists the model f
   try {
     await target.goto(`${fixtureOrigin}/fixture`);
     await target.bringToFront();
+    await worker.evaluate(({ baseUrl, keyHash, urlHash }) => chrome.storage.local.set({
+      copilotSettings: { baseUrl, apiKey: 'legacy-fixture-key', model: 'manual-alias' },
+      copilotProvisioned: { apiKey: keyHash, baseUrl: urlHash },
+    }), {
+      baseUrl: `${origin}/old/v1`,
+      keyHash: createHash('sha256').update('legacy-fixture-key').digest('hex'),
+      urlHash: createHash('sha256').update(`${origin}/different/v1`).digest('hex'),
+    });
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+    await expect.poll(() => catalogAuth.slice()).toEqual([undefined]);
+    await panel.getByRole('button', { name: /Opciones/ }).first().click();
+    await expect(panel.getByLabel('Endpoint (OpenAI-compatible)')).toHaveValue(`${origin}/old/v1`);
+    await expect(panel.getByLabel('API key')).toHaveValue('');
+    await panel.close();
     await writeSettings('old');
+    panel = await context.newPage();
+    await target.bringToFront();
     await panel.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
     await panel.getByRole('button', { name: /Manual Alias/ }).click();
     await expect(panel.getByRole('option', { name: /old-model/ })).toBeVisible();
@@ -272,10 +290,12 @@ test('copilot model picker refreshes the paired catalog and persists the model f
     await composer.press('Enter');
     await expect(panel.getByText('Fixture response')).toBeVisible();
     expect(served).toEqual([{ model: 'gpt-6.2-sol', authorization: 'Bearer new-fixture-key' }]);
-    expect(catalogAuth).toEqual(['Bearer old-fixture-key', 'Bearer new-fixture-key']);
+    expect(catalogAuth).toEqual([undefined, 'Bearer old-fixture-key', 'Bearer new-fixture-key']);
   } finally {
-    if ('copilotSettings' in previous) await worker.evaluate((previous) => chrome.storage.local.set(previous), previous);
-    else await worker.evaluate(() => chrome.storage.local.remove('copilotSettings'));
+    await worker.evaluate(async ({ storageKeys, previous }) => {
+      await chrome.storage.local.remove(storageKeys);
+      await chrome.storage.local.set(previous);
+    }, { storageKeys, previous });
     await panel.close();
     await target.close();
     await new Promise<void>((resolve) => catalog.close(() => resolve()));

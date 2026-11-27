@@ -9,7 +9,7 @@
  *   ajb.token         token obtained via pairing or typed by the user
  *   ajb.label         manual name for this device/browser
  *   ajb.connectionId  persistent UUID that identifies this browser install
- *   ajb.pairCode      OTP of an in-flight pairing flow (survives SW restarts)
+ *   ajb.pairCode      pending pairing with its endpoint, revision and expiry
  *
  * A packaged `config.json` at the extension root (injected by the server when
  * it builds the download zip) sits between those two levels. Full precedence:
@@ -222,10 +222,10 @@ export async function getServerSettings() {
   const effectiveUrl = buildDisplayUrl(server);
   const rawToken = stored[STORAGE_KEYS.token];
   const tokenUrl = stored[STORAGE_KEYS.tokenUrl];
-  const storedToken = typeof rawToken === 'string' && (!tokenUrl || tokenUrl === effectiveUrl) ? rawToken : '';
-  const token = typeof rawToken === 'string' ? storedToken : (
-    effectiveUrl === buildDisplayUrl(buildServer) ? CONFIG.WS_TOKEN : ''
-  );
+  const storedToken = typeof rawToken === 'string' && tokenUrl === effectiveUrl ? rawToken : '';
+  const hasUnboundToken = typeof rawToken === 'string' && rawToken.length > 0 && (typeof tokenUrl !== 'string' || !tokenUrl);
+  const buildToken = effectiveUrl === buildDisplayUrl(buildServer) ? CONFIG.WS_TOKEN : '';
+  const token = typeof rawToken !== 'string' || hasUnboundToken ? buildToken : storedToken;
 
   const storedId = stored[STORAGE_KEYS.connectionId];
   const connectionId = typeof storedId === 'string' && storedId ? storedId : await ensureConnectionId();
@@ -241,7 +241,7 @@ export async function getServerSettings() {
   return {
     config, effectiveUrl, storedServerUrl, storedToken,
     serverRevision: typeof revision === 'string' ? revision : null,
-    hasUnboundToken: Boolean(storedToken && !tokenUrl),
+    hasUnboundToken,
   };
 }
 
@@ -266,9 +266,6 @@ export async function writeServerSettings(
   if (token !== undefined) {
     values[STORAGE_KEYS.token] = token;
     values[STORAGE_KEYS.tokenUrl] = effectiveUrl;
-  } else if (serverUrl !== undefined && previous.hasUnboundToken) {
-    // Keep legacy tokens with the endpoint that already used them.
-    values[STORAGE_KEYS.tokenUrl] = previous.effectiveUrl;
   }
   if (label !== undefined) values[STORAGE_KEYS.label] = normalizeLabel(label);
   if (Object.keys(values).length) await storageSet(values);
@@ -297,10 +294,10 @@ export async function setToken(token: string | null, boundUrl?: string): Promise
     await storageRemove([STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl]);
     return;
   }
-  const stored = await storageGet([STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl]);
   await storageSet({
     [STORAGE_KEYS.token]: token,
-    [STORAGE_KEYS.tokenUrl]: boundUrl ?? (token === stored[STORAGE_KEYS.token] ? stored[STORAGE_KEYS.tokenUrl] ?? '' : ''),
+    [STORAGE_KEYS.tokenUrl]: boundUrl ?? (await getServerSettings()).effectiveUrl,
+    [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
   });
 }
 

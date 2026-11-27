@@ -269,6 +269,7 @@ describe('getEffectiveConfig token', () => {
   it('applies token precedence: stored value > stored empty > build default', async () => {
     const { getEffectiveConfig, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.token] = 'pairtok';
+    store[STORAGE_KEYS.tokenUrl] = 'ws://build.host:9999';
     expect((await getEffectiveConfig()).token).toBe('pairtok');
 
     store[STORAGE_KEYS.token] = '';
@@ -297,15 +298,29 @@ describe('getEffectiveConfig token', () => {
     expect(await getEffectiveConfig()).toMatchObject({ source: 'config.json', token: '' });
   });
 
-  it('binds a legacy token to its saved endpoint before changing the URL', async () => {
-    const { getServerSettings, writeServerSettings, STORAGE_KEYS } = await loadRuntime();
+  it('omits a legacy unbound token from both endpoints until explicit re-entry', async () => {
+    const { buildWsUrl, getServerSettings, writeServerSettings, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.serverUrl] = 'wss://previous.example/ws';
     store[STORAGE_KEYS.token] = 'legacy-token';
     const previous = await getServerSettings();
-    expect(previous.config.token).toBe('legacy-token');
+    expect(previous).toMatchObject({ storedToken: '', hasUnboundToken: true, config: { token: '' } });
+    expect(new URL(buildWsUrl(previous.config)).searchParams.has('token')).toBe(false);
     await writeServerSettings(previous, { serverUrl: 'wss://new.example/ws' });
-    expect(store[STORAGE_KEYS.tokenUrl]).toBe(previous.effectiveUrl);
-    expect(await getServerSettings()).toMatchObject({ storedToken: '', config: { token: '' } });
+    expect(store[STORAGE_KEYS.tokenUrl]).toBeUndefined();
+    const updated = await getServerSettings();
+    expect(updated.effectiveUrl).not.toBe(previous.effectiveUrl);
+    expect(new URL(buildWsUrl(updated.config)).searchParams.has('token')).toBe(false);
+    await writeServerSettings(updated, { token: 're-entered-token' });
+    expect(store[STORAGE_KEYS.tokenUrl]).toBe(updated.effectiveUrl);
+    expect((await getServerSettings()).config.token).toBe('re-entered-token');
+  });
+
+  it('allows the compiled token only at its own endpoint when legacy storage has no binding', async () => {
+    const { STORAGE_KEYS, buildWsUrl, getServerSettings } = await loadRuntime();
+    store[STORAGE_KEYS.token] = 'legacy-token';
+    expect(new URL(buildWsUrl((await getServerSettings()).config)).searchParams.get('token')).toBe('buildtok');
+    store[STORAGE_KEYS.serverUrl] = 'wss://other.example';
+    expect(new URL(buildWsUrl((await getServerSettings()).config)).searchParams.has('token')).toBe(false);
   });
 
   it('writes a combined URL and token update with its canonical binding and new revision', async () => {
@@ -382,6 +397,7 @@ describe('buildWsUrl / httpOrigin', () => {
     const { getEffectiveConfig, buildWsUrl, STORAGE_KEYS } = await loadRuntime();
     store[STORAGE_KEYS.serverUrl] = 'wss://agent-browser.staticduo.com';
     store[STORAGE_KEYS.token] = 'a&b=c';
+    store[STORAGE_KEYS.tokenUrl] = 'wss://agent-browser.staticduo.com';
     store[STORAGE_KEYS.connectionId] = 'cid-123';
     const cfg = await getEffectiveConfig();
     const url = buildWsUrl(cfg);
