@@ -1,5 +1,9 @@
+import { SETUP_INSTANCES } from '@/config/setup-instances';
+
 const ACCOUNT_ROUTE = /^chatgpt(?:-[^/]+)?\//i;
 const GENERAL_GPT = /^gpt-\d[^/]*$/i;
+const NON_CHAT_ID = /(?:^|[-_./])(?:bge|embeddings?|embed|rerank(?:er)?|whisper|stt|tts|omnivoice|imagine|image|video|probe|moderation|dall-e)(?=$|[-_./])/i;
+const MANAGED_BASES = new Set<string>(Object.values(SETUP_INSTANCES).map(({ baseUrl }) => baseUrl));
 
 interface ModelMetadata {
   mode?: string | null;
@@ -9,8 +13,14 @@ interface ModelMetadata {
 interface CatalogModel extends ModelMetadata {
   id?: string;
   model_name?: string;
+  object?: string;
+  owned_by?: string;
   metadata?: ModelMetadata;
   model_info?: ModelMetadata;
+}
+
+class CatalogHttpError extends Error {
+  constructor(readonly status: number) { super(`HTTP ${status}`); }
 }
 
 function isSelectableId(id: unknown): id is string {
@@ -32,7 +42,7 @@ function supportsChat(id: string, model: CatalogModel): boolean {
 
 async function fetchModels(url: URL, init: RequestInit, request: typeof fetch): Promise<CatalogModel[]> {
   const response = await request(url, init);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) throw new CatalogHttpError(response.status);
   const body = await response.json() as { data?: unknown } | null;
   if (!Array.isArray(body?.data)) throw new Error('Formato de catalogo inesperado');
   return body.data.filter((row): row is CatalogModel => row !== null && typeof row === 'object');
@@ -80,6 +90,16 @@ export async function loadChatModelCatalog(
         if (!incompatible.has(id)) models.add(id);
       }
     } catch (error) {
+      if (!signal.aborted && !MANAGED_BASES.has(base.href) && error instanceof CatalogHttpError &&
+          [404, 405, 501].includes(error.status)) {
+        // A standard OpenAI listing has no capability metadata. Keep the
+        // previous name filter for those entries on manually configured APIs.
+        for (const model of available) {
+          if (unresolved.has(model.id) && model.object === 'model' && typeof model.owned_by === 'string' &&
+              !NON_CHAT_ID.test(model.id)) models.add(model.id);
+        }
+        return [...models].sort();
+      }
       if (signal.aborted || !models.size) throw error;
     }
   }

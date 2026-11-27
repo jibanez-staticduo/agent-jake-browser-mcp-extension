@@ -125,6 +125,7 @@ describe('pollPairStatusOnce', () => {
 
     expect(state).toBe('approved');
     expect(store[STORAGE_KEYS.token]).toBe('tok-123');
+    expect(store[STORAGE_KEYS.serverRevision]).toMatch(/^[0-9a-f-]{36}$/);
     expect(store[STORAGE_KEYS.pairCode]).toBeUndefined();
     expect(onApproved).toHaveBeenCalledTimes(1);
     expect(pairing.getPairingInfo().state).toBe('approved');
@@ -199,6 +200,28 @@ describe('maybeAutoStartPairing', () => {
     expect(info.otp).toBe('PENDING1');
     expect(info.approveUrl).toBe('https://pair.example.com/pair?otp=PENDING1');
     pairing.cancelPairing();
+  });
+
+  it('resumes the saved code when the existing token is bound to a different endpoint', async () => {
+    const pairing = await loadPairing();
+    store[STORAGE_KEYS.token] = 'prior-server-token';
+    store[STORAGE_KEYS.tokenUrl] = 'wss://other.example/ws';
+    store[STORAGE_KEYS.pairCode] = 'PENDING1';
+    fetchMock.mockImplementation(() => jsonResponse({ state: 'pending' }));
+
+    try {
+      await pairing.maybeAutoStartPairing();
+      expect(pairing.getPairingInfo()).toMatchObject({ state: 'pending', otp: 'PENDING1' });
+      expect(store[STORAGE_KEYS.pairCode]).toBe('PENDING1');
+      expect(await pairing.pollPairStatusOnce()).toBe('pending');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://pair.example.com/pair/status?otp=PENDING1',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    } finally {
+      pairing.cancelPairing();
+    }
   });
 });
 

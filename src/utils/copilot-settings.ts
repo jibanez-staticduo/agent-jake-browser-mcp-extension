@@ -1,4 +1,5 @@
 import { DEFAULT_COPILOT_SETTINGS, type CopilotSettings } from '@/types/copilot';
+import { CONFIG } from '@/types/config';
 
 export type CopilotPreference = Partial<Pick<CopilotSettings, 'model' | 'mode'>>;
 export const COPILOT_CREDENTIAL_FIELDS = [
@@ -9,6 +10,17 @@ export const COPILOT_CREDENTIAL_FIELDS = [
 /** Fail closed for stale or unbound credentials, including settings written by older callers. */
 export function normalizeCopilotSettings(input?: Partial<CopilotSettings>): CopilotSettings {
   const settings = { ...DEFAULT_COPILOT_SETTINGS, ...input };
+  const buildKey = CONFIG.COPILOT_API_KEY.trim();
+  const buildUrl = CONFIG.COPILOT_BASE_URL.trim();
+  if (buildKey && settings.apiKey === buildKey) {
+    // Enforce the binding even for a key persisted by an older provisioner.
+    if (!buildUrl || buildUrl !== settings.baseUrl) {
+      settings.apiKey = '';
+      delete settings.apiKeyUrl;
+    } else {
+      settings.apiKeyUrl = buildUrl;
+    }
+  }
   if (settings.apiKeyUrl && settings.apiKeyUrl !== settings.baseUrl) {
     settings.apiKey = '';
     delete settings.apiKeyUrl;

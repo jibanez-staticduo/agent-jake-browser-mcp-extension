@@ -10,6 +10,9 @@ import type { PairingInfo, ServerConfigInfo } from '../types';
 interface SaveResult {
   success?: boolean;
   error?: string;
+  conflict?: boolean;
+  serverRevision?: string | null;
+  effectiveUrl?: string;
 }
 
 interface StartPairingResult {
@@ -34,6 +37,7 @@ export const useServerStore = defineStore('server', () => {
   // Set while the user is typing so polling does not overwrite the draft.
   const drafts = { serverUrlInput, tokenInput, labelInput };
   const touched = new Set<keyof typeof drafts>();
+  let credentialBaseline: Pick<ServerConfigInfo, 'serverRevision' | 'effectiveUrl'> | undefined;
   let draftRevision = 0;
   let refreshRevision = 0;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -52,6 +56,7 @@ export const useServerStore = defineStore('server', () => {
       labelInput: info.value.label ?? '',
     };
     for (const key of Object.keys(drafts) as (keyof typeof drafts)[]) {
+      if (key !== 'labelInput' && (touched.has('serverUrlInput') || touched.has('tokenInput'))) continue;
       if (!touched.has(key)) drafts[key].value = latest[key];
     }
   }
@@ -71,26 +76,58 @@ export const useServerStore = defineStore('server', () => {
   }
 
   function markDraftTouched(field: keyof typeof drafts = 'labelInput'): void {
+    if (field !== 'labelInput' && !touched.has('serverUrlInput') && !touched.has('tokenInput') && info.value) {
+      const { serverRevision, effectiveUrl } = info.value;
+      credentialBaseline = { serverRevision, effectiveUrl };
+    }
+    if (field === 'serverUrlInput') {
+      tokenInput.value = '';
+      touched.delete('tokenInput');
+    }
     touched.add(field);
     draftRevision += 1;
   }
 
   async function save(): Promise<void> {
+    if (saving.value) return;
     saving.value = true;
     error.value = null;
     const savingRevision = draftRevision;
+    const editingCredentials = touched.has('serverUrlInput') || touched.has('tokenInput');
     try {
+      if (editingCredentials && !credentialBaseline) {
+        touched.delete('serverUrlInput');
+        touched.delete('tokenInput');
+        error.value = 'Carga la configuración del servidor y vuelve a introducir tus cambios.';
+        await refresh();
+        return;
+      }
       const result = await sendMessage<SaveResult>('saveServerConfig', {
-        ...(!info.value || touched.has('serverUrlInput') ? { serverUrl: serverUrlInput.value } : {}),
-        ...(!info.value || touched.has('tokenInput') ? { token: tokenInput.value } : {}),
-        ...(!info.value || touched.has('labelInput') ? { label: labelInput.value } : {}),
+        ...(touched.has('serverUrlInput') ? { serverUrl: serverUrlInput.value } : {}),
+        ...(touched.has('tokenInput') ? { token: tokenInput.value } : {}),
+        ...(touched.has('labelInput') ? { label: labelInput.value } : {}),
+        ...(credentialBaseline ? {
+          expectedServerRevision: credentialBaseline.serverRevision,
+          expectedEffectiveUrl: credentialBaseline.effectiveUrl,
+        } : {}),
       });
-      if (result && result.success === false) {
-        error.value = result.error || 'No se pudo guardar';
+      if (!result?.success) {
+        error.value = result?.error || 'No se pudo guardar';
+        if (result?.conflict) {
+          touched.delete('serverUrlInput');
+          touched.delete('tokenInput');
+          credentialBaseline = undefined;
+          await refresh();
+        }
         return;
       }
       // Preserve edits made while the background was saving/reconnecting.
-      if (draftRevision === savingRevision) touched.clear();
+      if (draftRevision === savingRevision) {
+        touched.clear();
+        credentialBaseline = undefined;
+      } else if (editingCredentials && result.serverRevision !== undefined && result.effectiveUrl !== undefined) {
+        credentialBaseline = { serverRevision: result.serverRevision, effectiveUrl: result.effectiveUrl };
+      }
       savedFlash.value = true;
       setTimeout(() => { savedFlash.value = false; }, 2500);
       await refresh();
@@ -125,7 +162,11 @@ export const useServerStore = defineStore('server', () => {
     setupLoading.value = true;
     error.value = null;
     try {
-      const result = await sendMessage<SaveResult>(instance ? 'startSetup' : 'cancelSetup', instance);
+      const windowId = instance ? (await chrome.windows?.getCurrent().catch(() => undefined))?.id : undefined;
+      const result = await sendMessage<SaveResult>(
+        instance ? 'startSetup' : 'cancelSetup',
+        instance ? { instance, windowId } : undefined,
+      );
       if (!result?.success) error.value = result?.error || 'No se pudo actualizar el emparejamiento.';
       await refresh();
     } catch (e) {

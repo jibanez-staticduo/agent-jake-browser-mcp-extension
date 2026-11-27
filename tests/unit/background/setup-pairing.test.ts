@@ -90,6 +90,47 @@ describe('automatic setup', () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  it('retries the same grant after a failed local write before reconnecting', async () => {
+    const setup = await import('@/background/setup-pairing');
+    const reload = vi.fn();
+    setup.setOnSetupApproved(reload);
+    fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+    fetch.mockResolvedValue(response({ state: 'approved', config }));
+    store[STORAGE_KEYS.token] = 'previous-key';
+    await setup.startSetup('defend', clearLegacy);
+    set.mockRejectedValueOnce(new Error('temporary storage error'));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(store[pendingKey]).toMatchObject({ pollSecret });
+    expect(store[STORAGE_KEYS.token]).toBe('previous-key');
+    expect(setup.getSetupPairingInfo()).toMatchObject({ state: 'pending' });
+    expect(reload).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const requested = fetch.mock.calls.filter(([url]) => String(url).endsWith('/setup/status'));
+    expect(requested.map(([, init]) => init.body)).toEqual(Array(2).fill(JSON.stringify({ pollSecret })));
+    expect(store[pendingKey]).toBeNull();
+    expect(store[STORAGE_KEYS.connectionId]).toBe(connectionId);
+    expect(store[STORAGE_KEYS.token]).toBe('ws-key');
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the original and reopened approvals in the respective requesting windows', async () => {
+    const setup = await import('@/background/setup-pairing');
+    let releaseStart!: (res: unknown) => void;
+    fetch.mockReturnValueOnce(new Promise(resolve => { releaseStart = resolve; }));
+    const started = setup.startSetup('defend', clearLegacy, 11);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(create).not.toHaveBeenCalled();
+    releaseStart(response({ approvalCode, pollSecret }, 201));
+    await started;
+    await setup.startSetup('defend', clearLegacy, 27);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls).toEqual([
+      [{ url: `${origin}/setup?code=${approvalCode}`, windowId: 11 }],
+      [{ url: `${origin}/setup?code=${approvalCode}`, windowId: 27 }],
+    ]);
+  });
+
   it('ignores a late approval for a superseded instance and resumes the active one from storage', async () => {
     const setup = await import('@/background/setup-pairing');
     let releaseStatus!: (res: unknown) => void;

@@ -14,11 +14,14 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
-  onmessage = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor(public url: string) { FakeSocket.instances.push(this); }
   open() { this.readyState = 1; this.onopen?.(); }
+  receive(id: string) {
+    this.onmessage?.({ data: JSON.stringify({ id, type: 'browser_list_tabs', payload: {} }) });
+  }
 }
 const cfg: RuntimeServerConfig = {
   secure: true, hostname: 'example.test', port: 443, path: '/ws', scheme: 'wss',
@@ -38,6 +41,48 @@ beforeEach(() => {
   client = new WebSocketClient();
 });
 afterEach(() => { client.disconnect(); vi.unstubAllGlobals(); });
+
+describe('WebSocket response routing', () => {
+  it.each(['result', 'error'] as const)('discards a pending %s when the socket is replaced', async (outcome) => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const handleRequest = vi.fn(async ({ id }: { id: string }) => {
+      if (id === 'original') {
+        await pending;
+        if (outcome === 'error') throw new Error('Original request failed');
+      }
+      return { id, success: true };
+    });
+    client.setMessageHandler(handleRequest);
+
+    mocks.config.mockResolvedValue({ ...cfg, token: 'test-token' });
+    const connecting = client.connect();
+    await settle();
+    const original = FakeSocket.instances[0];
+    original.open();
+    await connecting;
+    original.send.mockClear();
+    original.receive('original');
+    expect(handleRequest).toHaveBeenCalledWith({ id: 'original', type: 'browser_list_tabs', payload: {} });
+
+    mocks.config.mockResolvedValue({ ...cfg, hostname: 'replacement.test', token: 'test-token' });
+    const reloading = client.reload();
+    await settle();
+    const replacement = FakeSocket.instances[1];
+    replacement.open();
+    await reloading;
+    replacement.send.mockClear();
+
+    finish();
+    replacement.receive('replacement');
+    await settle();
+
+    expect(original.send).not.toHaveBeenCalled();
+    expect(replacement.send.mock.calls.map(([data]) => JSON.parse(data))).toEqual([
+      { id: 'replacement', success: true },
+    ]);
+  });
+});
 
 describe('WebSocket authentication startup', () => {
   it('waits for a token without opening or repeatedly probing the authenticated server', async () => {

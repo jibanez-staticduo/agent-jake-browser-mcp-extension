@@ -4,10 +4,8 @@
  * agent-browser-sync host build until it is retired, pass VITE_COPILOT_BASE_URL / VITE_COPILOT_API_KEY from
  * local host files; never from the repo). The published build (scripts/publicar.sh) is neutral and seeds nothing.
  *
- * Rule: a field is overwritten when the stored value is empty or still equals what we seeded
- * last time (so a rotated key reaches the browser); a value the user changed in Opciones is
- * left alone. «What we seeded last time» is kept as SHA-256 hashes (copilotProvisioned), so the
- * key is not stored twice in clear. The model is not seeded here: DEFAULT_COPILOT_SETTINGS.model is the only default.
+ * A key is seeded or rotated only at its build endpoint. SHA-256 hashes in
+ * copilotProvisioned identify earlier seeds without storing the key twice.
  */
 import { CONFIG } from '@/types/config';
 import {
@@ -16,6 +14,7 @@ import {
   DEFAULT_COPILOT_SETTINGS,
   type CopilotSettings,
 } from '@/types/copilot';
+import { normalizeCopilotSettings } from '@/utils/copilot-settings';
 
 export type Provisioned = Pick<CopilotSettings, 'baseUrl' | 'apiKey'>;
 
@@ -30,34 +29,41 @@ export interface ProvisionStorage {
   set(key: string, value: unknown): Promise<void>;
 }
 
-const FIELDS = ['baseUrl', 'apiKey'] as const;
-
 export function buildProvision(): Provisioned {
   return { baseUrl: CONFIG.COPILOT_BASE_URL.trim(), apiKey: CONFIG.COPILOT_API_KEY.trim() };
 }
 
 /** Returns true when it wrote something. */
 export async function provisionCopilot(build: Provisioned, storage: ProvisionStorage): Promise<boolean> {
-  if (!FIELDS.some((f) => build[f])) return false;
+  if (!build.baseUrl) return false;
   const stored = ((await storage.get(COPILOT_SETTINGS_KEY)) ?? {}) as Partial<CopilotSettings>;
   const last = ((await storage.get(COPILOT_PROVISIONED_KEY)) ?? {}) as Partial<Provisioned>; // hashes
-  const settings: Partial<CopilotSettings> = { ...stored };
+  const settings = { ...DEFAULT_COPILOT_SETTINGS, ...stored };
   const provisioned: Partial<Provisioned> = { ...last };
-  let changed = false;
-  for (const f of FIELDS) {
-    const wanted = build[f];
-    if (!wanted) continue;
-    const current = typeof stored[f] === 'string' ? stored[f] as string : '';
-    const wantedHash = await sha256(wanted);
-    if (current === '' || (await sha256(current)) === last[f]) {
-      if (current !== wanted) { settings[f] = wanted; changed = true; }
-      if (last[f] !== wantedHash) { provisioned[f] = wantedHash; changed = true; }
-    }
+  const oldBaseUrl = settings.baseUrl;
+  const previousSeed = Boolean(settings.apiKey && (await sha256(settings.apiKey)) === last.apiKey);
+  const buildKey = Boolean(build.apiKey && settings.apiKey === build.apiKey);
+  const managedKey = previousSeed || buildKey;
+  if ((!settings.apiKey || managedKey) && (!oldBaseUrl || (await sha256(oldBaseUrl)) === last.baseUrl)) {
+    settings.baseUrl = build.baseUrl;
+    provisioned.baseUrl = await sha256(build.baseUrl);
   }
-  if (!changed) return false;
-  await storage.set(COPILOT_SETTINGS_KEY, { ...DEFAULT_COPILOT_SETTINGS, ...settings });
-  await storage.set(COPILOT_PROVISIONED_KEY, provisioned);
-  return true;
+  if (settings.baseUrl === build.baseUrl && build.apiKey && (!settings.apiKey || managedKey)) {
+    settings.apiKey = build.apiKey;
+    settings.apiKeyUrl = build.baseUrl;
+    provisioned.apiKey = await sha256(build.apiKey);
+  } else if (managedKey) {
+    // Older builds could seed an unbound key into a manual endpoint.
+    settings.apiKey = '';
+    delete settings.apiKeyUrl;
+  }
+  const normalized = normalizeCopilotSettings(settings);
+  const changedSettings = normalized.baseUrl !== (stored.baseUrl ?? '') || normalized.apiKey !== (stored.apiKey ?? '')
+    || normalized.apiKeyUrl !== stored.apiKeyUrl;
+  const changedHashes = provisioned.baseUrl !== last.baseUrl || provisioned.apiKey !== last.apiKey;
+  if (changedSettings) await storage.set(COPILOT_SETTINGS_KEY, normalized);
+  if (changedHashes) await storage.set(COPILOT_PROVISIONED_KEY, provisioned);
+  return changedSettings || changedHashes;
 }
 
 export function chromeProvisionStorage(): ProvisionStorage {

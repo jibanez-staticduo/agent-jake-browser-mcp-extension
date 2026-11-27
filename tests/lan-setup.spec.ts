@@ -78,7 +78,10 @@ async function startBackend(directory: string, config: object) {
   }
 }
 
-async function startProxy(directory: string, host: string, wsPath: string, backend: { httpPort: number; wsPort: number }) {
+async function startProxy(
+  directory: string, host: string, wsPath: string, backend: { httpPort: number; wsPort: number },
+  dropFirstApprovedResponse: boolean,
+) {
   const certPath = path.join(directory, 'cert.pem');
   const keyPath = path.join(directory, 'key.pem');
   execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
@@ -89,6 +92,10 @@ async function startProxy(directory: string, host: string, wsPath: string, backe
   const spki = createHash('sha256').update(publicKey).digest('base64');
   const requests: Array<{ path: string; origin?: string; site?: string; status?: number }> = [];
   const upgrades: string[] = [];
+  let droppedApproval = false;
+  let recoveredApproval = false;
+  let releaseStart: (() => void) | undefined;
+  const startGate = dropFirstApprovedResponse ? new Promise<void>(resolve => { releaseStart = resolve; }) : undefined;
   const proxy = https.createServer({ cert, key }, (incoming, response) => {
     if (incoming.headers.host !== host) {
       response.writeHead(404).end();
@@ -105,6 +112,32 @@ async function startProxy(directory: string, host: string, wsPath: string, backe
     const upstream = http.request({ host: loopback, port: backend.httpPort, method: incoming.method,
       path: incoming.url, headers: { ...incoming.headers, 'x-agent-jake-client-ip': '192.168.42.30' } }, upstreamResponse => {
       entry.status = upstreamResponse.statusCode;
+      if (startGate && entry.path === '/setup/start' && upstreamResponse.statusCode === 201) {
+        void startGate.then(() => {
+          if (response.destroyed) return upstreamResponse.destroy();
+          response.writeHead(201, upstreamResponse.headers);
+          upstreamResponse.pipe(response);
+        });
+        return;
+      }
+      if (dropFirstApprovedResponse && entry.path === '/setup/status' && upstreamResponse.statusCode === 200) {
+        const chunks: Buffer[] = [];
+        upstreamResponse.on('data', chunk => chunks.push(chunk));
+        upstreamResponse.on('error', () => response.destroy());
+        upstreamResponse.on('end', () => {
+          const data = Buffer.concat(chunks);
+          if (JSON.parse(data.toString()).state === 'approved') {
+            if (!droppedApproval) {
+              droppedApproval = true;
+              response.destroy();
+              return;
+            }
+            recoveredApproval = true;
+          }
+          response.writeHead(200, upstreamResponse.headers).end(data);
+        });
+        return;
+      }
       response.writeHead(upstreamResponse.statusCode!, upstreamResponse.headers);
       upstreamResponse.pipe(response);
     });
@@ -135,7 +168,8 @@ async function startProxy(directory: string, host: string, wsPath: string, backe
   });
 
   const port = await listen(proxy);
-  return { port, spki, requests, upgrades, async close() {
+  return { port, spki, requests, upgrades, releaseStart, recovered: () => recoveredApproval, async close() {
+    releaseStart?.();
     for (const socket of sockets) socket.destroy();
     await new Promise<void>(resolve => proxy.close(() => resolve()));
   } };
@@ -161,7 +195,7 @@ test.describe('StaticDuo LAN setup with a built server', () => {
           lanCidrs: ['192.168.42.0/24'], trustedProxyIps: [loopback],
           hostByIp: instance.inferredHost ? { '192.168.42.30': instance.inferredHost } : {},
         });
-        proxy = await startProxy(directory, hostname, instance.wsPath, backend);
+        proxy = await startProxy(directory, hostname, instance.wsPath, backend, !!instance.inferredHost);
         browser = await chromium.launchPersistentContext(path.join(directory, 'profile'), {
           channel: 'chromium', headless: true,
           args: [
@@ -178,18 +212,50 @@ test.describe('StaticDuo LAN setup with a built server', () => {
         const panel = await browser.newPage();
         await panel.goto(`${extensionOrigin}/src/sidepanel/index.html`);
         await panel.getByRole('button', { name: 'Abrir Opciones', exact: true }).click();
-        const [approval] = await Promise.all([
-          browser.waitForEvent('page', { timeout: 10000 }),
-          panel.getByRole('group', { name: 'Emparejar con servidor' })
-            .getByRole('button', { name: instance.name, exact: true }).click(),
-        ]);
+        const sourceId = await panel.evaluate(async () => (await chrome.windows.getCurrent()).id!);
+        let other: { windowId: number; tabId?: number } | undefined;
+        if (instance.inferredHost) {
+          const [, details] = await Promise.all([
+            browser.waitForEvent('page'),
+            worker.evaluate(async id => {
+              const { id: windowId } = await chrome.windows.create({ url: 'about:blank', focused: false });
+              if (windowId === undefined) throw new Error('Fixture window has no id');
+              const [tab] = await chrome.tabs.query({ windowId, active: true });
+              await chrome.windows.update(id, { focused: true });
+              return { windowId, tabId: tab?.id };
+            }, sourceId),
+          ]);
+          other = details;
+        }
+        const approvalPromise = browser.waitForEvent('page', { timeout: 10000 });
+        await panel.getByRole('group', { name: 'Emparejar con servidor' })
+          .getByRole('button', { name: instance.name, exact: true }).click();
+        if (other) {
+          await expect.poll(() => proxy!.requests.some(r => r.path === '/setup/start' && r.status === 201)).toBe(true);
+          await worker.evaluate(id => chrome.windows.update(id, { focused: true }), other.windowId);
+          proxy.releaseStart?.();
+        }
+        const approval = await approvalPromise;
         await expect(approval).toHaveURL(`${instance.origin}/setup`);
+        if (other) {
+          const windows = await worker.evaluate(async args => {
+            const [tab] = await chrome.tabs.query({ url: args.approval });
+            const [otherTab] = await chrome.tabs.query({ windowId: args.other, active: true });
+            return { approval: tab?.windowId, otherTab: otherTab?.id };
+          }, { approval: `${instance.origin}/setup*`, other: other.windowId });
+          expect(windows).toEqual({ approval: sourceId, otherTab: other.tabId });
+        }
         const host = approval.getByLabel('Nombre del equipo');
         const profile = approval.getByLabel('Nombre del perfil del navegador');
         await expect(profile).toBeVisible();
         if (instance.inferredHost) {
           await expect(host).toBeHidden();
           await expect(profile).toBeFocused();
+          await profile.fill('   ');
+          await approval.getByRole('button', { name: 'Emparejar', exact: true }).click();
+          await expect(approval.getByRole('status')).toContainText(/inválid|revis|válid/i);
+          await expect(profile).toBeVisible();
+          await panel.getByLabel('Token', { exact: true }).fill('fixture-unsaved-old-token');
         } else {
           await expect(host).toBeFocused();
           await host.fill('Fixture laptop');
@@ -206,6 +272,7 @@ test.describe('StaticDuo LAN setup with a built server', () => {
           return res.json();
         }).toMatchObject({ authEnabled: true, connections: [expect.objectContaining({ connectionId: expect.stringMatching(uuid), label, open: true })] });
         expect(proxy.upgrades).toContain(instance.wsPath);
+        if (instance.inferredHost) expect(proxy.recovered()).toBe(true);
 
         const storage = await worker.evaluate(() => chrome.storage.local.get());
         expect(storage).toMatchObject({
@@ -214,9 +281,19 @@ test.describe('StaticDuo LAN setup with a built server', () => {
           'ajb.token': expect.any(String),
           'ajb.label': label,
           'ajb.connectionId': expect.stringMatching(uuid),
+          'ajb.serverRevision': expect.stringMatching(uuid),
           copilotSettings: { baseUrl: instance.baseUrl, apiKey, mcpUrl, mcpToken, mcpTokenUrl: mcpUrl,
             vision: true, maxSteps: 200, stepsView: 'extended' },
         });
+        if (instance.inferredHost) {
+          await panel.getByRole('button', { name: 'Guardar servidor' }).click();
+          await expect(panel.getByText('La configuración del servidor cambió.', { exact: false })).toBeVisible();
+          const afterSave = await worker.evaluate(() => chrome.storage.local.get(['ajb.token', 'ajb.serverRevision']));
+          expect(afterSave).toEqual({
+            'ajb.token': storage['ajb.token'],
+            'ajb.serverRevision': storage['ajb.serverRevision'],
+          });
+        }
         expect(proxy.requests).toEqual(expect.arrayContaining([
           expect.objectContaining({ path: '/setup/start', origin: extensionOrigin, status: 201 }),
           expect.objectContaining({ path: '/setup', status: 200 }),

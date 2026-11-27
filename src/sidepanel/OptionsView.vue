@@ -49,7 +49,7 @@ watch(() => props.settings, (next, previous) => {
 });
 
 function onBaseUrlInput() {
-  if (!draft.value.apiKeyUrl || draft.value.apiKeyUrl === draft.value.baseUrl) return;
+  if (draft.value.apiKeyUrl === draft.value.baseUrl) return;
   draft.value.apiKey = '';
   draft.value.apiKeyUrl = '';
 }

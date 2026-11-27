@@ -277,6 +277,52 @@ describe('getEffectiveConfig token', () => {
     delete store[STORAGE_KEYS.token];
     expect((await getEffectiveConfig()).token).toBe('buildtok');
   });
+
+  it('sends the compiled token only to its canonical WebSocket endpoint', async () => {
+    const { buildWsUrl, getServerSettings, writeServerSettings } = await loadRuntime();
+    const current = await getServerSettings();
+    expect(new URL(buildWsUrl(current.config)).searchParams.get('token')).toBe('buildtok');
+    await writeServerSettings(current, { serverUrl: 'http://BUILD.HOST:9999/' });
+    expect((await getServerSettings()).config.token).toBe('buildtok');
+    for (const serverUrl of ['wss://build.host:9999', 'ws://build.host:9999/other', 'ws://elsewhere.example:9999']) {
+      await writeServerSettings(await getServerSettings(), { serverUrl });
+      const { config } = await getServerSettings();
+      expect(new URL(buildWsUrl(config)).searchParams.has('token')).toBe(false);
+    }
+  });
+
+  it('does not send the compiled token to a different packaged endpoint', async () => {
+    fetchMock.mockImplementation(() => bundleResponse({ version: 1, wsUrl: 'wss://packaged.example/ws' }));
+    const { getEffectiveConfig } = await loadRuntime();
+    expect(await getEffectiveConfig()).toMatchObject({ source: 'config.json', token: '' });
+  });
+
+  it('binds a legacy token to its saved endpoint before changing the URL', async () => {
+    const { getServerSettings, writeServerSettings, STORAGE_KEYS } = await loadRuntime();
+    store[STORAGE_KEYS.serverUrl] = 'wss://previous.example/ws';
+    store[STORAGE_KEYS.token] = 'legacy-token';
+    const previous = await getServerSettings();
+    expect(previous.config.token).toBe('legacy-token');
+    await writeServerSettings(previous, { serverUrl: 'wss://new.example/ws' });
+    expect(store[STORAGE_KEYS.tokenUrl]).toBe(previous.effectiveUrl);
+    expect(await getServerSettings()).toMatchObject({ storedToken: '', config: { token: '' } });
+  });
+
+  it('writes a combined URL and token update with its canonical binding and new revision', async () => {
+    const { getServerSettings, writeServerSettings, STORAGE_KEYS } = await loadRuntime();
+    const previous = await getServerSettings();
+    mockChrome.storage.local.set.mockClear();
+    const saved = await writeServerSettings(previous, { serverUrl: 'https://TARGET.example/ws/', token: 'new-token' });
+    expect(saved.serverRevision).toMatch(/^[0-9a-f-]{36}$/);
+    expect(mockChrome.storage.local.set).toHaveBeenCalledTimes(1);
+    expect(mockChrome.storage.local.set).toHaveBeenCalledWith({
+      [STORAGE_KEYS.serverUrl]: 'https://TARGET.example/ws/',
+      [STORAGE_KEYS.token]: 'new-token',
+      [STORAGE_KEYS.tokenUrl]: 'wss://target.example/ws',
+      [STORAGE_KEYS.serverRevision]: saved.serverRevision,
+    });
+    expect(await getServerSettings()).toMatchObject({ effectiveUrl: saved.effectiveUrl, storedToken: 'new-token' });
+  });
 });
 
 describe('ensureConnectionId', () => {

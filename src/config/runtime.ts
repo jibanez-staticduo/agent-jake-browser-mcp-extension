@@ -26,6 +26,7 @@ export const STORAGE_KEYS = {
   serverUrl: 'ajb.serverUrl',
   token: 'ajb.token',
   tokenUrl: 'ajb.tokenUrl',
+  serverRevision: 'ajb.serverRevision',
   label: 'ajb.label',
   connectionId: 'ajb.connectionId',
   pairCode: 'ajb.pairCode',
@@ -41,7 +42,7 @@ export interface ParsedServerUrl {
 
 export interface RuntimeServerConfig extends ParsedServerUrl {
   scheme: 'ws' | 'wss';
-  /** Effective auth token (storage value wins, build default is fallback). */
+  /** Auth token for the effective endpoint. */
   token: string;
   /** Manual device/browser name; optional for older runtime fixtures. */
   label?: string;
@@ -188,58 +189,90 @@ async function loadOrCreateConnectionId(): Promise<string> {
   return id;
 }
 
-/**
- * Effective server config following the precedence
- * storage (ajb.serverUrl) > packaged config.json > build defaults.
- * Token follows `ajb.token ?? CONFIG.WS_TOKEN`
- * (an explicitly stored empty string clears the token for open-LAN setups).
- */
-export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
-  const stored = await storageGet([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl, STORAGE_KEYS.label, STORAGE_KEYS.connectionId]);
-  const rawUrl = typeof stored[STORAGE_KEYS.serverUrl] === 'string'
-    ? (stored[STORAGE_KEYS.serverUrl] as string)
-    : '';
-  const parsed = parseWsUrl(rawUrl);
+function withScheme(base: ParsedServerUrl): ParsedServerUrl & Pick<RuntimeServerConfig, 'scheme'> {
+  return { ...base, scheme: base.secure ? 'wss' : 'ws' };
+}
 
-  let base: ParsedServerUrl;
-  let source: ServerConfigSource;
-  if (parsed) {
-    base = parsed;
-    source = 'manual';
-  } else {
-    const bundle = await loadBundleConfig();
-    if (bundle) {
-      base = bundle;
-      source = 'config.json';
-    } else {
-      base = {
-        secure: CONFIG.WS_SECURE,
-        hostname: CONFIG.WS_HOST,
-        port: CONFIG.WS_PORT,
-        path: CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/, '').replace(/\/+$/, '')}` : '',
-      };
-      source = 'build';
-    }
-  }
+const buildEndpoint = withScheme({
+  secure: CONFIG.WS_SECURE,
+  hostname: CONFIG.WS_HOST,
+  port: CONFIG.WS_PORT,
+  path: CONFIG.WS_PATH ? `/${CONFIG.WS_PATH.replace(/^\/+/, '').replace(/\/+$/, '')}` : '',
+});
+const canonicalBuildEndpoint = parseWsUrl(buildDisplayUrl(buildEndpoint));
+const buildServer = canonicalBuildEndpoint ? withScheme(canonicalBuildEndpoint) : buildEndpoint;
 
-  const scheme = base.secure ? 'wss' : 'ws';
+async function resolveServer(rawUrl: string) {
+  const manual = parseWsUrl(rawUrl);
+  if (manual) return { ...withScheme(manual), source: 'manual' as const };
+  const bundle = await loadBundleConfig();
+  if (bundle) return { ...withScheme(bundle), source: 'config.json' as const };
+  return { ...buildServer, source: 'build' as const };
+}
+
+/** Read the server and its editable fields from one storage snapshot. */
+export async function getServerSettings() {
+  const stored = await storageGet([
+    STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl, STORAGE_KEYS.serverRevision,
+    STORAGE_KEYS.label, STORAGE_KEYS.connectionId,
+  ]);
+  const storedUrl = stored[STORAGE_KEYS.serverUrl];
+  const storedServerUrl = typeof storedUrl === 'string' ? storedUrl : '';
+  const server = await resolveServer(storedServerUrl);
+  const effectiveUrl = buildDisplayUrl(server);
+  const rawToken = stored[STORAGE_KEYS.token];
   const tokenUrl = stored[STORAGE_KEYS.tokenUrl];
-  const token = typeof stored[STORAGE_KEYS.token] === 'string'
-    ? (!tokenUrl || tokenUrl === buildDisplayUrl({ ...base, scheme }) ? stored[STORAGE_KEYS.token] as string : '')
-    : CONFIG.WS_TOKEN;
+  const storedToken = typeof rawToken === 'string' && (!tokenUrl || tokenUrl === effectiveUrl) ? rawToken : '';
+  const token = typeof rawToken === 'string' ? storedToken : (
+    effectiveUrl === buildDisplayUrl(buildServer) ? CONFIG.WS_TOKEN : ''
+  );
 
   const storedId = stored[STORAGE_KEYS.connectionId];
   const connectionId = typeof storedId === 'string' && storedId ? storedId : await ensureConnectionId();
+  const revision = stored[STORAGE_KEYS.serverRevision];
 
-  return {
-    ...base,
-    scheme,
+  const config: RuntimeServerConfig = {
+    ...server,
     token,
     label: normalizeLabel(stored[STORAGE_KEYS.label]),
     connectionId,
-    source,
-    fromStorage: source === 'manual',
+    fromStorage: server.source === 'manual',
   };
+  return {
+    config, effectiveUrl, storedServerUrl, storedToken,
+    serverRevision: typeof revision === 'string' ? revision : null,
+    hasUnboundToken: Boolean(storedToken && !tokenUrl),
+  };
+}
+
+export async function getEffectiveConfig(): Promise<RuntimeServerConfig> {
+  return (await getServerSettings()).config;
+}
+
+/** Called under updateSettings so the caller's snapshot stays current through the write. */
+export async function writeServerSettings(
+  previous: Awaited<ReturnType<typeof getServerSettings>>,
+  changes: { serverUrl?: string; token?: string; label?: string },
+) {
+  const { serverUrl, token, label } = changes;
+  const values: Record<string, unknown> = {};
+  const effectiveUrl = serverUrl === undefined ? previous.effectiveUrl : buildDisplayUrl(await resolveServer(serverUrl));
+  let { serverRevision } = previous;
+  if (serverUrl !== undefined || token !== undefined) {
+    serverRevision = crypto.randomUUID();
+    values[STORAGE_KEYS.serverRevision] = serverRevision;
+  }
+  if (serverUrl !== undefined) values[STORAGE_KEYS.serverUrl] = serverUrl;
+  if (token !== undefined) {
+    values[STORAGE_KEYS.token] = token;
+    values[STORAGE_KEYS.tokenUrl] = effectiveUrl;
+  } else if (serverUrl !== undefined && previous.hasUnboundToken) {
+    // Keep legacy tokens with the endpoint that already used them.
+    values[STORAGE_KEYS.tokenUrl] = previous.effectiveUrl;
+  }
+  if (label !== undefined) values[STORAGE_KEYS.label] = normalizeLabel(label);
+  if (Object.keys(values).length) await storageSet(values);
+  return { serverRevision, effectiveUrl };
 }
 
 /**

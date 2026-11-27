@@ -107,7 +107,11 @@ export async function clearPairCode(): Promise<void> {
 }
 
 async function finishApproved(attempt: ActivePairing, token: string): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.token]: token, [STORAGE_KEYS.tokenUrl]: attempt.wsUrl });
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.token]: token,
+    [STORAGE_KEYS.tokenUrl]: attempt.wsUrl,
+    [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
+  });
   await clearPairCode();
   if (active) {
     active.state = 'approved';
@@ -219,15 +223,13 @@ export async function startPairing(): Promise<{ otp: string; approveUrl: string 
  *   effective token exists (avoids hammering servers without pairing on).
  */
 export async function maybeAutoStartPairing(): Promise<void> {
-  const stored = await chrome.storage.local.get([STORAGE_KEYS.pairCode, STORAGE_KEYS.token]);
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.pairCode]);
   const pendingCode = typeof stored[STORAGE_KEYS.pairCode] === 'string'
     ? (stored[STORAGE_KEYS.pairCode] as string).trim()
     : '';
-  const hasToken = typeof stored[STORAGE_KEYS.token] === 'string'
-    && (stored[STORAGE_KEYS.token] as string) !== '';
+  const cfg = await getEffectiveConfig();
 
-  if (pendingCode && !hasToken) {
-    const cfg = await getEffectiveConfig();
+  if (pendingCode && !cfg.token) {
     const origin = httpOrigin(cfg);
     active = {
       otp: pendingCode,
@@ -248,12 +250,12 @@ export async function maybeAutoStartPairing(): Promise<void> {
     return;
   }
 
-  if (hasToken) return;
+  if (cfg.token) return;
   // Auto-pair only against a URL the user or the package opted into, never
   // against the bare build default (a LAN server would get spammed and the
   // open-LAN mode must keep working without pairing).
   if (!(await hasStoredServerUrl()) && (await loadBundleConfig()) === null) return;
-  const origin = httpOrigin(await getEffectiveConfig());
+  const origin = httpOrigin(cfg);
   if (Object.values(SETUP_INSTANCES).some((instance) => instance.origin === origin)) return;
 
   try {

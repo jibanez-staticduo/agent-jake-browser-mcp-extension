@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { loadChatModelCatalog } from '@/sidepanel/model-catalog';
+import { SETUP_INSTANCES } from '@/config/setup-instances';
 
 const base = 'https://example.test/v1';
 const signal = new AbortController().signal;
@@ -58,6 +59,22 @@ describe('loadChatModelCatalog', () => {
       .mockResolvedValueOnce(response([{ id: 'vision-chat', mode: 'chat' }, { id: 'opaque' }]))
       .mockResolvedValueOnce(new Response(null, { status: 403 }));
     await expect(loadChatModelCatalog(base, 'example-key', signal, request)).resolves.toEqual(['vision-chat']);
+  });
+
+  it('offers standard OpenAI models from a manual endpoint without a model info route', async () => {
+    const rows = ['gpt-4.1', 'text-embedding-3-small', 'chatgpt-defend1/gpt-4.1'].map(id => ({
+      id, object: 'model', created: 123, owned_by: 'fixture',
+    }));
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(response(rows))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    await expect(loadChatModelCatalog(base, 'example-key', signal, request)).resolves.toEqual(['gpt-4.1']);
+  });
+
+  it('requires capability metadata on the configured LiteLLM endpoints', async () => {
+    const request = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(response([{ id: 'opaque-name', object: 'model', owned_by: 'fixture' }]))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+    await expect(loadChatModelCatalog(SETUP_INSTANCES.nas.baseUrl, '', signal, request)).rejects.toThrow('HTTP 404');
   });
 
   it('reports a listing failure without using its response body', async () => {

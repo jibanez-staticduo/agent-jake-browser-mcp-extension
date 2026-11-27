@@ -22,7 +22,7 @@ describe('provisionCopilot', () => {
   it('seeds an empty install', async () => {
     const { store, storage } = mem();
     expect(await provisionCopilot(BUILD, storage)).toBe(true);
-    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...BUILD, model: 'qwen38-flash-next' });
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...BUILD, apiKeyUrl: BUILD.baseUrl, model: 'qwen38-flash-next' });
     expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual(await hashes(BUILD));
     expect(JSON.stringify(store.get(COPILOT_PROVISIONED_KEY))).not.toContain(BUILD.apiKey);
   });
@@ -42,7 +42,7 @@ describe('provisionCopilot', () => {
       [COPILOT_PROVISIONED_KEY]: await hashes(BUILD),
     });
     expect(await provisionCopilot({ ...BUILD, apiKey: 'test-key-2' }, storage)).toBe(true);
-    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: BUILD.baseUrl, apiKey: 'test-key-2', maxSteps: 10 });
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: BUILD.baseUrl, apiKey: 'test-key-2', apiKeyUrl: BUILD.baseUrl, maxSteps: 10 });
     expect(store.get(COPILOT_PROVISIONED_KEY)).toEqual(await hashes({ ...BUILD, apiKey: 'test-key-2' }));
   });
 
@@ -64,9 +64,35 @@ describe('provisionCopilot', () => {
     expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ model: 'tooling', ...BUILD });
   });
 
-  it('seeds only the empty field and leaves the user-set one', async () => {
-    const { store, storage } = mem({ [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://mine.example/v1', apiKey: '' } });
+  it('keeps the compiled key out of a manual endpoint after it was saved without a key', async () => {
+    const { store, storage } = mem();
     await provisionCopilot(BUILD, storage);
-    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: 'https://mine.example/v1', apiKey: 'test-key-1' });
+    const manual = { baseUrl: 'https://mine.example/v1', apiKey: '', apiKeyUrl: '' };
+    await storage.set(COPILOT_SETTINGS_KEY, manual);
+    expect(await provisionCopilot(BUILD, storage)).toBe(false);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toEqual(manual);
+  });
+
+  it('clears a legacy seed that was left unbound at a different endpoint', async () => {
+    const { store, storage } = mem({
+      [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://mine.example/v1', apiKey: 'previous-build-key' },
+      [COPILOT_PROVISIONED_KEY]: await hashes({ ...BUILD, apiKey: 'previous-build-key' }),
+    });
+    expect(await provisionCopilot(BUILD, storage)).toBe(true);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ baseUrl: 'https://mine.example/v1', apiKey: '' });
+  });
+
+  it('rotates the endpoint and the key together for a managed install', async () => {
+    const { store, storage } = mem();
+    await provisionCopilot(BUILD, storage);
+    const moved = { baseUrl: 'https://replacement.example/v1', apiKey: 'new-key' };
+    await provisionCopilot(moved, storage);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ ...moved, apiKeyUrl: moved.baseUrl });
+  });
+
+  it('never seeds a build key without its own configured endpoint', async () => {
+    const { store, storage } = mem({ [COPILOT_SETTINGS_KEY]: { baseUrl: 'https://mine.example/v1', apiKey: '' } });
+    expect(await provisionCopilot({ ...BUILD, baseUrl: '' }, storage)).toBe(false);
+    expect(store.get(COPILOT_SETTINGS_KEY)).toMatchObject({ apiKey: '' });
   });
 });

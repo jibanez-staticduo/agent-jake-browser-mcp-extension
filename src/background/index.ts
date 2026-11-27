@@ -42,13 +42,10 @@ import {
 } from './update-check';
 import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, recordLastAuto, restoreDownloadUi, selfUpdateNow } from './self-update';
 import {
-  buildDisplayUrl,
   getEffectiveConfig,
+  getServerSettings,
   parseWsUrl,
-  setServerUrl,
-  setToken,
-  setLabel,
-  STORAGE_KEYS,
+  writeServerSettings,
 } from '@/config/runtime';
 import { isSetupInstance } from '@/config/setup-instances';
 import { COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
@@ -254,7 +251,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // This is from popup or other extension page
   (async () => {
     try {
-      const response = await handlePopupMessage(message);
+      const response = await handlePopupMessage(message, sender.tab?.windowId);
       log.debug('Sending popup response');
       sendResponse(response);
     } catch (error) {
@@ -272,7 +269,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handlePopupMessage(message: {
   action: string;
   payload?: unknown;
-}): Promise<unknown> {
+}, senderWindowId?: number): Promise<unknown> {
   const { action, payload } = message;
 
   switch (action) {
@@ -300,18 +297,14 @@ async function handlePopupMessage(message: {
 
     case 'getServerConfig': {
       await initialized;
-      const cfg = await getEffectiveConfig();
-      const stored = await chrome.storage.local.get([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
+      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision } = await getServerSettings();
       return {
-        effectiveUrl: buildDisplayUrl(cfg),
+        effectiveUrl,
         fromStorage: cfg.fromStorage,
         source: cfg.source,
-        storedServerUrl: typeof stored[STORAGE_KEYS.serverUrl] === 'string'
-          ? (stored[STORAGE_KEYS.serverUrl] as string)
-          : '',
-        storedToken: typeof stored[STORAGE_KEYS.token] === 'string'
-          ? (stored[STORAGE_KEYS.token] as string)
-          : '',
+        storedServerUrl,
+        storedToken,
+        serverRevision,
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
         label: cfg.label,
@@ -324,24 +317,34 @@ async function handlePopupMessage(message: {
 
     case 'saveServerConfig': {
       await initialized;
-      const { serverUrl, token, label } = (payload || {}) as { serverUrl?: string; token?: string; label?: string };
-      const trimmed = typeof serverUrl === 'string' ? serverUrl.trim() : undefined;
-      if (trimmed && parseWsUrl(trimmed) === null) return { success: false, error: 'URL del servidor no válida.' };
-      const reconnect = await updateSettings(async () => {
+      const input = (payload ?? {}) as Record<string, unknown>;
+      const serverUrl = typeof input.serverUrl === 'string' ? input.serverUrl.trim() : undefined;
+      const token = typeof input.token === 'string' ? input.token.trim() : undefined;
+      const label = typeof input.label === 'string' ? input.label : undefined;
+      if (serverUrl && !parseWsUrl(serverUrl)) return { success: false, error: 'URL del servidor no válida.' };
+      const result = await updateSettings(async () => {
+        const previous = await getServerSettings();
+        const hasBaseline = input.expectedServerRevision !== undefined || input.expectedEffectiveUrl !== undefined;
+        const matchesBaseline = input.expectedServerRevision === previous.serverRevision
+          && input.expectedEffectiveUrl === previous.effectiveUrl;
+        // Existing callers can supply an explicit endpoint and token together.
+        const unboundToken = token !== undefined && serverUrl === undefined && !hasBaseline;
+        if (unboundToken || (hasBaseline && !matchesBaseline)) {
+          return { success: false, conflict: true, error: 'La configuración del servidor cambió. Vuelve a introducir tus cambios.' } as const;
+        }
         cancelPairing();
         await clearPairCode();
         await cancelSetup();
-        if (trimmed !== undefined) await setServerUrl(trimmed || null);
-        if (typeof token === 'string') await setToken(token.trim());
-        if (typeof label === 'string') await setLabel(label);
-        return { result: wsClient?.reload() };
+        const saved = await writeServerSettings(previous, { serverUrl, token, label });
+        return { success: true, ...saved, reconnect: wsClient?.reload() } as const;
       });
-      await reconnect.result;
-      const cfg = await getEffectiveConfig();
+      if (!result.success) return result;
+      await result.reconnect;
       return {
         success: true,
         connected: wsClient?.isConnected() || false,
-        effectiveUrl: buildDisplayUrl(cfg),
+        effectiveUrl: result.effectiveUrl,
+        serverRevision: result.serverRevision,
       };
     }
 
@@ -356,11 +359,15 @@ async function handlePopupMessage(message: {
 
     case 'startSetup': {
       await initialized;
-      if (!isSetupInstance(payload)) return { success: false, error: 'Selecciona un servidor.' };
-      await startSetup(payload, async () => {
+      const { instance, windowId } = (payload ?? {}) as { instance?: unknown; windowId?: unknown };
+      if (!isSetupInstance(instance)) return { success: false, error: 'Selecciona un servidor.' };
+      const originWindow = typeof windowId === 'number' && Number.isInteger(windowId) && windowId >= 0
+        ? windowId
+        : senderWindowId;
+      await startSetup(instance, async () => {
         cancelPairing();
         await clearPairCode();
-      });
+      }, originWindow);
       return { success: true };
     }
 

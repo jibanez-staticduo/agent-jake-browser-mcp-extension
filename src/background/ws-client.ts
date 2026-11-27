@@ -151,7 +151,7 @@ export class WebSocketClient {
         };
 
         this.socket.onmessage = (event) => {
-          this.handleMessage(event.data);
+          this.handleMessage(socket, event.data);
         };
       } catch (error) {
         this.isConnecting = false;
@@ -222,14 +222,20 @@ export class WebSocketClient {
    * Send a response back to the server.
    */
   send(message: OutgoingMessage): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+    this.sendOnSocket(this.socket, message);
+  }
+
+  /** Send only while the destination is still the active socket. */
+  private sendOnSocket(socket: WebSocket | null, message: OutgoingMessage): void {
+    if (socket !== this.socket) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
       log.error('Cannot send: not connected');
       return;
     }
 
     const data = JSON.stringify(message);
     log.debug('[WS] Sending response');
-    this.socket.send(data);
+    socket.send(data);
   }
 
   /**
@@ -259,7 +265,9 @@ export class WebSocketClient {
   /**
    * Handle incoming WebSocket message.
    */
-  private async handleMessage(data: string): Promise<void> {
+  private async handleMessage(socket: WebSocket, data: string): Promise<void> {
+    if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) return;
+
     let messageId: string | undefined;
     let secret = false;
 
@@ -271,7 +279,7 @@ export class WebSocketClient {
 
       if (!this.messageHandler) {
         log.error('No message handler set');
-        this.send({
+        this.sendOnSocket(socket, {
           id: message.id,
           success: false,
           error: {
@@ -285,12 +293,12 @@ export class WebSocketClient {
       log.info('[WS] Calling message handler for:', message.type);
       const response = await this.messageHandler(message);
       log.info('[WS] Message handler returned, sending response');
-      this.send(response);
+      this.sendOnSocket(socket, response);
     } catch (error) {
       log.error('[WS] Failed to handle message:', secret ? 'Secret typing failed' : error);
       // Send error response back to server so it doesn't timeout
       if (messageId) {
-        this.send({
+        this.sendOnSocket(socket, {
           id: messageId,
           success: false,
           error: {

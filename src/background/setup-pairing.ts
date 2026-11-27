@@ -46,10 +46,10 @@ export function cancelSetup(): Promise<void> {
   return clearAttempt({ state: 'idle' });
 }
 
-async function openApproval(pending: PendingSetup): Promise<void> {
+async function openApproval(pending: PendingSetup, windowId?: number): Promise<void> {
   const url = new URL('/setup', SETUP_INSTANCES[pending.instance].origin);
   url.searchParams.set('code', pending.approvalCode);
-  await chrome.tabs.create({ url: url.href });
+  await chrome.tabs.create({ url: url.href, ...(windowId === undefined ? {} : { windowId }) });
 }
 
 function schedulePoll(attempt: Attempt, delay = POLL_MS): void {
@@ -72,23 +72,31 @@ async function poll(attempt: Attempt): Promise<void> {
         await clearAttempt({ state: 'expired', instance });
       } else if (status?.state === 'approved') {
         const { wsUrl, token, label, connectionId, baseUrl, apiKey, mcpUrl, mcpToken } = status.config;
-        const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-        const previous = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
-        const settings = normalizeCopilotSettings({
-          ...previous, baseUrl, apiKey, apiKeyUrl: baseUrl, mcpUrl, mcpToken, mcpTokenUrl: mcpUrl,
-          vision: true, maxSteps: 200, stepsView: 'extended',
-        });
-        // Clear the resume grant in the same write as the new identity and settings.
-        await chrome.storage.local.set({
-          [PENDING_SETUP]: null,
-          [STORAGE_KEYS.connectionId]: connectionId,
-          [STORAGE_KEYS.serverUrl]: wsUrl,
-          [STORAGE_KEYS.token]: token,
-          [STORAGE_KEYS.tokenUrl]: wsUrl,
-          [STORAGE_KEYS.label]: label,
-          [COPILOT_SETTINGS_KEY]: settings,
-          [COPILOT_PROVISIONED_KEY]: {},
-        });
+        try {
+          const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
+          const previous = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
+          const settings = normalizeCopilotSettings({
+            ...previous, baseUrl, apiKey, apiKeyUrl: baseUrl, mcpUrl, mcpToken, mcpTokenUrl: mcpUrl,
+            vision: true, maxSteps: 200, stepsView: 'extended',
+          });
+          // Clear the resume grant in the same write as the new identity and settings.
+          await chrome.storage.local.set({
+            [PENDING_SETUP]: null,
+            [STORAGE_KEYS.connectionId]: connectionId,
+            [STORAGE_KEYS.serverUrl]: wsUrl,
+            [STORAGE_KEYS.token]: token,
+            [STORAGE_KEYS.tokenUrl]: wsUrl,
+            [STORAGE_KEYS.label]: label,
+            [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
+            [COPILOT_SETTINGS_KEY]: settings,
+            [COPILOT_PROVISIONED_KEY]: {},
+          });
+        } catch {
+          // The server can return the same grant until it expires.
+          info = { state: 'pending', instance, error: 'No se pudo guardar la configuración. Reintentando…' };
+          schedulePoll(attempt);
+          return;
+        }
         info = { state: 'approved', instance };
         active = undefined;
         onApproved?.();
@@ -106,11 +114,11 @@ async function poll(attempt: Attempt): Promise<void> {
   }
 }
 
-export async function startSetup(instance: SetupInstance, beforeStart: () => Promise<void>): Promise<void> {
+export async function startSetup(instance: SetupInstance, beforeStart: () => Promise<void>, windowId?: number): Promise<void> {
   const attempt = await updateSettings(async () => {
     if (info.instance === instance && info.state === 'starting') return;
     if (active?.pending?.instance === instance && Date.now() < active.pending.expiresAt) {
-      await openApproval(active.pending).catch(() => { throw new Error('No se pudo abrir la página de aprobación.'); });
+      await openApproval(active.pending, windowId).catch(() => { throw new Error('No se pudo abrir la página de aprobación.'); });
       return;
     }
     await cancelSetup();
@@ -132,7 +140,7 @@ export async function startSetup(instance: SetupInstance, beforeStart: () => Pro
       attempt.pending = pending;
       info = { state: 'pending', instance };
       try {
-        await openApproval(pending);
+        await openApproval(pending, windowId);
       } finally {
         schedulePoll(attempt, 0);
       }
