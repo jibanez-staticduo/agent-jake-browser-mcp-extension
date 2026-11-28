@@ -25,7 +25,14 @@ import ModelPicker from './ModelPicker.vue';
 import { loadChatModelCatalog } from './model-catalog';
 import { explainError, isControllable, missingText as describeMissing } from './setup';
 import OptionsView from './OptionsView.vue';
-import { readCopilotSettings, saveCopilotPreference, saveCopilotSettings } from '@/utils/copilot-settings';
+import { STORAGE_KEYS } from '@/config/runtime';
+import {
+  CopilotSettingsConflict,
+  readCopilotSettingsSnapshot,
+  saveCopilotPreference,
+  saveCopilotSettings,
+  type CopilotSettingsSnapshot,
+} from '@/utils/copilot-settings';
 import RequestCard from './RequestCard.vue';
 import {
   blocksOf,
@@ -64,7 +71,10 @@ const pinned = ref(false);
 const agentTab = ref<string | null>(null);
 const panel = ref<'none' | 'history'>('none');
 const view = ref<'chat' | 'options'>('chat');
-const settings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
+const settingsSnapshot = ref<CopilotSettingsSnapshot | null>(null);
+const defaultSettings = ref<CopilotSettings>({ ...DEFAULT_COPILOT_SETTINGS });
+const settings = computed(() => settingsSnapshot.value?.settings ?? defaultSettings.value);
+const settingsLoadError = ref(false);
 const models = ref<string[]>([]);
 const modelsError = ref('');
 const modelsLoading = ref(false);
@@ -423,16 +433,16 @@ async function removeChat(c: Chat) {
   }
 }
 
-async function saveSettings(next: CopilotSettings, baseline?: CopilotSettings) {
+async function saveSettings(next: CopilotSettings, baseline: CopilotSettingsSnapshot) {
   const { baseUrl, apiKey } = settings.value;
-  const revision = settingsRevision;
   try {
-    const saved = await saveCopilotSettings(next, baseline);
-    if (settingsRevision === revision) settings.value = { ...saved, ...pendingPreferences };
-    if (settings.value.baseUrl === baseUrl && settings.value.apiKey === apiKey) void loadModels();
-  } catch {
-    check.value = { state: 'error', text: 'No se pudo guardar la configuración del copiloto.' };
+    await saveCopilotSettings(next, baseline);
+  } catch (error) {
+    if (error instanceof CopilotSettingsConflict) await refreshCopilotSettings();
+    throw error;
   }
+  await refreshCopilotSettings();
+  if (settings.value.baseUrl === baseUrl && settings.value.apiKey === apiKey) void loadModels();
 }
 
 async function loadModels() {
@@ -493,6 +503,7 @@ function openOptions() {
   panel.value = 'none';
   focusField.value = missing.value[0] ?? null;
   view.value = 'options';
+  if (!settingsSnapshot.value && settingsLoadError.value) void refreshCopilotSettings();
 }
 
 /**
@@ -536,12 +547,20 @@ const onUpdated = (tabId: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrom
 
 async function refreshCopilotSettings() {
   const revision = ++settingsRevision;
-  const stored = await readCopilotSettings().catch(() => ({ ...DEFAULT_COPILOT_SETTINGS }));
-  if (settingsRevision === revision) settings.value = { ...stored, ...pendingPreferences };
+  settingsLoadError.value = false;
+  try {
+    const stored = await readCopilotSettingsSnapshot();
+    if (settingsRevision === revision) {
+      settingsSnapshot.value = { ...stored, settings: { ...stored.settings, ...pendingPreferences } };
+    }
+  } catch {
+    if (settingsRevision === revision) settingsLoadError.value = true;
+  }
 }
 
 const onStorage = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-  if (area !== 'local' || !(COPILOT_SETTINGS_KEY in changes || COPILOT_PROVISIONED_KEY in changes)) return;
+  if (area !== 'local' || !(COPILOT_SETTINGS_KEY in changes || COPILOT_PROVISIONED_KEY in changes
+    || STORAGE_KEYS.serverRevision in changes)) return;
   void refreshCopilotSettings();
 };
 
@@ -580,17 +599,24 @@ const statusIcon: Record<PlanStep['status'], string> = { pending: '○', in_prog
 
 <template>
   <div class="panel">
-    <OptionsView v-if="view === 'options'" class="grow" :settings="settings" :focus-field="focusField" :check="check"
-      @back="view = 'chat'" @save="saveSettings" />
+    <template v-if="view === 'options'">
+      <OptionsView v-if="settingsSnapshot" class="grow" :snapshot="settingsSnapshot" :focus-field="focusField"
+        :check="check" :save-settings="saveSettings" @back="view = 'chat'" />
+      <div v-else class="grow">
+        <button type="button" class="quiet" @click="view = 'chat'">← Volver a la conversación</button>
+        <p role="status">{{ settingsLoadError ? 'No se pudieron cargar las opciones del copiloto.' : 'Cargando opciones…' }}</p>
+        <button v-if="settingsLoadError" type="button" class="quiet" @click="refreshCopilotSettings">Reintentar</button>
+      </div>
+    </template>
     <template v-else>
     <header>
       <div class="top">
         <button type="button" class="quiet" :disabled="running" :title="running ? 'Espera a que termine la respuesta' : 'Empezar una conversación nueva'"
           @click="startNewChat">Nueva</button>
         <button type="button" class="quiet" :class="{ on: panel === 'history' }" title="Conversaciones guardadas" @click="openHistory">Historial</button>
-        <button type="button" class="quiet" :class="{ on: view === 'options', warn: needsSetup }"
+        <button type="button" class="quiet" :class="{ warn: needsSetup }"
           :title="needsSetup ? 'Falta configuración' : 'Conexión MCP y ajustes del copiloto'"
-          @click="view === 'options' ? (view = 'chat') : openOptions()">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
+          @click="openOptions">Opciones<span v-if="needsSetup" class="warn-dot" aria-label="falta configuración" /></button>
         <!-- Chincheta: arriba a la derecha; lo único que hace es no dejar que el agente se mueva de esta pestaña. -->
         <button type="button" class="pin" :class="{ on: pinned }" :aria-pressed="pinned" :disabled="!target"
           :title="pinned ? 'Quitar la chincheta: dejar que el agente cambie de pestaña' : 'Chincheta: que el agente no se mueva de esta pestaña'"

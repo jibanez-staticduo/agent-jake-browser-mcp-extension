@@ -8,7 +8,12 @@
  * visible and focused, and the MCP status below cannot cover the reason.
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { COPILOT_CREDENTIAL_FIELDS } from '@/utils/copilot-settings';
+import {
+  COPILOT_CREDENTIAL_FIELDS,
+  CopilotSettingsConflict,
+  rebaseCopilotDraft,
+  type CopilotSettingsSnapshot,
+} from '@/utils/copilot-settings';
 import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   copilotMissing,
@@ -27,26 +32,52 @@ import TabSelector from '../popup/components/TabSelector.vue';
 import { FIELD_IDS } from './setup';
 
 const props = defineProps<{
-  settings: CopilotSettings;
+  snapshot: CopilotSettingsSnapshot;
   focusField: CopilotField | null;
   check: { state: 'idle' | 'ok' | 'error'; text: string };
+  saveSettings: (settings: CopilotSettings, baseline: CopilotSettingsSnapshot) => Promise<void>;
 }>();
-const emit = defineEmits<{ back: []; save: [settings: CopilotSettings, baseline: CopilotSettings] }>();
+const emit = defineEmits<{ back: [] }>();
 
 const status = useStatusStore();
 const server = useServerStore();
 const activity = useActivityStore();
 
-const draft = ref<CopilotSettings>({ ...props.settings });
-watch(() => props.settings, (next, previous) => {
-  const fields = Object.keys(draft.value) as (keyof CopilotSettings)[];
-  const edits = new Set(fields.filter((field) => draft.value[field] !== previous[field] && draft.value[field] !== next[field]));
-  for (const group of COPILOT_CREDENTIAL_FIELDS) {
-    if (group.some((field) => edits.has(field))) group.forEach((field) => edits.add(field));
+const draft = ref<CopilotSettings>({ ...props.snapshot.settings });
+let baseline = props.snapshot;
+const saving = ref(false);
+const saveError = ref('');
+
+function refreshDraft(next: CopilotSettingsSnapshot) {
+  const updated = rebaseCopilotDraft(draft.value, baseline, next);
+  draft.value = updated.draft;
+  baseline = updated.baseline;
+}
+
+watch(() => props.snapshot, refreshDraft);
+
+async function save() {
+  if (saving.value) return;
+  saving.value = true;
+  saveError.value = '';
+  try {
+    await props.saveSettings({ ...draft.value }, baseline);
+    baseline = props.snapshot;
+    draft.value = { ...baseline.settings };
+  } catch (error) {
+    if (error instanceof CopilotSettingsConflict) {
+      saveError.value = error.message;
+      const fields = COPILOT_CREDENTIAL_FIELDS.flat();
+      const originalCredentials = Object.fromEntries(fields.map((key) => [key, baseline.settings[key]]));
+      draft.value = { ...draft.value, ...originalCredentials };
+      refreshDraft(props.snapshot);
+    } else {
+      saveError.value = 'No se pudo guardar la configuración del copiloto.';
+    }
+  } finally {
+    saving.value = false;
   }
-  const pending = Object.fromEntries([...edits].map((field) => [field, draft.value[field]]));
-  draft.value = { ...next, ...pending };
-});
+}
 
 function onBaseUrlInput() {
   if (draft.value.apiKeyUrl === draft.value.baseUrl) return;
@@ -100,7 +131,11 @@ async function updateNow() {
 
 // The same rule as the chat (copilotMissing), applied to what is typed.
 const missing = computed(() => copilotMissing(draft.value));
-const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(props.settings));
+const dirty = computed(() => {
+  const latest = props.snapshot.settings;
+  const fields = Object.keys({ ...latest, ...draft.value }) as (keyof CopilotSettings)[];
+  return fields.some((key) => draft.value[key] !== latest[key]);
+});
 const FIELD_LABEL: Record<CopilotField, string> = { baseUrl: 'Endpoint', apiKey: 'API key', model: 'Modelo' };
 const FIELD_WHY: Record<CopilotField, string> = {
   baseUrl: 'Escribe la URL del endpoint (https, o localhost).',
@@ -187,7 +222,8 @@ onUnmounted(() => {
     </section>
 
     <h2>Copiloto</h2>
-    <form class="copilot" @submit.prevent="emit('save', { ...draft }, { ...settings })">
+    <form class="copilot" @submit.prevent="save">
+      <fieldset :disabled="saving">
       <label>Endpoint (OpenAI-compatible)
         <input :id="FIELD_IDS.baseUrl" v-model="draft.baseUrl" :class="{ bad: missing.includes('baseUrl') }" placeholder="https://…/v1"
           spellcheck="false" :aria-invalid="missing.includes('baseUrl')" @input="onBaseUrlInput">
@@ -231,9 +267,10 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="savebar">
-        <span class="state" :class="{ err: missing.length || check.state === 'error' }">{{ state }}</span>
+        <span class="state" role="status" :class="{ err: saveError || missing.length || check.state === 'error' }">{{ saveError || state }}</span>
         <button type="submit" class="primary" :disabled="missing.length > 0">Guardar copiloto</button>
       </div>
+      </fieldset>
     </form>
 
     <h2>Conexión MCP (sesiones del agente)</h2>
@@ -261,7 +298,7 @@ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var
 .update-banner .now { margin-left: 6px; }
 .update-banner .note { margin-top: 4px; color: var(--text-secondary); }
 .update-banner.idle { border-color: var(--text-secondary); color: var(--text-secondary); }
-.copilot { display: flex; flex-direction: column; gap: 8px; }
+.copilot fieldset { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .copilot label { display: flex; flex-direction: column; gap: 3px; color: var(--text-secondary); flex: 1; }
 .copilot label.check { flex-direction: row; align-items: center; gap: 6px; }
 .copilot input.bad { border-color: var(--accent-danger); }

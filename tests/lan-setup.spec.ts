@@ -421,6 +421,32 @@ test.describe('StaticDuo LAN setup with a built server', () => {
             setup.getByRole('button', { name: instance.name, exact: true }).click(),
           ]);
           await expect(approval).toHaveURL(`${instance.origin}/setup`);
+          if (instance.name === 'Defend (Fedora)') {
+            await test.step('Keep the NAS connection and poll while Fedora approval is pending', async () => {
+              const nas = destinations[0];
+              const original = approvals.get(nas)!;
+              const nasButton = setup.getByRole('button', { name: nas.instance.name, exact: true });
+              const pending = panel.getByText('Completa la aprobación en la pestaña de Defend (Fedora).', { exact: true });
+              const storedSetup = () => worker.evaluate(() => chrome.storage.local.get(['ajb.serverRevision', 'ajb.pendingSetup']));
+              const statusPolls = () => destination.proxy.requests.filter(({ path, status }) => path === '/setup/status' && status === 200).length;
+              await expect(pending).toBeVisible();
+              await expect.poll(statusPolls).toBeGreaterThan(0);
+              const before = await storedSetup();
+              expect(before['ajb.serverRevision']).toMatch(uuid);
+              expect(before['ajb.pendingSetup']).toMatchObject({ instance: 'defend' });
+              const upgradeCount = nas.proxy.upgrades.length;
+
+              await nasButton.click();
+              await expect(nasButton).toBeEnabled();
+              const pollsAfterClick = statusPolls();
+              await expect.poll(statusPolls).toBeGreaterThan(pollsAfterClick);
+              await expect(pending).toBeVisible();
+              await expect(nasButton).toHaveAccessibleDescription('En uso');
+              await expectActive(nas, original.connectionId, original.token);
+              expect(nas.proxy.upgrades).toHaveLength(upgradeCount);
+              expect(await storedSetup()).toEqual(before);
+            });
+          }
           if (!instance.inferredHost) await approval.getByLabel('Nombre del equipo').fill('Fixture laptop');
           await approval.getByLabel('Nombre del perfil del navegador').fill(`${instance.name} Profile`);
           await approval.getByRole('button', { name: 'Emparejar', exact: true }).click();
@@ -441,7 +467,8 @@ test.describe('StaticDuo LAN setup with a built server', () => {
         { path: '/setup/approve', status: 200 },
       ]));
       const newPages: string[] = [];
-      browser.on('page', page => newPages.push(page.url()));
+      const recordPage = (page: typeof panel) => newPages.push(page.url());
+      browser.on('page', recordPage);
       for (const destination of destinations) {
         await test.step(`Restore ${destination.instance.name} without approval`, async () => {
           const button = setup.getByRole('button', { name: destination.instance.name, exact: true });
@@ -454,8 +481,53 @@ test.describe('StaticDuo LAN setup with a built server', () => {
           await expect(button).toHaveAccessibleDescription('En uso');
         });
       }
+      browser.off('page', recordPage);
       expect(newPages).toEqual([]);
       expect(approvalRequests()).toEqual(initialRequests);
+
+      const switchPanel = await browser.newPage();
+      try {
+        await switchPanel.goto(panelUrl);
+        await switchPanel.getByRole('button', { name: 'Opciones', exact: true }).click();
+        const switchSetup = switchPanel.getByRole('group', { name: 'Emparejar con servidor' });
+        const [nas, fedora, ari] = destinations;
+        const key = panel.getByLabel('API key');
+        const mcp = panel.getByLabel('Token MCP (opcional)', { exact: false });
+        async function select(destination: Destination) {
+          const button = switchSetup.getByRole('button', { name: destination.instance.name, exact: true });
+          await button.click();
+          await expect(button).toHaveAccessibleDescription('En uso');
+          const { connectionId, token } = approvals.get(destination)!;
+          await expectActive(destination, connectionId, token);
+        }
+
+        for (const destination of [ari, fedora]) {
+          await test.step(`Reject a NAS Copilot draft after switching to ${destination.instance.name}`, async () => {
+            await select(nas);
+            await expect(key).toHaveValue(nas.settings.apiKey);
+            await expect(mcp).toHaveValue(nas.settings.mcpToken);
+            await key.fill('fixture-unsaved-nas-key');
+            await mcp.fill('fixture-unsaved-nas-mcp-token');
+
+            await select(destination);
+            await panel.getByRole('button', { name: 'Guardar copiloto', exact: true }).click();
+            await expect(panel.getByText('La configuración del servidor cambió. Vuelve a introducir tus cambios.', { exact: true })).toBeVisible();
+            await expect(key).toHaveValue(destination.settings.apiKey);
+            await expect(mcp).toHaveValue(destination.settings.mcpToken);
+            const { connectionId, token } = approvals.get(destination)!;
+            await expectActive(destination, connectionId, token);
+            await select(nas);
+            await expect(key).toHaveValue(nas.settings.apiKey);
+            await expect(mcp).toHaveValue(nas.settings.mcpToken);
+            await select(destination);
+          });
+        }
+        await select(ari);
+        expect(approvalRequests()).toEqual(initialRequests);
+      } finally {
+        await switchPanel.close();
+      }
+
       await panel.getByRole('button', { name: 'Volver a la conversación' }).click();
       await expect(panel.getByText(chatText, { exact: true })).toBeVisible();
       await expect(draft).toHaveValue('Unsent fixture message');

@@ -45,11 +45,12 @@ import {
   getEffectiveConfig,
   getServerSettings,
   parseWsUrl,
+  STORAGE_KEYS,
   writeServerSettings,
 } from '@/config/runtime';
 import { isSetupInstance } from '@/config/setup-instances';
 import { COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
-import { buildProvision, normalizeCopilotSettings } from '@/utils/copilot-settings';
+import { buildProvision, COPILOT_CREDENTIAL_FIELDS, normalizeCopilotSettings } from '@/utils/copilot-settings';
 
 // Keep-alive alarm name - fires every 12 seconds to prevent service worker sleep
 const KEEPALIVE_ALARM = 'keepalive';
@@ -380,15 +381,19 @@ async function handlePopupMessage(message: {
 
     case 'saveCopilotSettings': {
       await initialized;
-      const changes = payload as Partial<CopilotSettings>;
-      const settings = await updateSettings(async () => {
-        const raw = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
+      const { expectedServerRevision, ...changes } = (payload ?? {}) as Partial<CopilotSettings> & { expectedServerRevision?: unknown };
+      return updateSettings(async () => {
+        const raw = await chrome.storage.local.get([COPILOT_SETTINGS_KEY, STORAGE_KEYS.serverRevision]);
+        const revision = raw[STORAGE_KEYS.serverRevision];
+        const changesCredentials = COPILOT_CREDENTIAL_FIELDS.some(group => group.some(field => Object.hasOwn(changes, field)));
+        if (changesCredentials && expectedServerRevision !== (typeof revision === 'string' ? revision : null)) {
+          return { success: false, conflict: true, error: 'La configuración del servidor cambió. Vuelve a introducir tus cambios.' };
+        }
         const stored = raw[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
         const next = normalizeCopilotSettings({ ...stored, ...changes });
         await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: next });
-        return next;
+        return { success: true, settings: next };
       });
-      return { success: true, settings };
     }
 
     case 'pairingStatus': {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getEffectiveConfig, STORAGE_KEYS } from '@/config/runtime';
+import { getEffectiveConfig, getServerSettings, STORAGE_KEYS, writeServerSettings } from '@/config/runtime';
 import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 import { COPILOT_SETTINGS_KEY } from '@/types/copilot';
 
@@ -121,20 +121,54 @@ describe('automatic setup', () => {
       await vi.advanceTimersByTimeAsync(20);
     }
 
-    Object.assign(store, {
-      [STORAGE_KEYS.token]: '',
-      [STORAGE_KEYS.label]: 'Changed manually',
+    await writeServerSettings(await getServerSettings(), {
+      serverUrl: 'wss://agent-browser.staticduo.com:443/ws/', token: '', label: 'Changed manually',
     });
+    const manualBase = 'https://model.example.test/v1';
     Object.assign(store[COPILOT_SETTINGS_KEY] as object, {
-      apiKey: 'rotated-key', mcpToken: '', mcpTokenUrl: '', vision: false, maxSteps: 35, stepsView: 'compact',
+      baseUrl: manualBase, apiKey: 'rotated-key', apiKeyUrl: manualBase,
+      mcpUrl: '', mcpToken: '', mcpTokenUrl: '', vision: false, maxSteps: 35, stepsView: 'compact',
     });
     await setup.startSetup('defend', clearLegacy);
     expect((await getEffectiveConfig()).token).toBe(config.token);
     await setup.startSetup('nas', clearLegacy);
     expect(await getEffectiveConfig()).toMatchObject({ token: '', label: 'Changed manually' });
     expect(store[COPILOT_SETTINGS_KEY]).toMatchObject({
-      apiKey: 'rotated-key', mcpToken: '', vision: false, maxSteps: 35, stepsView: 'compact',
+      baseUrl: manualBase, apiKey: 'rotated-key', apiKeyUrl: manualBase,
+      mcpUrl: '', mcpToken: '', vision: false, maxSteps: 35, stepsView: 'compact',
     });
+
+    await writeServerSettings(await getServerSettings(), {
+      serverUrl: 'wss://agent-browser.staticduo.com:443/ws', token: 'rotated-ws-key',
+    });
+    await setup.startSetup('defend', clearLegacy);
+    await setup.startSetup('nas', clearLegacy);
+    expect((await getEffectiveConfig()).token).toBe('rotated-ws-key');
+  });
+
+  it('migrates a previous pairing whose display label was cleared', async () => {
+    const setup = await import('@/background/setup-pairing');
+    const nas = SETUP_INSTANCES.nas;
+    const nasId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    Object.assign(store, {
+      [STORAGE_KEYS.serverUrl]: nas.wsUrl,
+      [STORAGE_KEYS.tokenUrl]: nas.wsUrl,
+      [STORAGE_KEYS.token]: 'nas-ws-key',
+      [STORAGE_KEYS.connectionId]: nasId,
+      [STORAGE_KEYS.label]: '',
+      [COPILOT_SETTINGS_KEY]: {
+        baseUrl: nas.baseUrl, apiKeyUrl: nas.baseUrl, apiKey: 'nas-api-key',
+        mcpUrl: nas.mcpUrl, mcpTokenUrl: nas.mcpUrl, mcpToken: 'nas-mcp-key',
+      },
+    });
+    expect(await setup.getPairedInstances()).toEqual(['nas']);
+    fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+    fetch.mockResolvedValueOnce(response({ state: 'approved', config }));
+    await setup.startSetup('defend', clearLegacy);
+    await vi.advanceTimersByTimeAsync(20);
+    await setup.startSetup('nas', clearLegacy);
+    expect(await getEffectiveConfig()).toMatchObject({ label: '', connectionId: nasId, token: 'nas-ws-key' });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it('opens approval without the poll secret and applies one atomic write and reconnect', async () => {

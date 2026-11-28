@@ -1,8 +1,8 @@
-import { STORAGE_KEYS } from '@/config/runtime';
+import { buildDisplayUrl, normalizeLabel, parseWsUrl, STORAGE_KEYS } from '@/config/runtime';
 import { isSetupInstance, SETUP_INSTANCES, type SetupInstance, type SetupPairingInfo } from '@/config/setup-instances';
 import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
 import { normalizeCopilotSettings } from '@/utils/copilot-settings';
-import { isSetupConfig, isSetupSecret, requestSetup, requestSetupStatus, type SetupConfig } from './setup-client';
+import { isSetupIdentity, isSetupSecret, requestSetup, requestSetupStatus, type SetupConfig } from './setup-client';
 import { updateSettings } from './settings-update';
 
 const PENDING_SETUP = 'ajb.pendingSetup';
@@ -28,6 +28,13 @@ let onApproved: (() => void) | undefined;
 
 type SavedSetups = Partial<Record<SetupInstance, SetupConfig>>;
 
+function isSavedSetup(instance: SetupInstance, value: unknown): value is SetupConfig {
+  const config = value as Partial<SetupConfig> | null | undefined;
+  return !!config && isSetupIdentity(instance, config, true)
+    && typeof config.token === 'string' && typeof config.baseUrl === 'string' && typeof config.apiKey === 'string'
+    && typeof config.mcpUrl === 'string' && typeof config.mcpToken === 'string';
+}
+
 async function readSetups() {
   const stored = await chrome.storage.local.get([
     SAVED_SETUPS, COPILOT_SETTINGS_KEY, STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl,
@@ -36,41 +43,36 @@ async function readSetups() {
   const saved = stored[SAVED_SETUPS] as Partial<Record<SetupInstance, unknown>> | undefined;
   const settings = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
   const setups: SavedSetups = {};
-  const wsUrl = stored[STORAGE_KEYS.serverUrl];
-  const connectionId = stored[STORAGE_KEYS.connectionId];
-  const label = stored[STORAGE_KEYS.label];
+  const rawUrl = stored[STORAGE_KEYS.serverUrl];
+  const parsed = typeof rawUrl === 'string' ? parseWsUrl(rawUrl) : null;
+  const wsUrl = parsed ? buildDisplayUrl({ ...parsed, scheme: parsed.secure ? 'wss' : 'ws' }) : '';
+  const rawConnectionId = stored[STORAGE_KEYS.connectionId];
+  const connectionId = typeof rawConnectionId === 'string' ? rawConnectionId : '';
+  const label = normalizeLabel(stored[STORAGE_KEYS.label]);
+  const rawToken = stored[STORAGE_KEYS.token];
+  const token = typeof rawToken === 'string' && stored[STORAGE_KEYS.tokenUrl] === wsUrl ? rawToken : '';
+  const baseUrl = typeof settings?.baseUrl === 'string' ? settings.baseUrl : '';
+  const mcpUrl = typeof settings?.mcpUrl === 'string' ? settings.mcpUrl : '';
+  const apiKey = baseUrl && settings?.apiKeyUrl === baseUrl && typeof settings.apiKey === 'string' ? settings.apiKey : '';
+  const mcpToken = mcpUrl && settings?.mcpTokenUrl === mcpUrl && typeof settings.mcpToken === 'string' ? settings.mcpToken : '';
+  const current = { wsUrl, connectionId, label, token, baseUrl, apiKey, mcpUrl, mcpToken };
+  let activeInstance: SetupInstance | undefined;
 
   for (const [key, endpoint] of Object.entries(SETUP_INSTANCES)) {
     const instance = key as SetupInstance;
     const config = saved?.[instance];
-    if (isSetupConfig(instance, config, true)) {
-      setups[instance] = config;
-      if (config.wsUrl !== wsUrl || config.connectionId !== connectionId) continue;
-      const current = {
-        ...config,
-        label,
-        token: stored[STORAGE_KEYS.tokenUrl] === wsUrl ? stored[STORAGE_KEYS.token] : '',
-        apiKey: settings?.baseUrl === endpoint.baseUrl && settings.apiKeyUrl === endpoint.baseUrl ? settings.apiKey : '',
-        mcpToken: settings?.mcpUrl === endpoint.mcpUrl && settings.mcpTokenUrl === endpoint.mcpUrl ? settings.mcpToken : '',
-      };
-      if (isSetupConfig(instance, current, true)) setups[instance] = current;
-      continue;
+    if (isSavedSetup(instance, config)) {
+      const matchesCurrent = config.wsUrl === wsUrl && config.connectionId === connectionId;
+      setups[instance] = matchesCurrent ? current : config;
+      if (matchesCurrent) activeInstance = instance;
+    } else if (saved === undefined && baseUrl === endpoint.baseUrl && mcpUrl === endpoint.mcpUrl
+      && token && apiKey && mcpToken && isSavedSetup(instance, current)) {
+      // The single-destination version wrote only the active, fully bound preset.
+      setups[instance] = current;
+      activeInstance = instance;
     }
-    if (saved !== undefined) continue;
-    // Migrate a complete, endpoint-bound setup written by the single-destination version.
-    const legacy = {
-      wsUrl,
-      token: stored[STORAGE_KEYS.tokenUrl] === wsUrl ? stored[STORAGE_KEYS.token] : undefined,
-      connectionId,
-      label,
-      baseUrl: settings?.baseUrl,
-      apiKey: settings?.apiKeyUrl === settings?.baseUrl ? settings?.apiKey : undefined,
-      mcpUrl: settings?.mcpUrl,
-      mcpToken: settings?.mcpTokenUrl === settings?.mcpUrl ? settings?.mcpToken : undefined,
-    };
-    if (isSetupConfig(instance, legacy)) setups[instance] = legacy;
   }
-  return { setups, settings };
+  return { setups, settings, activeInstance };
 }
 
 export async function getPairedInstances(): Promise<SetupInstance[]> {
@@ -196,7 +198,7 @@ export async function startSetup(
       await openApproval(active.pending, windowId).catch(() => { throw new Error('No se pudo abrir la página de aprobación.'); });
       return;
     }
-    if (reopen) return;
+    if (reopen || (!rePair && stored.activeInstance === instance)) return;
     if (saved && !rePair) {
       await beforeStart();
       await applySetup(instance, saved, stored, false);

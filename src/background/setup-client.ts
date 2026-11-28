@@ -58,15 +58,19 @@ export async function requestSetup(instance: SetupInstance, signal: AbortSignal)
   return { approvalCode: grant.approvalCode, pollSecret: grant.pollSecret };
 }
 
-export function isSetupConfig(instance: SetupInstance, config: unknown, allowCleared = false): config is SetupConfig {
-  const expected = SETUP_INSTANCES[instance];
-  const value = config as Partial<SetupConfig> | null | undefined;
-  const validCredential = (credential: unknown) => isCredential(credential) || (allowCleared && credential === '');
-  return value?.wsUrl === expected.wsUrl && value.baseUrl === expected.baseUrl && value.mcpUrl === expected.mcpUrl
-    && validCredential(value.token) && validCredential(value.apiKey) && validCredential(value.mcpToken)
-    && typeof value.label === 'string' && (allowCleared || !!value.label) && value.label === normalizeLabel(value.label)
+export function isSetupIdentity(instance: SetupInstance, value: Partial<SetupConfig> | null | undefined, allowEmptyLabel = false): boolean {
+  return value?.wsUrl === SETUP_INSTANCES[instance].wsUrl
+    && typeof value.label === 'string' && (allowEmptyLabel || !!value.label) && value.label === normalizeLabel(value.label)
     && typeof value.connectionId === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.connectionId);
+}
+
+function isSetupConfig(instance: SetupInstance, config: unknown): config is SetupConfig {
+  const expected = SETUP_INSTANCES[instance];
+  const value = config as Partial<SetupConfig> | null | undefined;
+  return value?.baseUrl === expected.baseUrl && value.mcpUrl === expected.mcpUrl
+    && isCredential(value.token) && isCredential(value.apiKey) && isCredential(value.mcpToken)
+    && isSetupIdentity(instance, value);
 }
 
 export async function requestSetupStatus(instance: SetupInstance, pollSecret: string, signal: AbortSignal): Promise<SetupStatus | null> {

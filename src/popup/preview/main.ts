@@ -12,11 +12,17 @@ import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import App from '../../sidepanel/OptionsView.vue';
 import StateController from './StateController.vue';
+import { DEFAULT_COPILOT_SETTINGS } from '@/types/copilot';
 import '../styles/variables.css';
 import '../styles/base.css';
 
 // Mount production app
-const app = createApp(App, { settings: { baseUrl: '', apiKey: '', model: 'qwen38-flash-next', mode: 'ask', maxSteps: 30, vision: false } });
+const app = createApp(App, {
+  snapshot: { settings: { ...DEFAULT_COPILOT_SETTINGS }, serverRevision: null },
+  focusField: null,
+  check: { state: 'idle', text: '' },
+  saveSettings: async () => {},
+});
 app.use(createPinia());
 app.mount('#app');
 
