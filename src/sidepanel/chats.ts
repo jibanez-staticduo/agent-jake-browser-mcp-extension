@@ -119,14 +119,7 @@ export async function currentChatId(): Promise<string | null> {
 
 /** The resident local model: first in its group and the default (DEFAULT_COPILOT_SETTINGS.model). */
 const RESIDENT = 'qwen38-flash-next';
-const NON_CHAT = /(bge|embed|rerank|whisper|stt|tts|omnivoice|imagine|image|video|probe)/i;
-
-/** Models a chat composer should offer: drop embeddings, audio, image and probes. */
-export function chatModels(ids: string[]): string[] {
-  return [...new Set(ids.filter((id) => !NON_CHAT.test(id)))].sort();
-}
-
-export type ModelGroupId = 'local' | 'alibaba' | 'openrouter';
+export type ModelGroupId = 'local' | 'gpt' | 'alibaba' | 'openrouter' | 'other';
 
 export interface ModelGroup {
   id: ModelGroupId;
@@ -136,19 +129,23 @@ export interface ModelGroup {
 
 export const MODEL_GROUPS: { id: ModelGroupId; label: string }[] = [
   { id: 'local', label: 'Local · gratis' },
+  { id: 'gpt', label: 'GPT' },
   { id: 'alibaba', label: 'Plan Alibaba' },
   { id: 'openrouter', label: 'Externo · OpenRouter' },
+  { id: 'other', label: 'Otros modelos' },
 ];
 
 export function modelGroupOf(id: string): ModelGroupId {
+  if (/^gpt-\d[^/]*$/i.test(id)) return 'gpt';
   if (id.startsWith('alibaba-')) return 'alibaba';
   if (id.startsWith('or-')) return 'openrouter';
-  return 'local';
+  if (/^(qwen38-|tooling(?:-|$)|5090-local-)/.test(id)) return 'local';
+  return 'other';
 }
 
 /** Chat models split by where they run (LiteLLM alias prefix), local resident first, then A-Z. */
 export function groupChatModels(ids: string[]): ModelGroup[] {
-  const chat = chatModels(ids);
+  const chat = [...new Set(ids)];
   return MODEL_GROUPS
     .map((g) => ({
       ...g,
@@ -202,7 +199,7 @@ const MODEL_NAMES: Record<string, string> = {
   'or-gemma-31b': 'Gemma 4 31B',
 };
 
-const ACRONYMS = /^(glm|lfm|llm|ai|ocr)$/i;
+const ACRONYMS = /^(gpt|glm|lfm|llm|ai|ocr)$/i;
 
 /** Fallback for an alias with no entry: prefix off, words capitalised, acronyms and sizes upper-case. */
 export function humanizeModel(id: string): string {

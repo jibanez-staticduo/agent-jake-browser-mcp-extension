@@ -14,11 +14,14 @@ class FakeSocket {
   onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
-  onmessage = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
   constructor(public url: string) { FakeSocket.instances.push(this); }
   open() { this.readyState = 1; this.onopen?.(); }
+  receive(id: string) {
+    this.onmessage?.({ data: JSON.stringify({ id, type: 'browser_list_tabs', payload: {} }) });
+  }
 }
 const cfg: RuntimeServerConfig = {
   secure: true, hostname: 'example.test', port: 443, path: '/ws', scheme: 'wss',
@@ -38,6 +41,134 @@ beforeEach(() => {
   client = new WebSocketClient();
 });
 afterEach(() => { client.disconnect(); vi.unstubAllGlobals(); });
+
+describe('WebSocket connection replacement', () => {
+  it('settles the first reload while the replacement handshake is pending', async () => {
+    mocks.config.mockResolvedValue({ ...cfg, token: 'first-token' });
+    const firstReload = client.reload();
+    await settle();
+    const first = FakeSocket.instances[0];
+
+    mocks.config.mockResolvedValue({ ...cfg, hostname: 'replacement.test', token: 'second-token' });
+    const secondReload = client.reload();
+    await firstReload;
+    await settle();
+
+    const second = FakeSocket.instances[1];
+    const secondUrl = new URL(second.url);
+    expect(first.close).toHaveBeenCalledWith(1000, 'Client disconnect');
+    expect(secondUrl.hostname).toBe('replacement.test');
+    expect(secondUrl.searchParams.get('connectionId')).toBe('browser-id');
+    expect(secondUrl.searchParams.get('token')).toBe('second-token');
+    expect(client.isReconnecting()).toBe(true);
+    expect(client.isConnected()).toBe(false);
+    mocks.activity.mockClear();
+
+    first.open();
+    first.onerror?.();
+    first.onclose?.({ code: 1006, reason: '' });
+    expect(mocks.activity).not.toHaveBeenCalled();
+    expect(client.isReconnecting()).toBe(true);
+    expect(client.isConnected()).toBe(false);
+    expect(first.send).not.toHaveBeenCalled();
+    expect(second.send).not.toHaveBeenCalled();
+
+    second.open();
+    await secondReload;
+    first.open();
+    first.onclose?.({ code: 1006, reason: '' });
+    expect(second.send).toHaveBeenCalledTimes(1);
+    expect(client.isReconnecting()).toBe(false);
+    expect(client.isConnected()).toBe(true);
+    expect(client.getEffectiveUrl()).toBe('wss://replacement.test/ws');
+  });
+
+  it('ignores a superseded config read that finishes after the replacement connects', async () => {
+    let finishConfig!: (config: RuntimeServerConfig) => void;
+    mocks.config.mockReturnValueOnce(new Promise<RuntimeServerConfig>(resolve => { finishConfig = resolve; }));
+    const first = client.connect();
+
+    mocks.config.mockResolvedValue({ ...cfg, hostname: 'replacement.test', token: 'test-token' });
+    const second = client.reload();
+    expect(await first).toBe(false);
+    await settle();
+    FakeSocket.instances[0].open();
+    await second;
+
+    finishConfig(cfg);
+    await settle();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(client.isConnected()).toBe(true);
+    expect(client.getEffectiveUrl()).toBe('wss://replacement.test/ws');
+  });
+
+  it('ignores an authentication probe completed during the replacement handshake', async () => {
+    let finishProbe!: (result: ReturnType<typeof response>) => void;
+    fetchMock.mockReturnValueOnce(new Promise<ReturnType<typeof response>>(resolve => { finishProbe = resolve; }));
+    const first = client.connect();
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    mocks.config.mockResolvedValue({ ...cfg, hostname: 'replacement.test', token: 'test-token' });
+    const second = client.reload();
+    expect(await first).toBe(false);
+    await settle();
+    expect(FakeSocket.instances).toHaveLength(1);
+
+    finishProbe(response(true));
+    await settle();
+    expect(client.isAwaitingToken()).toBe(false);
+    expect(client.isReconnecting()).toBe(true);
+    expect(client.getEffectiveUrl()).toBe('wss://replacement.test/ws');
+
+    FakeSocket.instances[0].open();
+    await second;
+    expect(client.isConnected()).toBe(true);
+  });
+});
+
+describe('WebSocket response routing', () => {
+  it.each(['result', 'error'] as const)('discards a pending %s when the socket is replaced', async (outcome) => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const handleRequest = vi.fn(async ({ id }: { id: string }) => {
+      if (id === 'original') {
+        await pending;
+        if (outcome === 'error') throw new Error('Original request failed');
+      }
+      return { id, success: true };
+    });
+    client.setMessageHandler(handleRequest);
+
+    mocks.config.mockResolvedValue({ ...cfg, token: 'test-token' });
+    const connecting = client.connect();
+    await settle();
+    const original = FakeSocket.instances[0];
+    original.open();
+    await connecting;
+    original.send.mockClear();
+    original.receive('original');
+    expect(handleRequest).toHaveBeenCalledWith({ id: 'original', type: 'browser_list_tabs', payload: {} });
+
+    mocks.config.mockResolvedValue({ ...cfg, hostname: 'replacement.test', token: 'test-token' });
+    const reloading = client.reload();
+    await settle();
+    const replacement = FakeSocket.instances[1];
+    replacement.open();
+    await reloading;
+    replacement.send.mockClear();
+
+    finish();
+    replacement.receive('replacement');
+    await settle();
+
+    expect(original.send).not.toHaveBeenCalled();
+    expect(replacement.send.mock.calls.map(([data]) => JSON.parse(data))).toEqual([
+      { id: 'replacement', success: true },
+    ]);
+  });
+});
 
 describe('WebSocket authentication startup', () => {
   it('waits for a token without opening or repeatedly probing the authenticated server', async () => {

@@ -40,7 +40,7 @@ chk "15 aviso de versión nueva (al arrancar y cada 30 min)" bash -c 'grep -q "U
 # panel (`disablePanelByDefault`): con `side_panel.default_path` en el manifest, sin eso Chrome lo muestra en
 # todas las de la ventana y te persigue al cambiar.
 chk "16 el botón abre el side panel de su pestaña, sin popup" bash -c 'grep -q "open({ tabId" src/background/panel-open.ts && grep -q "disablePanelByDefault(chrome.sidePanel)" src/background/index.ts && ! grep -q default_popup manifest.json'
-chk "16b provisión del copiloto al instalar y al arrancar" bash -c '[ "$(grep -c "runProvision();" src/background/index.ts)" -ge 2 ]'
+chk "16b provisión del copiloto al iniciar el service worker" bash -c 'sed -n "/^async function initialize(/,/^}/p" src/background/index.ts | grep -q "await updateSettings(() => provisionCopilot("'
 # Dictation uses the web getUserMedia permission prompt, not a manifest permission.
 chk "16c dictation requests audio without an invalid manifest permission" bash -c '! grep -q "\"microphone\"" manifest.json && grep -q "getUserMedia({ audio: true })" src/sidepanel/App.vue'
 # Autoactualización: motor, permisos de descargas y clave pública fijada.

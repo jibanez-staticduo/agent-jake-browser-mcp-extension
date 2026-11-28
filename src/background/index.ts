@@ -18,13 +18,16 @@ import { activityLog } from './activity-log';
 import { preparePrivateStorage } from './storage-privacy';
 import {
   cancelPairing,
+  clearPairCode,
   getPairingInfo,
   maybeAutoStartPairing,
   setOnTokenApproved,
   startPairing,
 } from './pairing';
+import { cancelSetup, getPairedInstances, getSetupPairingInfo, rememberPairedSetups, resumeSetup, setOnSetupApproved, startSetup } from './setup-pairing';
+import { updateSettings } from './settings-update';
 import { log } from '@/utils/logger';
-import { buildProvision, chromeProvisionStorage, provisionCopilot } from './provision';
+import { chromeProvisionStorage, provisionCopilot } from './provision';
 import { createCopilotTrafficGate, registerCopilotBridge } from './agent/bridge';
 import { disablePanelByDefault, openPanelForTab } from './panel-open';
 import {
@@ -39,14 +42,15 @@ import {
 } from './update-check';
 import { chromeSelfUpdateDeps, cleanupAfterUpdate, maybeSelfUpdate, recordLastAuto, restoreDownloadUi, selfUpdateNow } from './self-update';
 import {
-  buildDisplayUrl,
   getEffectiveConfig,
+  getServerSettings,
   parseWsUrl,
-  setServerUrl,
-  setToken,
-  setLabel,
   STORAGE_KEYS,
+  writeServerSettings,
 } from '@/config/runtime';
+import { isSetupInstance } from '@/config/setup-instances';
+import { COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
+import { buildProvision, COPILOT_CREDENTIAL_FIELDS, normalizeCopilotSettings, type CopilotSettingsPatch } from '@/utils/copilot-settings';
 
 // Keep-alive alarm name - fires every 12 seconds to prevent service worker sleep
 const KEEPALIVE_ALARM = 'keepalive';
@@ -84,6 +88,9 @@ async function initialize(): Promise<void> {
   log.info('Initializing Agent Jake Browser MCP Extension');
 
   await preparePrivateStorage();
+  await updateSettings(() => provisionCopilot(buildProvision(), chromeProvisionStorage())).catch((error) => {
+    log.warn('[Provision] Copilot settings initialization failed:', error);
+  });
 
   // Create tab manager
   tabManager = new TabManager();
@@ -93,11 +100,13 @@ async function initialize(): Promise<void> {
   wsClient = new WebSocketClient();
 
   // When pairing stores a fresh token, reconnect so the handshake uses it.
-  setOnTokenApproved(() => {
-    wsClient?.reload().catch((error) => {
-      log.warn('[Pairing] Reload after approval failed:', error);
+  const reloadAfterApproval = () => {
+    wsClient?.reload().catch(() => {
+      log.warn('[Pairing] Reload after approval failed');
     });
-  });
+  };
+  setOnTokenApproved(reloadAfterApproval);
+  setOnSetupApproved(reloadAfterApproval);
 
   // Create tool handlers
   const handleMessage = createToolHandlers(tabManager);
@@ -108,9 +117,9 @@ async function initialize(): Promise<void> {
   startConnectionLoop();
 
   // Resume or auto-start a pairing flow when the runtime config calls for it.
-  maybeAutoStartPairing().catch((error) => {
-    log.warn('[Pairing] Auto-start check failed:', error);
-  });
+  if (!await resumeSetup()) {
+    void updateSettings(maybeAutoStartPairing).catch(() => log.warn('[Pairing] Auto-start check failed'));
+  }
 
   log.info('Extension initialized');
 }
@@ -158,15 +167,7 @@ async function ensureUpdateAlarm(): Promise<void> {
   }
 }
 
-/** Copilot endpoint/key seeded by the build (provision.ts); runs on install, reload and browser start. */
-function runProvision(): void {
-  provisionCopilot(buildProvision(), chromeProvisionStorage()).catch((error) => {
-    log.warn('[Provision] copilot settings not seeded:', error);
-  });
-}
-
 chrome.runtime.onStartup.addListener(() => {
-  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });
@@ -240,24 +241,13 @@ async function startConnectionLoop(): Promise<void> {
  * Handle messages from popup.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Log all incoming messages for debugging
-  log.debug('Message received, url:', sender.url, 'action:', message?.action);
-
-  // Check if message is from our extension pages (popup, etc.)
-  // When popup is opened as a page (Playwright), sender.tab is set but URL is still chrome-extension://
-  const isFromExtension = sender.url?.startsWith('chrome-extension://');
-  const isFromContentScript = sender.tab && !isFromExtension;
-
-  if (isFromContentScript) {
-    // Message from content script in a regular web page - handle separately
-    // Don't return false - just don't respond to popup-style messages
-    return;
-  }
+  if (!sender.url?.startsWith(chrome.runtime.getURL(''))) return;
+  log.debug('Message received, action:', message?.action);
 
   // This is from popup or other extension page
   (async () => {
     try {
-      const response = await handlePopupMessage(message);
+      const response = await handlePopupMessage(message, sender.tab?.windowId);
       log.debug('Sending popup response');
       sendResponse(response);
     } catch (error) {
@@ -275,7 +265,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handlePopupMessage(message: {
   action: string;
   payload?: unknown;
-}): Promise<unknown> {
+}, senderWindowId?: number): Promise<unknown> {
   const { action, payload } = message;
 
   switch (action) {
@@ -302,55 +292,109 @@ async function handlePopupMessage(message: {
     }
 
     case 'getServerConfig': {
-      const cfg = await getEffectiveConfig();
-      const stored = await chrome.storage.local.get([STORAGE_KEYS.serverUrl, STORAGE_KEYS.token]);
+      await initialized;
+      const [server, pairedInstances] = await updateSettings(() => Promise.all([getServerSettings(), getPairedInstances()]));
+      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision, hasUnboundToken } = server;
       return {
-        effectiveUrl: buildDisplayUrl(cfg),
+        effectiveUrl,
         fromStorage: cfg.fromStorage,
         source: cfg.source,
-        storedServerUrl: typeof stored[STORAGE_KEYS.serverUrl] === 'string'
-          ? (stored[STORAGE_KEYS.serverUrl] as string)
-          : '',
-        storedToken: typeof stored[STORAGE_KEYS.token] === 'string'
-          ? (stored[STORAGE_KEYS.token] as string)
-          : '',
+        storedServerUrl,
+        storedToken,
+        hasUnboundToken,
+        serverRevision,
         hasToken: cfg.token !== '',
         connectionId: cfg.connectionId,
         label: cfg.label,
         connected: wsClient?.isConnected() || false,
         pairing: getPairingInfo(),
+        setupPairing: getSetupPairingInfo(),
+        pairedInstances,
         awaitingToken: wsClient?.isAwaitingToken() || false,
       };
     }
 
     case 'saveServerConfig': {
-      const { serverUrl, token, label } = (payload || {}) as { serverUrl?: string; token?: string; label?: string };
-      if (typeof serverUrl === 'string') {
-        const trimmed = serverUrl.trim();
-        if (trimmed && parseWsUrl(trimmed) === null) {
-          return { success: false, error: `Invalid server URL: ${trimmed}` };
+      await initialized;
+      const input = (payload ?? {}) as Record<string, unknown>;
+      const serverUrl = typeof input.serverUrl === 'string' ? input.serverUrl.trim() : undefined;
+      const token = typeof input.token === 'string' ? input.token.trim() : undefined;
+      const label = typeof input.label === 'string' ? input.label : undefined;
+      if (serverUrl && !parseWsUrl(serverUrl)) return { success: false, error: 'URL del servidor no válida.' };
+      const result = await updateSettings(async () => {
+        const previous = await getServerSettings();
+        const hasBaseline = input.expectedServerRevision !== undefined || input.expectedEffectiveUrl !== undefined;
+        const matchesBaseline = input.expectedServerRevision === previous.serverRevision
+          && input.expectedEffectiveUrl === previous.effectiveUrl;
+        // Existing callers can supply an explicit endpoint and token together.
+        const unboundToken = token !== undefined && serverUrl === undefined && !hasBaseline;
+        if (unboundToken || (hasBaseline && !matchesBaseline)) {
+          return { success: false, conflict: true, error: 'La configuración del servidor cambió. Vuelve a introducir tus cambios.' } as const;
         }
-        await setServerUrl(trimmed || null);
-      }
-      if (typeof token === 'string') {
-        await setToken(token.trim());
-      }
-      if (typeof label === "string") await setLabel(label);
-      // Reconnect immediately so the new URL/token take effect.
-      cancelPairing();
-      wsClient?.disconnect();
-      await wsClient?.reload();
-      const cfg = await getEffectiveConfig();
+        cancelPairing();
+        await clearPairCode();
+        await cancelSetup();
+        if (serverUrl !== undefined && serverUrl !== previous.storedServerUrl) await rememberPairedSetups();
+        const saved = await writeServerSettings(previous, { serverUrl, token, label });
+        return { success: true, ...saved, reconnect: wsClient?.reload() } as const;
+      });
+      if (!result.success) return result;
+      await result.reconnect;
       return {
         success: true,
         connected: wsClient?.isConnected() || false,
-        effectiveUrl: buildDisplayUrl(cfg),
+        effectiveUrl: result.effectiveUrl,
+        serverRevision: result.serverRevision,
       };
     }
 
     case 'startPairing': {
-      const result = await startPairing();
+      await initialized;
+      const result = await updateSettings(async () => {
+        await cancelSetup();
+        return startPairing();
+      });
       return { success: true, ...result };
+    }
+
+    case 'startSetup': {
+      await initialized;
+      const { instance, windowId, rePair, reopen } = (payload ?? {}) as {
+        instance?: unknown; windowId?: unknown; rePair?: unknown; reopen?: unknown;
+      };
+      if (!isSetupInstance(instance)) return { success: false, error: 'Selecciona un servidor.' };
+      const originWindow = typeof windowId === 'number' && Number.isInteger(windowId) && windowId >= 0
+        ? windowId
+        : senderWindowId;
+      await startSetup(instance, async () => {
+        cancelPairing();
+        await clearPairCode();
+      }, originWindow, rePair === true, reopen === true);
+      return { success: true };
+    }
+
+    case 'cancelSetup': {
+      await initialized;
+      await updateSettings(cancelSetup);
+      return { success: true };
+    }
+
+    case 'saveCopilotSettings': {
+      await initialized;
+      const { expectedServerRevision, expectedCredentials, ...changes } = (payload ?? {}) as CopilotSettingsPatch;
+      return updateSettings(async () => {
+        const raw = await chrome.storage.local.get([COPILOT_SETTINGS_KEY, STORAGE_KEYS.serverRevision]);
+        const revision = raw[STORAGE_KEYS.serverRevision];
+        const current = normalizeCopilotSettings(raw[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
+        const editedGroups = COPILOT_CREDENTIAL_FIELDS.filter(group => group.some(field => Object.hasOwn(changes, field)));
+        if (editedGroups.length && (expectedServerRevision !== (typeof revision === 'string' ? revision : null)
+          || editedGroups.some(group => group.some(field => expectedCredentials?.[field] !== (current[field] ?? ''))))) {
+          return { success: false, conflict: true, error: 'La configuración del servidor cambió. Vuelve a introducir tus cambios.' };
+        }
+        const next = normalizeCopilotSettings({ ...current, ...changes });
+        await chrome.storage.local.set({ [COPILOT_SETTINGS_KEY]: next });
+        return { success: true, settings: next };
+      });
     }
 
     case 'pairingStatus': {
@@ -417,7 +461,6 @@ async function handlePopupMessage(message: {
  */
 chrome.runtime.onInstalled.addListener((details) => {
   log.info(`Extension installed: ${details.reason}`);
-  runProvision();
   void ensureUpdateAlarm();
   void runUpdateCheck();
 });

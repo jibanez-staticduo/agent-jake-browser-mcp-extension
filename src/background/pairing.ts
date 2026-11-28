@@ -15,19 +15,22 @@
 
 import {
   STORAGE_KEYS,
-  loadBundleConfig,
-  getEffectiveConfig,
-  hasStoredServerUrl,
+  getServerSettings,
   httpOrigin,
 } from '@/config/runtime';
+import { SETUP_INSTANCES } from '@/config/setup-instances';
 import { log } from '@/utils/logger';
+import { updateSettings } from './settings-update';
 
 const OTP_LENGTH = 8;
 // Ambiguity-free alphabet (no 0/O/1/I).
 const OTP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const POLL_INTERVAL_MS = 2000;
-// Server TTL for pending OTPs is 10 minutes; stop slightly after it.
-const PAIRING_TTL_MS = 11 * 60 * 1000;
+const PAIR_REQUEST_TIMEOUT_MS = 10_000;
+const PAIRING_TTL_MS = 10 * 60 * 1000;
+// The server starts its TTL after registration and may retain an approved token.
+// Allow for the registration request, the next poll, and its response.
+const PAIRING_RECOVERY_MS = PAIR_REQUEST_TIMEOUT_MS + POLL_INTERVAL_MS + PAIR_REQUEST_TIMEOUT_MS;
 
 export type PairingStatusState = 'idle' | 'pending' | 'approved' | 'expired' | 'error';
 
@@ -38,12 +41,18 @@ export interface PairingInfo {
   error?: string;
 }
 
-interface ActivePairing {
+interface PendingPairing {
   otp: string;
+  wsUrl: string;
+  serverRevision: string | null;
+  connectionId: string;
+  startedAt: number;
+}
+
+interface ActivePairing extends PendingPairing {
   origin: string;
   state: PairingStatusState;
   error?: string;
-  startedAt: number;
   pollTimer: ReturnType<typeof setInterval> | null;
 }
 
@@ -94,20 +103,48 @@ export function cancelPairing(): void {
   active = null;
 }
 
-async function storePairCode(otp: string): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.pairCode]: otp });
-}
-
-async function clearPairCode(): Promise<void> {
+export async function clearPairCode(): Promise<void> {
   await chrome.storage.local.remove([STORAGE_KEYS.pairCode]);
 }
 
-async function finishApproved(token: string): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEYS.token]: token });
+type ServerSettings = Awaited<ReturnType<typeof getServerSettings>>;
+
+function isCurrent(pending: PendingPairing, { effectiveUrl, serverRevision, config }: ServerSettings): boolean {
+  return pending.wsUrl === effectiveUrl && pending.serverRevision === serverRevision
+    && pending.connectionId === config.connectionId;
+}
+
+function canRecover({ startedAt }: PendingPairing): boolean {
+  const age = Date.now() - startedAt;
+  return age >= 0 && age < PAIRING_TTL_MS + PAIRING_RECOVERY_MS;
+}
+
+function readPendingPairing(value: unknown): PendingPairing | null {
+  if (!value || typeof value !== 'object') return null;
+  const pending = value as Partial<PendingPairing>;
+  if (typeof pending.otp !== 'string' || !/^[A-HJ-NP-Z2-9]{8}$/.test(pending.otp)
+    || typeof pending.wsUrl !== 'string' || typeof pending.connectionId !== 'string'
+    || pending.serverRevision !== null && typeof pending.serverRevision !== 'string'
+    || typeof pending.startedAt !== 'number' || !Number.isSafeInteger(pending.startedAt)) return null;
+  return pending as PendingPairing;
+}
+
+async function expire(attempt: ActivePairing): Promise<'expired' | 'pending'> {
+  if (attempt !== active) return 'pending';
+  attempt.state = 'expired';
+  stopPolling();
   await clearPairCode();
-  if (active) {
-    active.state = 'approved';
-  }
+  return 'expired';
+}
+
+async function finishApproved(attempt: ActivePairing, token: string): Promise<void> {
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.pairCode]: null,
+    [STORAGE_KEYS.token]: token,
+    [STORAGE_KEYS.tokenUrl]: attempt.wsUrl,
+    [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
+  });
+  attempt.state = 'approved';
   stopPolling();
   log.info('[Pairing] Approved - token stored, reloading connection');
   onTokenApproved?.();
@@ -116,47 +153,51 @@ async function finishApproved(token: string): Promise<void> {
 /**
  * Single poll of /pair/status. Exported for tests and popup-triggered checks.
  */
+let polling: ActivePairing | undefined;
+
 export async function pollPairStatusOnce(): Promise<'pending' | 'approved' | 'expired'> {
-  if (!active) return 'pending';
+  const attempt = active;
+  if (!attempt || attempt.state !== 'pending' || polling === attempt) return 'pending';
+  polling = attempt;
 
-  const url = `${active.origin}/pair/status?otp=${encodeURIComponent(active.otp)}`;
-  const response = await fetch(url, { method: 'GET' });
-  if (!response.ok) {
-    throw new Error(`pair/status failed: HTTP ${response.status}`);
-  }
-  const body = await response.json() as { state?: string; token?: string };
-
-  if (body.state === 'approved' && typeof body.token === 'string' && body.token) {
-    await finishApproved(body.token);
-    return 'approved';
-  }
-  if (body.state === 'expired') {
-    if (active) {
-      active.state = 'expired';
+  try {
+    const current = await getServerSettings();
+    if (attempt !== active) return 'pending';
+    if (!canRecover(attempt) || !isCurrent(attempt, current)) return await updateSettings(() => expire(attempt));
+    const url = `${attempt.origin}/pair/status?otp=${encodeURIComponent(attempt.otp)}`;
+    const response = await fetch(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(PAIR_REQUEST_TIMEOUT_MS) });
+    if (!response.ok) {
+      throw new Error(`pair/status failed: HTTP ${response.status}`);
     }
-    stopPolling();
-    await clearPairCode();
-    return 'expired';
-  }
+    const body = await response.json() as { state?: string; token?: string };
 
-  if (Date.now() - active.startedAt > PAIRING_TTL_MS) {
-    active.state = 'expired';
-    stopPolling();
-    await clearPairCode();
-    return 'expired';
+    return await updateSettings(async () => {
+      if (attempt !== active) return 'pending';
+      if (body.state === 'expired' || !canRecover(attempt)) {
+        return expire(attempt);
+      }
+      if (body.state === 'approved' && typeof body.token === 'string' && body.token) {
+        const latest = await getServerSettings();
+        if (attempt !== active) return 'pending';
+        if (!isCurrent(attempt, latest) || !canRecover(attempt)) return expire(attempt);
+        await finishApproved(attempt, body.token);
+        return 'approved';
+      }
+      return 'pending';
+    });
+  } finally {
+    if (polling === attempt) polling = undefined;
   }
-
-  return 'pending';
 }
 
 function schedulePolling(): void {
   stopPolling();
   if (!active) return;
   active.pollTimer = setInterval(() => {
-    pollPairStatusOnce().catch((error) => {
+    pollPairStatusOnce().catch(() => {
       // Transient network errors keep the flow pending; the popup shows
       // them only if pairing finally expires.
-      log.warn('[Pairing] status poll failed:', error);
+      log.warn('[Pairing] Status poll failed');
     });
   }, POLL_INTERVAL_MS);
 }
@@ -166,83 +207,83 @@ function schedulePolling(): void {
  * approval link; polling runs in the background until approved/expired.
  */
 export async function startPairing(): Promise<{ otp: string; approveUrl: string }> {
-  if (active?.state === 'pending') {
+  const current = await getServerSettings();
+  if (active?.state === 'pending' && isCurrent(active, current) && canRecover(active)) {
     return {
       otp: active.otp,
       approveUrl: buildApproveUrl(active.origin, active.otp),
     };
   }
 
-  const cfg = await getEffectiveConfig();
-  const origin = httpOrigin(cfg);
+  if (active?.state === 'pending') await expire(active);
+  const origin = httpOrigin(current.config);
   const otp = generateOtp();
+  const pending: PendingPairing = {
+    otp,
+    wsUrl: current.effectiveUrl,
+    serverRevision: current.serverRevision,
+    connectionId: current.config.connectionId,
+    startedAt: Date.now(),
+  };
 
   const response = await fetch(`${origin}/pair/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ otp, connectionId: cfg.connectionId }),
+    body: JSON.stringify({ otp, connectionId: pending.connectionId }),
+    redirect: 'error',
+    signal: AbortSignal.timeout(PAIR_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
     active = {
-      otp,
+      ...pending,
       origin,
       state: 'error',
       error: `pair/start failed: HTTP ${response.status}`,
-      startedAt: Date.now(),
       pollTimer: null,
     };
     throw new Error(active.error);
   }
 
-  await storePairCode(otp);
-  active = { otp, origin, state: 'pending', startedAt: Date.now(), pollTimer: null };
+  await chrome.storage.local.set({ [STORAGE_KEYS.pairCode]: pending });
+  active = { ...pending, origin, state: 'pending', pollTimer: null };
   schedulePolling();
-  log.info(`[Pairing] OTP ${otp} registered at ${origin}`);
+  log.info('[Pairing] Manual approval requested');
 
   return { otp, approveUrl: buildApproveUrl(origin, otp) };
 }
 
 /**
  * Resume or auto-start pairing after a service-worker restart:
- * - a stored `ajb.pairCode` means a flow was pending → resume polling;
- * - otherwise start only when the user configured a server URL and no
- *   effective token exists (avoids hammering servers without pairing on).
+ * Resume a current attempt even when it was started to renew an existing token.
+ * New automatic attempts require an opted-in server and an empty effective token.
  */
 export async function maybeAutoStartPairing(): Promise<void> {
-  const stored = await chrome.storage.local.get([STORAGE_KEYS.pairCode, STORAGE_KEYS.token]);
-  const pendingCode = typeof stored[STORAGE_KEYS.pairCode] === 'string'
-    ? (stored[STORAGE_KEYS.pairCode] as string).trim()
-    : '';
-  const hasToken = typeof stored[STORAGE_KEYS.token] === 'string'
-    && (stored[STORAGE_KEYS.token] as string) !== '';
-
-  if (pendingCode && !hasToken) {
-    const cfg = await getEffectiveConfig();
-    const origin = httpOrigin(cfg);
-    active = {
-      otp: pendingCode,
-      origin,
-      state: 'pending',
-      startedAt: Date.now(),
-      pollTimer: null,
-    };
+  if (active?.state === 'pending') return;
+  const stored = await chrome.storage.local.get([STORAGE_KEYS.pairCode]);
+  const current = await getServerSettings();
+  const origin = httpOrigin(current.config);
+  const raw = stored[STORAGE_KEYS.pairCode];
+  const pending = readPendingPairing(raw);
+  if (pending && isCurrent(pending, current) && canRecover(pending)) {
+    active = { ...pending, origin, state: 'pending', pollTimer: null };
     schedulePolling();
-    log.info(`[Pairing] Resumed pending pairing for OTP ${pendingCode}`);
+    log.info('[Pairing] Resumed pending manual approval');
     return;
   }
 
-  if (pendingCode) {
-    // Approved elsewhere while the SW was asleep.
+  if (raw !== undefined && raw !== null) {
+    // A bare legacy OTP has no recorded destination or start time.
     await clearPairCode();
     return;
   }
 
-  if (hasToken) return;
+  if (current.config.token) return;
   // Auto-pair only against a URL the user or the package opted into, never
   // against the bare build default (a LAN server would get spammed and the
   // open-LAN mode must keep working without pairing).
-  if (!(await hasStoredServerUrl()) && (await loadBundleConfig()) === null) return;
+  if (current.config.source === 'build') return;
+  if (Object.values(SETUP_INSTANCES).some((instance) => instance.origin === origin)) return;
 
   try {
     await startPairing();

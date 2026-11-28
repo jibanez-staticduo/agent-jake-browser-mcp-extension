@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { runAgent, readStream, normalizePlan, AgentStopped, type AgentDeps } from '@/background/agent/loop';
 import { agentTools } from '@/background/agent/tools-catalog';
 import { renderMarkdown } from '@/sidepanel/markdown';
-import { chatModels, titleOf } from '@/sidepanel/chats';
+import { titleOf } from '@/sidepanel/chats';
 import { DEFAULT_COPILOT_SETTINGS, isCopilotConfigured, type CopilotMode, type UserRequest, type UserResponse, type WorkerToPanel } from '@/types/copilot';
 
 const base = { ...DEFAULT_COPILOT_SETTINGS, baseUrl: 'https://model.test/v1', apiKey: 'k', maxSteps: 8 };
@@ -241,10 +241,6 @@ describe('markdown', () => {
 });
 
 describe('panel helpers', () => {
-  it('keeps only chat models', () => {
-    expect(chatModels(['tooling', 'bge-m3', 'whisper-1', 'tts-1', 'or-glm', 'grok-imagine', 'tooling'])).toEqual(['or-glm', 'tooling']);
-  });
-
   it('titles a chat from its first prompt', () => {
     expect(titleOf([{ kind: 'user', text: '  rellena\nel formulario ' }])).toBe('rellena el formulario');
     expect(titleOf([])).toBe('Nueva conversación');

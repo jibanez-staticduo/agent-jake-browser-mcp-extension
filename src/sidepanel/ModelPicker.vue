@@ -1,32 +1,32 @@
 <script setup lang="ts">
 /**
- * Model chooser for the composer: a chip that opens a sheet with a search box and the chat
- * models grouped Local / Alibaba / OpenRouter (grouping and filtering live in chats.ts).
+ * Searchable model catalog for the composer.
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { MODEL_GROUPS, groupChatModels, isExternalModel, modelGroupOf, modelLabel } from './chats';
 
 const props = defineProps<{ modelValue: string; models: string[]; loading: boolean; error: string }>();
-const emit = defineEmits<{ 'update:modelValue': [id: string]; options: [] }>();
+const emit = defineEmits<{ 'update:modelValue': [id: string]; options: []; retry: [] }>();
 
 const EXTERNAL_HINT = 'Este modelo corre fuera de casa: tus datos salen a un tercero.';
 const open = ref(false);
 const query = ref('');
 const cursor = ref(0);
 const search = ref<HTMLInputElement | null>(null);
+const sheet = ref<HTMLElement | null>(null);
 const chipEl = ref<HTMLButtonElement | null>(null);
 const rowId = (id: string) => `model-opt-${id}`;
 
-// The current model stays pickable even when the list could not be fetched.
 const groups = computed(() => {
   const q = query.value.trim().toLowerCase();
-  const ids = props.models.includes(props.modelValue) ? props.models : [props.modelValue, ...props.models];
-  return groupChatModels(ids)
+  return groupChatModels(props.models)
     .map((g) => ({ ...g, models: g.models.filter((id) => !q || id.toLowerCase().includes(q) || modelLabel(id).toLowerCase().includes(q)) }))
     .filter((g) => g.models.length);
 });
 const flat = computed(() => groups.value.flatMap((g) => g.models));
 const groupLabel = (id: string) => MODEL_GROUPS.find((g) => g.id === modelGroupOf(id))?.label ?? '';
+
+watch(flat, () => { cursor.value = Math.min(cursor.value, Math.max(0, flat.value.length - 1)); });
 
 watch(cursor, () => {
   void nextTick(() => document.getElementById(rowId(flat.value[cursor.value] ?? ''))?.scrollIntoView({ block: 'nearest' }));
@@ -50,20 +50,22 @@ function pick(id: string) {
   close();
 }
 
+function trapTab(e: KeyboardEvent) {
+  if (e.key !== 'Tab') return;
+  const fields = sheet.value?.querySelectorAll<HTMLElement>('input, button:not([tabindex="-1"])');
+  if (!fields?.length) return;
+  const from = e.shiftKey ? fields[0] : fields[fields.length - 1];
+  if (document.activeElement !== from) return;
+  e.preventDefault();
+  (e.shiftKey ? fields[fields.length - 1] : fields[0]).focus();
+}
+
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    close();
-  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     const n = flat.value.length;
     if (n) cursor.value = (cursor.value + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
-  } else if (e.key === 'Tab') {
-    // The sheet is modal: Tab walks the list instead of leaving it for the page behind the scrim.
-    e.preventDefault();
-    const n = flat.value.length;
-    if (n) cursor.value = (cursor.value + (e.shiftKey ? n - 1 : 1)) % n;
-  } else if (e.key === 'Enter' && flat.value[cursor.value]) {
+  } else if (e.key === 'Enter' && !e.isComposing && flat.value[cursor.value]) {
     e.preventDefault();
     pick(flat.value[cursor.value]);
   }
@@ -73,23 +75,26 @@ function onKey(e: KeyboardEvent) {
 <template>
   <button ref="chipEl" type="button" class="chip" :title="`Modelo: ${modelValue} · ${groupLabel(modelValue)}`" aria-haspopup="dialog"
     :aria-expanded="open" @click="show">
-    <span class="name">{{ modelLabel(modelValue) }}</span>
+    <span class="name">{{ modelLabel(modelValue) || 'Elegir modelo' }}</span>
     <span v-if="isExternalModel(modelValue)" class="external" :title="EXTERNAL_HINT">Externo</span>
     <span class="grp">{{ groupLabel(modelValue) }}</span>
     <span aria-hidden="true">▾</span>
   </button>
 
-  <div v-if="open" class="scrim" @click.self="close" @keydown="onKey">
-    <div class="sheet" role="dialog" aria-label="Elegir modelo">
+  <div v-if="open" class="scrim" @click.self="close" @keydown.esc.prevent.stop="close">
+    <div ref="sheet" class="sheet" role="dialog" aria-modal="true" aria-label="Elegir modelo" @keydown="trapTab">
       <input ref="search" v-model="query" class="search" type="search" placeholder="Buscar modelo" aria-label="Buscar modelo"
         role="combobox" aria-controls="model-list" aria-expanded="true" :aria-activedescendant="flat[cursor] ? rowId(flat[cursor]) : undefined"
-        spellcheck="false" @input="cursor = 0">
+        spellcheck="false" @input="cursor = 0" @keydown="onKey">
       <div v-if="error" class="msg">
-        <strong>No se pudo listar los modelos.</strong>
-        <span>{{ error }} Puedes seguir con el modelo actual.</span>
-        <button type="button" @click="close(); emit('options')">Revisar la key en Opciones</button>
+        <strong role="alert">{{ error }}</strong>
+        <button type="button" @click="emit('retry'); search?.focus()">Reintentar</button>
+        <button type="button" @click="close(); emit('options')">Abrir Opciones</button>
       </div>
-      <div v-if="loading && !models.length" class="skeleton" aria-busy="true"><i /><i /><i /></div>
+      <p v-if="loading" class="none" role="status">Cargando modelos…</p>
+      <p v-else-if="!error && models.length && modelValue && !models.includes(modelValue)" class="none">
+        El modelo configurado no aparece en el catálogo.
+      </p>
       <div id="model-list" class="list" role="listbox">
         <template v-for="g in groups" :key="g.id">
           <div class="gtitle">{{ g.label }}</div>
@@ -102,9 +107,10 @@ function onKey(e: KeyboardEvent) {
             </span>
           </button>
         </template>
-        <p v-if="!groups.length && !loading" class="none">Ningún modelo coincide con «{{ query }}»</p>
       </div>
-      <p class="foot">Los modelos que no son de chat (embeddings, voz, imagen, vídeo) no se muestran.</p>
+      <p v-if="!groups.length && !loading && !error" class="none" role="status">
+        {{ query.trim() && models.length ? `Ningún modelo coincide con «${query}»` : 'El catálogo no tiene modelos de chat disponibles.' }}
+      </p>
     </div>
   </div>
 </template>
@@ -129,7 +135,5 @@ function onKey(e: KeyboardEvent) {
 .rname code { font-family: var(--font-mono, monospace); font-size: 11px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
 .cur { color: var(--accent-primary); font-size: 11px; white-space: nowrap; }
 .msg { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; padding: 8px; border-left: 3px solid var(--accent-danger); background: var(--bg-deep); border-radius: 4px; font-size: 12px; }
-.skeleton { display: flex; flex-direction: column; gap: 6px; }
-.skeleton i { height: 30px; border-radius: 6px; background: var(--bg-elevated); opacity: 0.6; }
-.none, .foot { margin: 4px 0; color: var(--text-secondary); font-size: 11.5px; }
+.none { margin: 4px 0; color: var(--text-secondary); font-size: 11.5px; }
 </style>

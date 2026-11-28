@@ -8,7 +8,6 @@ import type { IncomingMessage, OutgoingMessage, ToolName } from '@/types/message
 import {
   COPILOT_ALLOWED_ORIGINS_KEY,
   COPILOT_PORT,
-  COPILOT_SETTINGS_KEY,
   isCopilotConfigured,
   type CopilotSettings,
   type PanelToWorker,
@@ -21,7 +20,7 @@ import { log } from '@/utils/logger';
 import { AgentStopped, runAgent, type ToolOutcome } from './loop';
 import { LOCAL_TOOL_NAMES, INTERNAL_TOOL_NAMES } from './tools-catalog';
 import { openServer, type ServerPlugin } from './mcp-server';
-import { normalizeCopilotSettings } from '@/utils/copilot-settings';
+import { readCopilotSettings as loadCopilotSettings } from '@/utils/copilot-settings';
 import { formatPageContext } from './context';
 
 type HandleMessage = (message: IncomingMessage, signal?: AbortSignal) => Promise<OutgoingMessage>;
@@ -168,10 +167,7 @@ export function createCopilotTrafficGate(tabManager: TabManager, handleMessage: 
   };
 }
 
-export async function loadCopilotSettings(): Promise<CopilotSettings> {
-  const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-  return normalizeCopilotSettings(stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined);
-}
+export { loadCopilotSettings };
 
 async function allowedOrigins(): Promise<string[]> {
   const stored = await chrome.storage.local.get(COPILOT_ALLOWED_ORIGINS_KEY);

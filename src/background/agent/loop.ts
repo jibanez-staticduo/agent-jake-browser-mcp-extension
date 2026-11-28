@@ -204,6 +204,7 @@ async function complete(
 
   const response = await deps.fetch(completionsUrl(settings.baseUrl), {
     method: 'POST',
+    redirect: 'error',
     headers,
     signal: deps.signal,
     body: JSON.stringify({

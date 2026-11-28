@@ -8,15 +8,34 @@
 import { installMockChrome } from './mock-chrome';
 installMockChrome();
 
-import { createApp } from 'vue';
+import { createApp, h, nextTick, shallowRef } from 'vue';
 import { createPinia } from 'pinia';
 import App from '../../sidepanel/OptionsView.vue';
 import StateController from './StateController.vue';
+import { DEFAULT_COPILOT_SETTINGS, type CopilotSettings } from '@/types/copilot';
+import type { CopilotSettingsSnapshot } from '@/utils/copilot-settings';
 import '../styles/variables.css';
 import '../styles/base.css';
 
+const snapshot = shallowRef<CopilotSettingsSnapshot>({
+  settings: { ...DEFAULT_COPILOT_SETTINGS },
+  serverRevision: null,
+});
+
+async function saveSettings(settings: CopilotSettings) {
+  snapshot.value = { ...snapshot.value, settings };
+  await nextTick();
+}
+
 // Mount production app
-const app = createApp(App, { settings: { baseUrl: '', apiKey: '', model: 'qwen38-flash-next', mode: 'ask', maxSteps: 30, vision: false } });
+const app = createApp({
+  render: () => h(App, {
+    snapshot: snapshot.value,
+    focusField: null,
+    check: { state: 'idle', text: '' },
+    saveSettings,
+  }),
+});
 app.use(createPinia());
 app.mount('#app');
 

@@ -4,65 +4,53 @@
  * agent-browser-sync host build until it is retired, pass VITE_COPILOT_BASE_URL / VITE_COPILOT_API_KEY from
  * local host files; never from the repo). The published build (scripts/publicar.sh) is neutral and seeds nothing.
  *
- * Rule: a field is overwritten when the stored value is empty or still equals what we seeded
- * last time (so a rotated key reaches the browser); a value the user changed in Opciones is
- * left alone. «What we seeded last time» is kept as SHA-256 hashes (copilotProvisioned), so the
- * key is not stored twice in clear. The model is not seeded here: DEFAULT_COPILOT_SETTINGS.model is the only default.
+ * A key is seeded or rotated only at its build endpoint. SHA-256 hashes in
+ * copilotProvisioned identify earlier seeds without storing the key twice.
  */
-import { CONFIG } from '@/types/config';
+import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
 import {
-  COPILOT_PROVISIONED_KEY,
-  COPILOT_SETTINGS_KEY,
-  DEFAULT_COPILOT_SETTINGS,
-  type CopilotSettings,
-} from '@/types/copilot';
-
-export type Provisioned = Pick<CopilotSettings, 'baseUrl' | 'apiKey'>;
-
-/** Hex SHA-256 of a seeded value; copilotProvisioned holds these, never the values. */
-export async function sha256(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
+  matchesProvisionedHash, normalizeCopilotSettings, sha256, type Provisioned,
+} from '@/utils/copilot-settings';
 
 export interface ProvisionStorage {
-  get(key: string): Promise<unknown>;
-  set(key: string, value: unknown): Promise<void>;
-}
-
-const FIELDS = ['baseUrl', 'apiKey'] as const;
-
-export function buildProvision(): Provisioned {
-  return { baseUrl: CONFIG.COPILOT_BASE_URL.trim(), apiKey: CONFIG.COPILOT_API_KEY.trim() };
+  get(keys: string[]): Promise<Record<string, unknown>>;
+  set(values: Record<string, unknown>): Promise<void>;
 }
 
 /** Returns true when it wrote something. */
 export async function provisionCopilot(build: Provisioned, storage: ProvisionStorage): Promise<boolean> {
-  if (!FIELDS.some((f) => build[f])) return false;
-  const stored = ((await storage.get(COPILOT_SETTINGS_KEY)) ?? {}) as Partial<CopilotSettings>;
-  const last = ((await storage.get(COPILOT_PROVISIONED_KEY)) ?? {}) as Partial<Provisioned>; // hashes
-  const settings: Partial<CopilotSettings> = { ...stored };
+  const raw = await storage.get([COPILOT_SETTINGS_KEY, COPILOT_PROVISIONED_KEY]);
+  const stored = (raw[COPILOT_SETTINGS_KEY] ?? {}) as Partial<CopilotSettings>;
+  const last = (raw[COPILOT_PROVISIONED_KEY] ?? {}) as Partial<Provisioned>;
+  const settings = normalizeCopilotSettings(stored, build);
   const provisioned: Partial<Provisioned> = { ...last };
-  let changed = false;
-  for (const f of FIELDS) {
-    const wanted = build[f];
-    if (!wanted) continue;
-    const current = typeof stored[f] === 'string' ? stored[f] as string : '';
-    const wantedHash = await sha256(wanted);
-    if (current === '' || (await sha256(current)) === last[f]) {
-      if (current !== wanted) { settings[f] = wanted; changed = true; }
-      if (last[f] !== wantedHash) { provisioned[f] = wantedHash; changed = true; }
+  if (build.baseUrl) {
+    const seededEndpoint = await matchesProvisionedHash(settings.baseUrl, last.baseUrl);
+    const previousSeed = seededEndpoint && await matchesProvisionedHash(settings.apiKey, last.apiKey);
+    const buildKey = settings.baseUrl === build.baseUrl && Boolean(build.apiKey && settings.apiKey === build.apiKey);
+    const managedKey = previousSeed || buildKey;
+    if ((!settings.apiKey || (managedKey && build.apiKey)) && (!settings.baseUrl || seededEndpoint)) {
+      settings.baseUrl = build.baseUrl;
+      provisioned.baseUrl = await sha256(build.baseUrl);
+    }
+    if (settings.baseUrl === build.baseUrl && build.apiKey && (!settings.apiKey || managedKey)) {
+      settings.apiKey = build.apiKey;
+      settings.apiKeyUrl = build.baseUrl;
+      provisioned.apiKey = await sha256(build.apiKey);
     }
   }
-  if (!changed) return false;
-  await storage.set(COPILOT_SETTINGS_KEY, { ...DEFAULT_COPILOT_SETTINGS, ...settings });
-  await storage.set(COPILOT_PROVISIONED_KEY, provisioned);
+  const values: Record<string, unknown> = {};
+  if (settings.baseUrl !== (stored.baseUrl ?? '') || settings.apiKey !== (stored.apiKey ?? '')
+    || settings.apiKeyUrl !== stored.apiKeyUrl) values[COPILOT_SETTINGS_KEY] = settings;
+  if (provisioned.baseUrl !== last.baseUrl || provisioned.apiKey !== last.apiKey) values[COPILOT_PROVISIONED_KEY] = provisioned;
+  if (!Object.keys(values).length) return false;
+  await storage.set(values);
   return true;
 }
 
 export function chromeProvisionStorage(): ProvisionStorage {
   return {
-    get: async (key) => (await chrome.storage.local.get(key))[key],
-    set: (key, value) => chrome.storage.local.set({ [key]: value }),
+    get: (keys) => chrome.storage.local.get(keys),
+    set: (values) => chrome.storage.local.set(values),
   };
 }

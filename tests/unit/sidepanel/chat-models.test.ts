@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chatModels, groupChatModels, humanizeModel, isExternalModel, modelGroupOf, modelLabel } from '@/sidepanel/chats';
+import { groupChatModels, humanizeModel, isExternalModel, modelGroupOf, modelLabel } from '@/sidepanel/chats';
 
 /**
  * model_name ids of k8s-litellm-pocharlies/k8s/manifest.yaml (chat aliases, 2026-10-03):
@@ -43,23 +43,8 @@ const LITELLM_IDS = [
   'tooling-uncensored',
 ];
 
-/** Ids the proxy also serves that a chat composer must never offer. */
-const NON_CHAT_IDS = ['bge-m3', 'text-embedding-3', 'rerank-v2', 'whisper-large', 'kokoro-tts', 'flux-image', 'wan-video', 'omnivoice', 'stt-small', 'probe-x'];
-
-describe('chatModels', () => {
-  it('keeps every LiteLLM chat alias', () => {
-    expect(chatModels(LITELLM_IDS)).toHaveLength(LITELLM_IDS.length);
-  });
-
-  it('drops embeddings, speech, image and video ids', () => {
-    const out = chatModels([...LITELLM_IDS, ...NON_CHAT_IDS]);
-    expect(out.filter((id) => /bge|embed|rerank|whisper|tts|image|video/i.test(id))).toEqual([]);
-    expect(out).toHaveLength(LITELLM_IDS.length);
-  });
-});
-
 describe('groupChatModels', () => {
-  const groups = groupChatModels([...LITELLM_IDS, ...NON_CHAT_IDS]);
+  const groups = groupChatModels(LITELLM_IDS);
 
   it('orders the groups Local, Alibaba, OpenRouter', () => {
     expect(groups.map((g) => g.id)).toEqual(['local', 'alibaba', 'openrouter']);
@@ -81,6 +66,15 @@ describe('groupChatModels', () => {
     expect(groups[0].models[0]).toBe('qwen38-flash-next');
     const rest = groups[0].models.slice(1);
     expect(rest).toEqual([...rest].sort());
+  });
+
+  it('labels GPT and previously unknown providers without assuming they are local', () => {
+    const extra = groupChatModels(['gpt-6.2-sol', 'gemini/chat-with-images', 'gpt-6.2-sol']);
+    expect(extra.map(({ id, models }) => [id, models])).toEqual([
+      ['gpt', ['gpt-6.2-sol']],
+      ['other', ['gemini/chat-with-images']],
+    ]);
+    expect(modelLabel('gpt-6.2-sol')).toBe('GPT 6.2 Sol');
   });
 
   it('skips empty groups', () => {

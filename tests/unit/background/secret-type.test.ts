@@ -149,7 +149,7 @@ describe('secret typing boundaries', () => {
     (client as any).socket = socket;
     client.send({ id: 'normal', success: true, result: { text: SECRET } });
     client.setMessageHandler(async () => { throw new Error(SECRET); });
-    await (client as any).handleMessage(JSON.stringify({ id: 'fake', type: 'browser_type', payload: { text: SECRET, secret: true } }));
+    await (client as any).handleMessage(socket, JSON.stringify({ id: 'fake', type: 'browser_type', payload: { text: SECRET, secret: true } }));
     expect(JSON.stringify(captures.map(c => c.mock.calls))).not.toContain(SECRET);
     expect(socket.send.mock.calls[1][0]).not.toContain(SECRET);
     captures.forEach(c => c.mockRestore());

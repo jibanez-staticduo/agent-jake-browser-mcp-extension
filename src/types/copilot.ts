@@ -5,7 +5,7 @@
 
 export const COPILOT_PORT = 'copilot';
 export const COPILOT_SETTINGS_KEY = 'copilotSettings';
-/** SHA-256 hashes of what background/provision.ts last seeded ({ baseUrl, apiKey }), to tell a user edit from a stale seed. */
+/** Independent hashes of the last seeded values, used for rotation once an endpoint binding is verified. */
 export const COPILOT_PROVISIONED_KEY = 'copilotProvisioned';
 export const COPILOT_ALLOWED_ORIGINS_KEY = 'copilotAllowedOrigins';
 
@@ -20,6 +20,8 @@ export interface CopilotSettings {
   /** OpenAI-compatible base URL, e.g. https://litellm.example.com/v1 */
   baseUrl: string;
   apiKey: string;
+  /** Exact endpoint where the API key was provisioned or entered. */
+  apiKeyUrl?: string;
   model: string;
   mode: CopilotMode;
   /** Hard cap on model round-trips per prompt. */

@@ -4,9 +4,29 @@
  * persistent connectionId and current connection state.
  */
 import { computed } from 'vue';
+import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 import { useServerStore } from '../stores';
 
 const server = useServerStore();
+const configuredInstance = computed(() =>
+  (Object.keys(SETUP_INSTANCES) as SetupInstance[]).find((id) => SETUP_INSTANCES[id].wsUrl === server.effectiveUrl),
+);
+const setupBusy = computed(() =>
+  server.setupLoading || server.saving || server.pairingLoading || server.setup.state === 'starting',
+);
+
+const setupStateText = computed(() => {
+  const { state, instance, error } = server.setup;
+  const name = instance ? SETUP_INSTANCES[instance].name : '';
+  if (error) return error;
+  switch (state) {
+    case 'starting': return `Solicitando aprobación a ${name}…`;
+    case 'pending': return `Completa la aprobación en la pestaña de ${name}.`;
+    case 'approved': return `Configuración de ${name} activa.`;
+    case 'expired': return 'La solicitud caducó. Vuelve a emparejar el navegador.';
+    default: return '';
+  }
+});
 
 const pairingStateText = computed(() => {
   switch (server.pairing.state) {
@@ -35,102 +55,143 @@ const sourceLabel = computed(() => {
     </div>
 
     <div v-if="!server.connected" class="conn-problem" role="status">
-      Sin conexión con el servidor MCP. Revisa la URL y el token, o empareja de nuevo.
+      Sin conexión con el servidor MCP. Selecciona un servidor o revisa la URL y el token.
     </div>
 
     <div class="field">
-      <label class="field-label" for="server-url">URL del servidor</label>
-      <input
-        id="server-url"
-        v-model="server.serverUrlInput"
-        class="field-input"
-        type="text"
-        spellcheck="false"
-        placeholder="wss://agent-browser.example.com"
-        @input="server.markDraftTouched()"
-      >
-      <span class="field-hint">
-        Vacío = embebido (config.json) o valor del build.
-        <template v-if="server.effectiveUrl">
-          En uso: {{ server.effectiveUrl }}
-          <template v-if="sourceLabel"> · origen: {{ sourceLabel }}</template>
-        </template>
-      </span>
+      <span id="setup-servers" class="field-label">Emparejar con servidor</span>
+      <div class="actions" role="group" aria-labelledby="setup-servers">
+        <div v-for="(instance, id) in SETUP_INSTANCES" :key="id" class="setup-destination">
+          <button class="btn btn-pair" type="button" :disabled="setupBusy"
+            :aria-pressed="configuredInstance === id"
+            :aria-describedby="`setup-destination-${id}`"
+            @click="server.runSetup(id)">
+            {{ instance.name }}
+          </button>
+          <span :id="`setup-destination-${id}`" class="setup-destination-state">
+            {{ configuredInstance === id ? 'En uso' : server.pairedInstances.includes(id) ? 'Emparejado' : 'Por emparejar' }}
+          </span>
+        </div>
+      </div>
+      <span v-if="setupStateText" class="pairing-status" role="status">{{ setupStateText }}</span>
+      <div v-if="configuredInstance && server.pairedInstances.includes(configuredInstance)" class="actions">
+        <button class="btn btn-pair" type="button" :disabled="setupBusy || server.setup.state === 'pending'"
+          @click="server.runSetup(configuredInstance, true)">
+          Volver a emparejar {{ SETUP_INSTANCES[configuredInstance].name }}
+        </button>
+      </div>
+      <div v-if="server.setup.state === 'pending'" class="actions">
+        <button class="btn btn-pair" type="button" :disabled="server.setupLoading"
+          @click="server.reopenSetup()">Abrir aprobación</button>
+        <button class="btn btn-pair" type="button" :disabled="server.setupLoading"
+          @click="server.runSetup()">Cancelar</button>
+      </div>
     </div>
 
-    <div class="field">
-      <label class="field-label" for="server-token">Token</label>
-      <input
-        id="server-token"
-        v-model="server.tokenInput"
-        class="field-input"
-        type="password"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder="token de seguridad"
-        @input="server.markDraftTouched()"
-      >
-      <span v-if="server.info && server.info.hasToken && !server.tokenInput" class="field-hint">
-        Token activo presente (compilado o emparejado).
-      </span>
-    </div>
+    <details class="manual-settings" open>
+      <summary>Configuración manual</summary>
+      <div class="manual-fields">
+        <div class="field">
+          <label class="field-label" for="server-url">URL del servidor</label>
+          <input
+            id="server-url"
+            v-model="server.serverUrlInput"
+            class="field-input"
+            type="text"
+            spellcheck="false"
+            placeholder="wss://agent-browser.example.com"
+            :disabled="server.saving"
+            @input="server.markDraftTouched('serverUrlInput')"
+          >
+          <span class="field-hint">
+            Vacío = embebido (config.json) o valor del build.
+            <template v-if="server.effectiveUrl">
+              En uso: {{ server.effectiveUrl }}
+              <template v-if="sourceLabel"> · origen: {{ sourceLabel }}</template>
+            </template>
+          </span>
+        </div>
 
-    <div class="field">
-      <label class="field-label" for="server-label">Nombre del equipo / navegador</label>
-      <input
-        id="server-label"
-        v-model="server.labelInput"
-        class="field-input"
-        type="text"
-        maxlength="128"
-        spellcheck="false"
-        placeholder="Portátil / Chrome"
-        aria-describedby="server-label-hint"
-        @input="server.markDraftTouched()"
-      >
-      <span id="server-label-hint" class="field-hint">
-        Identificación manual para distinguir conexiones. Chrome no puede leer el nombre real del equipo.
-      </span>
-    </div>
+        <div class="field">
+          <label class="field-label" for="server-token">Token</label>
+          <input
+            id="server-token"
+            v-model="server.tokenInput"
+            class="field-input"
+            type="password"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="token de seguridad"
+            :disabled="server.saving"
+            @input="server.markDraftTouched('tokenInput')"
+          >
+          <span v-if="server.info && server.info.hasToken && !server.tokenInput" class="field-hint">
+            Token activo presente (compilado o emparejado).
+          </span>
+          <span v-else-if="server.info?.hasUnboundToken" class="field-hint">
+            Vuelve a introducir el token para este servidor o empareja el navegador.
+          </span>
+        </div>
 
-    <div v-if="server.error" class="panel-error">{{ server.error }}</div>
+        <div class="field">
+          <label class="field-label" for="server-label">Nombre del equipo / navegador</label>
+          <input
+            id="server-label"
+            v-model="server.labelInput"
+            class="field-input"
+            type="text"
+            maxlength="128"
+            spellcheck="false"
+            placeholder="Portátil / Chrome"
+            :disabled="server.saving"
+            aria-describedby="server-label-hint"
+            @input="server.markDraftTouched('labelInput')"
+          >
+          <span id="server-label-hint" class="field-hint">
+            Identificación manual para distinguir conexiones. Chrome no puede leer el nombre real del equipo.
+          </span>
+        </div>
 
-    <div class="actions">
-      <button
-        class="btn btn-save"
-        type="button"
-        :disabled="server.saving"
-        @click="server.save()"
-      >
-        {{ server.saving ? 'Guardando…' : 'Guardar servidor' }}
-      </button>
-      <button
-        class="btn btn-pair"
-        type="button"
-        :disabled="server.pairingLoading || server.pairing.state === 'pending'"
-        @click="server.startPairing()"
-      >
-        {{ server.pairing.state === 'pending' ? 'Esperando aprobación…' : 'Emparejar con el servidor' }}
-      </button>
-      <span v-if="server.savedFlash" class="saved-flash">Guardado</span>
-    </div>
+        <div class="actions">
+          <button
+            class="btn btn-save"
+            type="button"
+            :disabled="server.saving || server.setupLoading || server.pairingLoading"
+            @click="server.save()"
+          >
+            {{ server.saving ? 'Guardando…' : 'Guardar servidor' }}
+          </button>
+          <button
+            class="btn btn-pair"
+            type="button"
+            :disabled="server.pairingLoading || server.setupLoading || server.saving || server.pairing.state === 'pending'"
+            @click="server.startPairing()"
+          >
+            {{ server.pairing.state === 'pending' ? 'Esperando aprobación…' : 'Emparejar con código' }}
+          </button>
+          <span v-if="server.savedFlash" class="saved-flash">Guardado</span>
+        </div>
 
-    <div v-if="server.pairing.state === 'pending' && server.pairing.otp" class="pairing-box">
-      <div class="pairing-label">Código de emparejamiento</div>
-      <div class="pairing-otp">{{ server.pairing.otp }}</div>
-      <a
-        v-if="server.pairing.approveUrl"
-        class="pairing-link"
-        :href="server.pairing.approveUrl"
-        target="_blank"
-        rel="noreferrer"
-      >{{ server.pairing.approveUrl }}</a>
-      <div class="pairing-hint">Abre el enlace en el servidor y aprueba para emitir el token.</div>
-    </div>
-    <div v-else-if="server.pairing.state !== 'idle'" class="pairing-status">
-      Emparejamiento: {{ pairingStateText }}
-      <span v-if="server.pairing.error" class="pairing-error"> — {{ server.pairing.error }}</span>
-    </div>
+        <div v-if="server.pairing.state === 'pending' && server.pairing.otp" class="pairing-box">
+          <div class="pairing-label">Código de emparejamiento</div>
+          <div class="pairing-otp">{{ server.pairing.otp }}</div>
+          <a
+            v-if="server.pairing.approveUrl"
+            class="pairing-link"
+            :href="server.pairing.approveUrl"
+            target="_blank"
+            rel="noreferrer"
+          >{{ server.pairing.approveUrl }}</a>
+          <div class="pairing-hint">Abre el enlace en el servidor y aprueba para emitir el token.</div>
+        </div>
+        <div v-else-if="server.pairing.state !== 'idle'" class="pairing-status">
+          Emparejamiento: {{ pairingStateText }}
+          <span v-if="server.pairing.error" class="pairing-error"> — {{ server.pairing.error }}</span>
+        </div>
+      </div>
+    </details>
+
+    <div v-if="server.error" class="panel-error" role="alert">{{ server.error }}</div>
 
     <div v-if="server.connectionId" class="conn-id" :title="server.connectionId">
       connectionId: {{ server.connectionId }}
@@ -217,7 +278,36 @@ const sourceLabel = computed(() => {
 .actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.setup-destination {
+  display: grid;
+  gap: 3px;
+}
+
+.setup-destination .btn[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.setup-destination-state {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.manual-settings summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.manual-fields {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
 }
 
 .btn {
