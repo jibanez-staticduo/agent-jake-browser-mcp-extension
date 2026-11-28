@@ -1355,12 +1355,30 @@ export class TabManager {
    * actually close the hung tab. After TIMEOUTS.DISCONNECT_CUT the tab is removed anyway; the pending
    * detach dies with it and tabs.onRemoved deletes whatever session the disconnect left behind.
    */
-  async closeWindow(windowId: number, tabIds: number[]) {
+  async closeWindow(windowId: number, tabIds: number[], signal?: AbortSignal) {
     // A frozen renderer can block guard cleanup forever; window closure must remain bounded.
-    return this.agentWindows.closeWindow(windowId, tabIds, id => Promise.race([
-      this.disconnectTab(id).catch(() => undefined),
-      new Promise<void>(resolve => setTimeout(resolve, TIMEOUTS.DISCONNECT_CUT)),
-    ]));
+    return this.agentWindows.closeWindow(windowId, tabIds, async id => {
+      signal?.throwIfAborted();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      try {
+        await Promise.race([
+          this.disconnectTab(id).catch(() => undefined),
+          new Promise<void>((resolve, reject) => {
+            timer = setTimeout(resolve, TIMEOUTS.DISCONNECT_CUT);
+            if (signal) {
+              onAbort = () => reject(signal.reason);
+              signal.addEventListener('abort', onAbort, { once: true });
+              if (signal.aborted) onAbort();
+            }
+          }),
+        ]);
+        signal?.throwIfAborted();
+      } finally {
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener('abort', onAbort);
+      }
+    }, signal);
   }
 
   async closeTab(tabId: number): Promise<number> {

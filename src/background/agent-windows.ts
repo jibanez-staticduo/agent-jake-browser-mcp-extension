@@ -2,6 +2,26 @@ type Witness = { tabId: number; targetId: string };
 type WindowRecord = { windowId: number; witnesses: Witness[] };
 const STORAGE_KEY = 'ajb.agentWindowProvenance';
 
+/** Release the caller on abort while still observing a non-cancellable promise's eventual rejection. */
+function untilAborted<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    pending.then(value => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(value);
+    }, error => {
+      signal.removeEventListener('abort', onAbort);
+      reject(error);
+    });
+    if (signal.aborted) onAbort();
+  });
+}
+
 /** Persisted numeric IDs require a live Chrome target UUID before they grant ownership. */
 export class AgentWindows {
   private static pending: Promise<unknown> = Promise.resolve();
@@ -68,28 +88,36 @@ export class AgentWindows {
     return this.serialize(async () => this.save(await this.load()));
   }
 
-  async closeWindow(windowId: number, tabIds: number[], beforeClose: (id: number) => Promise<void>): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
+  async closeWindow(windowId: number, tabIds: number[], beforeClose: (id: number) => Promise<void>, signal?: AbortSignal): Promise<{ windowId: number; closed: boolean; closedTabIds: number[] }> {
     if (!Number.isSafeInteger(windowId) || windowId <= 0 || !Array.isArray(tabIds) || tabIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
       throw new Error('Window and tab IDs must be positive integers');
     }
-    return this.serialize(async () => {
+    signal?.throwIfAborted();
+    return untilAborted(this.serialize(async () => {
+      signal?.throwIfAborted();
       const records = await this.load();
+      signal?.throwIfAborted();
       if (!records.some(entry => entry.windowId === windowId)) {
         await this.save(records);
         throw new Error(`NOT_AGENT_WINDOW: window ${windowId} has no live provenance`);
       }
       const closedTabIds: number[] = [];
       for (const id of new Set(tabIds)) {
+        signal?.throwIfAborted();
         let tab: chrome.tabs.Tab;
         try { tab = await chrome.tabs.get(id); } catch { continue; }
+        signal?.throwIfAborted();
         if (tab.windowId !== windowId) continue;
-        await beforeClose(id);
+        await untilAborted(beforeClose(id), signal);
+        signal?.throwIfAborted();
         // Disconnect can yield to a user moving this tab. Check its window again.
         try { tab = await chrome.tabs.get(id); } catch { continue; }
+        signal?.throwIfAborted();
         if (tab.windowId !== windowId) continue;
         // Also retain the original target UUID: numeric tab IDs can be recycled by Chrome.
         const witness = records.find(entry => entry.windowId === windowId)?.witnesses.find(item => item.tabId === id);
         if (!witness || !(await chrome.debugger.getTargets()).some(target => target.type === 'page' && target.tabId === id && target.id === witness.targetId)) continue;
+        signal?.throwIfAborted();
         try {
           await chrome.tabs.remove(id);
           closedTabIds.push(id);
@@ -99,9 +127,13 @@ export class AgentWindows {
         }
       }
       let closed = false;
+      signal?.throwIfAborted();
       try { await chrome.windows.get(windowId); } catch { closed = true; }
-      await this.save(await this.load());
+      signal?.throwIfAborted();
+      const remaining = await this.load();
+      signal?.throwIfAborted();
+      await this.save(remaining);
       return { windowId, closed, closedTabIds };
-    });
+    }), signal);
   }
 }
