@@ -15,6 +15,7 @@ const extensionPath = fileURLToPath(new URL('../dist', import.meta.url));
 const loopback = '127.0.0.1';
 const apiKey = 'fixture-litellm-key';
 const mcpToken = 'fixture-mcp-token';
+const uuid = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/;
 
 const instances = [
   { name: 'NAS', origin: 'https://agent-browser.staticduo.com', wsPath: '/ws',
@@ -218,7 +219,7 @@ test.describe('StaticDuo LAN setup with a built server', () => {
           const [, details] = await Promise.all([
             browser.waitForEvent('page'),
             worker.evaluate(async id => {
-              const { id: windowId } = await chrome.windows.create({ url: 'about:blank', focused: false });
+              const windowId = (await chrome.windows.create({ url: 'about:blank', focused: false }))?.id;
               if (windowId === undefined) throw new Error('Fixture window has no id');
               const [tab] = await chrome.tabs.query({ windowId, active: true });
               await chrome.windows.update(id, { focused: true });
@@ -266,7 +267,6 @@ test.describe('StaticDuo LAN setup with a built server', () => {
 
         const label = `${instance.inferredHost ?? 'Fixture laptop'} - QA Profile`;
         const { httpBase } = backend;
-        const uuid = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/;
         await expect.poll(async () => {
           const res = await fetch(`${httpBase}/connections`);
           return res.json();
@@ -309,4 +309,181 @@ test.describe('StaticDuo LAN setup with a built server', () => {
       }
     });
   }
+
+  test('switches among all three saved pairings in one Chromium profile', async () => {
+    test.setTimeout(60000);
+    const directory = await mkdtemp(path.join(tmpdir(), 'ajb-lan-switch-'));
+    type Backend = Awaited<ReturnType<typeof startBackend>>;
+    type Proxy = Awaited<ReturnType<typeof startProxy>>;
+    type Destination = {
+      instance: (typeof instances)[number];
+      host: string;
+      settings: { wsUrl: string; baseUrl: string; apiKey: string; mcpUrl: string; mcpToken: string };
+      backend: Backend;
+      proxy: Proxy;
+      label: string;
+    };
+    const backends: Backend[] = [];
+    const proxies: Proxy[] = [];
+    const destinations: Destination[] = [];
+    let browser: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
+
+    try {
+      for (const [index, instance] of instances.entries()) {
+        const host = new URL(instance.origin).hostname;
+        const settings = {
+          origin: instance.origin,
+          wsUrl: `wss://${host}${instance.wsPath}`,
+          baseUrl: instance.baseUrl,
+          apiKey: `fixture-litellm-key-${index}`,
+          mcpUrl: `https://agentgateway.staticduo.com${instance.mcpPath}`,
+          mcpToken: `fixture-mcp-token-${index}`,
+        };
+        const backendDirectory = await mkdtemp(path.join(directory, 'backend-'));
+        const backend = await startBackend(backendDirectory, {
+          ...settings, lanCidrs: ['192.168.42.0/24'], trustedProxyIps: [loopback],
+          hostByIp: instance.inferredHost ? { '192.168.42.30': instance.inferredHost } : {},
+        });
+        backends.push(backend);
+        const proxy = await startProxy(backendDirectory, host, instance.wsPath, backend, false);
+        proxies.push(proxy);
+        const label = `${instance.inferredHost ?? 'Fixture laptop'} - ${instance.name} Profile`;
+        destinations.push({ instance, host, settings, backend, proxy, label });
+      }
+
+      const launch = () => chromium.launchPersistentContext(path.join(directory, 'profile'), {
+        channel: 'chromium', headless: true,
+        args: [
+          `--disable-extensions-except=${extensionPath}`,
+          `--load-extension=${extensionPath}`,
+          '--no-proxy-server',
+          `--host-resolver-rules=${destinations.map(({ host, proxy }) => `MAP ${host} ${loopback}:${proxy.port}`).join(', ')}, MAP * ~NOTFOUND`,
+          `--ignore-certificate-errors-spki-list=${proxies.map(proxy => proxy.spki).join(',')}`,
+        ],
+      });
+      const workerOf = (context: Awaited<ReturnType<typeof launch>>) =>
+        context.serviceWorkers()[0] ?? context.waitForEvent('serviceworker');
+      async function expectActive(destination: Destination, connectionId?: string, token?: string) {
+        const { settings, label, instance, proxy, backend } = destination;
+        await expect.poll(async () => Promise.all(backends.map(async entry => {
+          const { connections } = await fetch(`${entry.httpBase}/connections`).then(response => response.json());
+          return connections.filter((connection: { open: boolean }) => connection.open);
+        }))).toEqual(backends.map(entry => entry === backend ? [expect.objectContaining({
+          connectionId: connectionId ?? expect.stringMatching(uuid), label, open: true,
+        })] : []));
+        expect(proxy.upgrades).toContain(instance.wsPath);
+        const storage = await worker.evaluate(() => chrome.storage.local.get());
+        expect(storage).toMatchObject({
+          'ajb.connectionId': connectionId ?? expect.stringMatching(uuid),
+          'ajb.serverUrl': settings.wsUrl,
+          'ajb.tokenUrl': settings.wsUrl,
+          'ajb.token': token ?? expect.any(String),
+          'ajb.label': label,
+          copilotSettings: {
+            baseUrl: settings.baseUrl, apiKey: settings.apiKey, apiKeyUrl: settings.baseUrl,
+            mcpUrl: settings.mcpUrl, mcpToken: settings.mcpToken, mcpTokenUrl: settings.mcpUrl,
+            vision: true, maxSteps: 200, stepsView: 'extended',
+          },
+        });
+        return { connectionId: storage['ajb.connectionId'] as string, token: storage['ajb.token'] as string };
+      }
+
+      browser = await launch();
+      let worker = await workerOf(browser);
+      const panelUrl = `chrome-extension://${new URL(worker.url()).hostname}/src/sidepanel/index.html`;
+      const panel = await browser.newPage();
+      const targetUrl = `${destinations[0].instance.origin}/healthz`;
+      const target = await browser.newPage();
+      await target.goto(targetUrl);
+      const chatText = 'Fixture conversation for the original tab';
+      const tabId = await worker.evaluate(async ({ url, text }) => {
+        const [tab] = await chrome.tabs.query({ url });
+        if (tab?.id === undefined) throw new Error('Fixture tab has no id');
+        await chrome.storage.local.set({ copilotChats: [{
+          id: 'fixture-chat', title: text, updatedAt: Date.now(), scope: `t:${tab.id}`,
+          items: [{ kind: 'user', text }], plan: [],
+        }] });
+        return tab.id;
+      }, { url: targetUrl, text: chatText });
+      await panel.goto(panelUrl);
+      await expect(panel.getByText(chatText, { exact: true })).toBeVisible();
+      const draft = panel.getByRole('textbox', { name: 'Mensaje para el copiloto' });
+      await draft.fill('Unsent fixture message');
+      await panel.getByRole('button', { name: 'Abrir Opciones', exact: true }).click();
+      const setup = panel.getByRole('group', { name: 'Emparejar con servidor' });
+      const approvals = new Map<Destination, Awaited<ReturnType<typeof expectActive>>>();
+
+      for (const destination of destinations) {
+        const { instance } = destination;
+        await test.step(`Pair with ${instance.name} once`, async () => {
+          const [approval] = await Promise.all([
+            browser!.waitForEvent('page'),
+            setup.getByRole('button', { name: instance.name, exact: true }).click(),
+          ]);
+          await expect(approval).toHaveURL(`${instance.origin}/setup`);
+          if (!instance.inferredHost) await approval.getByLabel('Nombre del equipo').fill('Fixture laptop');
+          await approval.getByLabel('Nombre del perfil del navegador').fill(`${instance.name} Profile`);
+          await approval.getByRole('button', { name: 'Emparejar', exact: true }).click();
+          await expect(approval.getByRole('status')).toContainText('Emparejamiento aprobado');
+          approvals.set(destination, await expectActive(destination));
+          await approval.close();
+        });
+      }
+      expect(new Set([...approvals.values()].map(({ token }) => token)).size).toBe(destinations.length);
+
+      const approvalRequests = () => proxies.map(proxy => proxy.requests
+        .filter(request => ['/setup/start', '/setup/approve'].includes(request.path))
+        .map(({ path, status }) => ({ path, status })));
+      const initialRequests = approvalRequests();
+      expect(initialRequests).toEqual(destinations.map(() => [
+        { path: '/setup/start', status: 201 },
+        { path: '/setup/approve', status: 422 },
+        { path: '/setup/approve', status: 200 },
+      ]));
+      const newPages: string[] = [];
+      browser.on('page', page => newPages.push(page.url()));
+      for (const destination of destinations) {
+        await test.step(`Restore ${destination.instance.name} without approval`, async () => {
+          const button = setup.getByRole('button', { name: destination.instance.name, exact: true });
+          await expect(button).toHaveAccessibleDescription('Emparejado');
+          const upgradeCount = destination.proxy.upgrades.length;
+          await button.click();
+          const { connectionId, token } = approvals.get(destination)!;
+          await expectActive(destination, connectionId, token);
+          expect(destination.proxy.upgrades.slice(upgradeCount)).toContain(destination.instance.wsPath);
+          await expect(button).toHaveAccessibleDescription('En uso');
+        });
+      }
+      expect(newPages).toEqual([]);
+      expect(approvalRequests()).toEqual(initialRequests);
+      await panel.getByRole('button', { name: 'Volver a la conversación' }).click();
+      await expect(panel.getByText(chatText, { exact: true })).toBeVisible();
+      await expect(draft).toHaveValue('Unsent fixture message');
+      expect(await worker.evaluate(async id => (await chrome.tabs.get(id)).url, tabId)).toBe(targetUrl);
+
+      await test.step('Restart Chromium with the same profile and switch again', async () => {
+        await browser!.close();
+        browser = await launch();
+        worker = await workerOf(browser);
+        const destination = destinations.at(-1)!;
+        const before = approvals.get(destination)!;
+        await expectActive(destination, before.connectionId, before.token);
+
+        const reopenedPanel = await browser.newPage();
+        await reopenedPanel.goto(panelUrl);
+        await reopenedPanel.getByRole('button', { name: 'Opciones', exact: true }).click();
+        const first = destinations[0];
+        await reopenedPanel.getByRole('group', { name: 'Emparejar con servidor' })
+          .getByRole('button', { name: first.instance.name, exact: true }).click();
+        const original = approvals.get(first)!;
+        await expectActive(first, original.connectionId, original.token);
+        expect(approvalRequests()).toEqual(initialRequests);
+      });
+    } finally {
+      await browser?.close();
+      await Promise.all(proxies.map(proxy => proxy.close()));
+      await Promise.all(backends.map(backend => backend.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

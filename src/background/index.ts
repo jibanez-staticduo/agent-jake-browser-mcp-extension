@@ -24,7 +24,7 @@ import {
   setOnTokenApproved,
   startPairing,
 } from './pairing';
-import { cancelSetup, getSetupPairingInfo, resumeSetup, setOnSetupApproved, startSetup } from './setup-pairing';
+import { cancelSetup, getPairedInstances, getSetupPairingInfo, rememberPairedSetups, resumeSetup, setOnSetupApproved, startSetup } from './setup-pairing';
 import { updateSettings } from './settings-update';
 import { log } from '@/utils/logger';
 import { chromeProvisionStorage, provisionCopilot } from './provision';
@@ -292,7 +292,8 @@ async function handlePopupMessage(message: {
 
     case 'getServerConfig': {
       await initialized;
-      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision, hasUnboundToken } = await getServerSettings();
+      const [server, pairedInstances] = await updateSettings(() => Promise.all([getServerSettings(), getPairedInstances()]));
+      const { config: cfg, effectiveUrl, storedServerUrl, storedToken, serverRevision, hasUnboundToken } = server;
       return {
         effectiveUrl,
         fromStorage: cfg.fromStorage,
@@ -307,6 +308,7 @@ async function handlePopupMessage(message: {
         connected: wsClient?.isConnected() || false,
         pairing: getPairingInfo(),
         setupPairing: getSetupPairingInfo(),
+        pairedInstances,
         awaitingToken: wsClient?.isAwaitingToken() || false,
       };
     }
@@ -331,6 +333,7 @@ async function handlePopupMessage(message: {
         cancelPairing();
         await clearPairCode();
         await cancelSetup();
+        if (serverUrl !== undefined && serverUrl !== previous.storedServerUrl) await rememberPairedSetups();
         const saved = await writeServerSettings(previous, { serverUrl, token, label });
         return { success: true, ...saved, reconnect: wsClient?.reload() } as const;
       });
@@ -355,7 +358,9 @@ async function handlePopupMessage(message: {
 
     case 'startSetup': {
       await initialized;
-      const { instance, windowId } = (payload ?? {}) as { instance?: unknown; windowId?: unknown };
+      const { instance, windowId, rePair, reopen } = (payload ?? {}) as {
+        instance?: unknown; windowId?: unknown; rePair?: unknown; reopen?: unknown;
+      };
       if (!isSetupInstance(instance)) return { success: false, error: 'Selecciona un servidor.' };
       const originWindow = typeof windowId === 'number' && Number.isInteger(windowId) && windowId >= 0
         ? windowId
@@ -363,7 +368,7 @@ async function handlePopupMessage(message: {
       await startSetup(instance, async () => {
         cancelPairing();
         await clearPairCode();
-      }, originWindow);
+      }, originWindow, rePair === true, reopen === true);
       return { success: true };
     }
 

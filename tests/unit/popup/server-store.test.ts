@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
+import { SETUP_INSTANCES } from '@/config/setup-instances';
 import { useServerStore } from '@/popup/stores/server';
 
 const { sendMessage } = vi.hoisted(() => ({ sendMessage: vi.fn() }));
@@ -15,6 +16,10 @@ const config = {
 beforeEach(() => {
   setActivePinia(createPinia());
   sendMessage.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('server name drafts', () => {
@@ -90,5 +95,55 @@ describe('server credential drafts', () => {
       serverUrl: 'wss://new.example/ws', token: 'token-b',
       expectedServerRevision: 'revision-a', expectedEffectiveUrl: config.effectiveUrl,
     });
+  });
+});
+
+describe('saved destinations', () => {
+  it('loads paired destinations and activates one with the ordinary setup request', async () => {
+    const server = useServerStore();
+    expect(server.pairedInstances).toEqual([]);
+    vi.stubGlobal('chrome', { windows: { getCurrent: vi.fn().mockResolvedValue({ id: 11 }) } });
+    sendMessage.mockResolvedValueOnce({ ...config, pairedInstances: ['nas', 'ari'] });
+    await server.refresh();
+    expect(server.pairedInstances).toEqual(['nas', 'ari']);
+
+    sendMessage.mockResolvedValueOnce({ success: true }).mockResolvedValueOnce({
+      ...config, effectiveUrl: SETUP_INSTANCES.ari.wsUrl, pairedInstances: ['nas', 'ari'],
+    });
+    await server.runSetup('ari');
+
+    expect(sendMessage).toHaveBeenCalledWith('startSetup', { instance: 'ari', windowId: 11 });
+    expect(server.effectiveUrl).toBe(SETUP_INSTANCES.ari.wsUrl);
+    expect(server.pairedInstances).toEqual(['nas', 'ari']);
+  });
+
+  it('requests a fresh pairing explicitly and reopens the pending approval for a saved destination', async () => {
+    const server = useServerStore();
+    vi.stubGlobal('chrome', { windows: { getCurrent: vi.fn().mockResolvedValue({ id: 21 }) } });
+    const pending = {
+      ...config, effectiveUrl: SETUP_INSTANCES.defend.wsUrl, pairedInstances: ['defend'],
+      setupPairing: { state: 'pending', instance: 'defend' },
+    };
+    sendMessage.mockImplementation(async (action: string) => action === 'getServerConfig' ? pending : { success: true });
+
+    await server.runSetup('defend', true);
+    await server.reopenSetup();
+
+    const requests = sendMessage.mock.calls.filter(([action]) => action === 'startSetup');
+    expect(requests).toEqual([
+      ['startSetup', { instance: 'defend', windowId: 21, rePair: true }],
+      ['startSetup', { instance: 'defend', windowId: 21, reopen: true }],
+    ]);
+  });
+
+  it('reopens the first approval without requesting a fresh pairing', async () => {
+    const server = useServerStore();
+    vi.stubGlobal('chrome', { windows: { getCurrent: vi.fn().mockResolvedValue({ id: 31 }) } });
+    const pending = { ...config, setupPairing: { state: 'pending', instance: 'nas' } };
+    sendMessage.mockImplementation(async (action: string) => action === 'getServerConfig' ? pending : { success: true });
+    await server.refresh();
+    await server.reopenSetup();
+
+    expect(sendMessage).toHaveBeenCalledWith('startSetup', { instance: 'nas', windowId: 31, reopen: true });
   });
 });

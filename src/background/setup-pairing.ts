@@ -2,10 +2,11 @@ import { STORAGE_KEYS } from '@/config/runtime';
 import { isSetupInstance, SETUP_INSTANCES, type SetupInstance, type SetupPairingInfo } from '@/config/setup-instances';
 import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
 import { normalizeCopilotSettings } from '@/utils/copilot-settings';
-import { isSetupSecret, requestSetup, requestSetupStatus } from './setup-client';
+import { isSetupConfig, isSetupSecret, requestSetup, requestSetupStatus, type SetupConfig } from './setup-client';
 import { updateSettings } from './settings-update';
 
 const PENDING_SETUP = 'ajb.pendingSetup';
+const SAVED_SETUPS = 'ajb.savedSetups';
 const TTL_MS = 5 * 60 * 1000;
 const POLL_MS = 2000;
 
@@ -24,6 +25,93 @@ type Attempt = {
 let active: Attempt | undefined;
 let info: SetupPairingInfo = { state: 'idle' };
 let onApproved: (() => void) | undefined;
+
+type SavedSetups = Partial<Record<SetupInstance, SetupConfig>>;
+
+async function readSetups() {
+  const stored = await chrome.storage.local.get([
+    SAVED_SETUPS, COPILOT_SETTINGS_KEY, STORAGE_KEYS.serverUrl, STORAGE_KEYS.token, STORAGE_KEYS.tokenUrl,
+    STORAGE_KEYS.connectionId, STORAGE_KEYS.label,
+  ]);
+  const saved = stored[SAVED_SETUPS] as Partial<Record<SetupInstance, unknown>> | undefined;
+  const settings = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
+  const setups: SavedSetups = {};
+  const wsUrl = stored[STORAGE_KEYS.serverUrl];
+  const connectionId = stored[STORAGE_KEYS.connectionId];
+  const label = stored[STORAGE_KEYS.label];
+
+  for (const [key, endpoint] of Object.entries(SETUP_INSTANCES)) {
+    const instance = key as SetupInstance;
+    const config = saved?.[instance];
+    if (isSetupConfig(instance, config, true)) {
+      setups[instance] = config;
+      if (config.wsUrl !== wsUrl || config.connectionId !== connectionId) continue;
+      const current = {
+        ...config,
+        label,
+        token: stored[STORAGE_KEYS.tokenUrl] === wsUrl ? stored[STORAGE_KEYS.token] : '',
+        apiKey: settings?.baseUrl === endpoint.baseUrl && settings.apiKeyUrl === endpoint.baseUrl ? settings.apiKey : '',
+        mcpToken: settings?.mcpUrl === endpoint.mcpUrl && settings.mcpTokenUrl === endpoint.mcpUrl ? settings.mcpToken : '',
+      };
+      if (isSetupConfig(instance, current, true)) setups[instance] = current;
+      continue;
+    }
+    if (saved !== undefined) continue;
+    // Migrate a complete, endpoint-bound setup written by the single-destination version.
+    const legacy = {
+      wsUrl,
+      token: stored[STORAGE_KEYS.tokenUrl] === wsUrl ? stored[STORAGE_KEYS.token] : undefined,
+      connectionId,
+      label,
+      baseUrl: settings?.baseUrl,
+      apiKey: settings?.apiKeyUrl === settings?.baseUrl ? settings?.apiKey : undefined,
+      mcpUrl: settings?.mcpUrl,
+      mcpToken: settings?.mcpTokenUrl === settings?.mcpUrl ? settings?.mcpToken : undefined,
+    };
+    if (isSetupConfig(instance, legacy)) setups[instance] = legacy;
+  }
+  return { setups, settings };
+}
+
+export async function getPairedInstances(): Promise<SetupInstance[]> {
+  return Object.keys((await readSetups()).setups) as SetupInstance[];
+}
+
+/** Preserve edits made to the active destination before a manual URL change. */
+export async function rememberPairedSetups(): Promise<void> {
+  const { setups } = await readSetups();
+  if (Object.keys(setups).length) await chrome.storage.local.set({ [SAVED_SETUPS]: setups });
+}
+
+async function applySetup(
+  instance: SetupInstance,
+  config: SetupConfig,
+  { setups, settings: previous }: Awaited<ReturnType<typeof readSetups>>,
+  firstSetup: boolean,
+): Promise<void> {
+  const { wsUrl, token, label, connectionId, baseUrl, apiKey, mcpUrl, mcpToken } = config;
+  const settings = normalizeCopilotSettings({
+    ...previous, baseUrl, apiKey, apiKeyUrl: baseUrl, mcpUrl, mcpToken, mcpTokenUrl: mcpUrl,
+    ...(firstSetup ? { vision: true, maxSteps: 200, stepsView: 'extended' } as const : {}),
+  });
+  await chrome.storage.local.set({
+    [PENDING_SETUP]: null,
+    [SAVED_SETUPS]: { ...setups, [instance]: config },
+    [STORAGE_KEYS.connectionId]: connectionId,
+    [STORAGE_KEYS.serverUrl]: wsUrl,
+    [STORAGE_KEYS.token]: token,
+    [STORAGE_KEYS.tokenUrl]: wsUrl,
+    [STORAGE_KEYS.label]: label,
+    [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
+    [COPILOT_SETTINGS_KEY]: settings,
+    [COPILOT_PROVISIONED_KEY]: {},
+  });
+  clearTimeout(active?.timer);
+  active?.controller.abort();
+  active = undefined;
+  info = { state: 'approved', instance };
+  onApproved?.();
+}
 
 export function setOnSetupApproved(callback: () => void): void {
   onApproved = callback;
@@ -71,35 +159,14 @@ async function poll(attempt: Attempt): Promise<void> {
       if (status?.state === 'expired') {
         await clearAttempt({ state: 'expired', instance });
       } else if (status?.state === 'approved') {
-        const { wsUrl, token, label, connectionId, baseUrl, apiKey, mcpUrl, mcpToken } = status.config;
         try {
-          const stored = await chrome.storage.local.get(COPILOT_SETTINGS_KEY);
-          const previous = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
-          const settings = normalizeCopilotSettings({
-            ...previous, baseUrl, apiKey, apiKeyUrl: baseUrl, mcpUrl, mcpToken, mcpTokenUrl: mcpUrl,
-            vision: true, maxSteps: 200, stepsView: 'extended',
-          });
-          // Clear the resume grant in the same write as the new identity and settings.
-          await chrome.storage.local.set({
-            [PENDING_SETUP]: null,
-            [STORAGE_KEYS.connectionId]: connectionId,
-            [STORAGE_KEYS.serverUrl]: wsUrl,
-            [STORAGE_KEYS.token]: token,
-            [STORAGE_KEYS.tokenUrl]: wsUrl,
-            [STORAGE_KEYS.label]: label,
-            [STORAGE_KEYS.serverRevision]: crypto.randomUUID(),
-            [COPILOT_SETTINGS_KEY]: settings,
-            [COPILOT_PROVISIONED_KEY]: {},
-          });
+          const stored = await readSetups();
+          await applySetup(instance, status.config, stored, !Object.keys(stored.setups).length);
         } catch {
           // The server can return the same grant until it expires.
           info = { state: 'pending', instance, error: 'No se pudo guardar la configuración. Reintentando…' };
           schedulePoll(attempt);
-          return;
         }
-        info = { state: 'approved', instance };
-        active = undefined;
-        onApproved?.();
       } else {
         schedulePoll(attempt);
       }
@@ -114,11 +181,25 @@ async function poll(attempt: Attempt): Promise<void> {
   }
 }
 
-export async function startSetup(instance: SetupInstance, beforeStart: () => Promise<void>, windowId?: number): Promise<void> {
+export async function startSetup(
+  instance: SetupInstance,
+  beforeStart: () => Promise<void>,
+  windowId?: number,
+  rePair = false,
+  reopen = false,
+): Promise<void> {
   const attempt = await updateSettings(async () => {
     if (info.instance === instance && info.state === 'starting') return;
-    if (active?.pending?.instance === instance && Date.now() < active.pending.expiresAt) {
+    const stored = await readSetups();
+    const saved = stored.setups[instance];
+    if ((!saved || rePair || reopen) && active?.pending?.instance === instance && Date.now() < active.pending.expiresAt) {
       await openApproval(active.pending, windowId).catch(() => { throw new Error('No se pudo abrir la página de aprobación.'); });
+      return;
+    }
+    if (reopen) return;
+    if (saved && !rePair) {
+      await beforeStart();
+      await applySetup(instance, saved, stored, false);
       return;
     }
     await cancelSetup();

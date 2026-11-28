@@ -4,11 +4,16 @@
  * persistent connectionId and current connection state.
  */
 import { computed } from 'vue';
-import { SETUP_INSTANCES } from '@/config/setup-instances';
+import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 import { useServerStore } from '../stores';
 
 const server = useServerStore();
-const configuredInstance = computed(() => Object.values(SETUP_INSTANCES).find((instance) => instance.wsUrl === server.effectiveUrl));
+const configuredInstance = computed(() =>
+  (Object.keys(SETUP_INSTANCES) as SetupInstance[]).find((id) => SETUP_INSTANCES[id].wsUrl === server.effectiveUrl),
+);
+const setupBusy = computed(() =>
+  server.setupLoading || server.saving || server.pairingLoading || server.setup.state === 'starting',
+);
 
 const setupStateText = computed(() => {
   const { state, instance, error } = server.setup;
@@ -17,7 +22,7 @@ const setupStateText = computed(() => {
   switch (state) {
     case 'starting': return `Solicitando aprobación a ${name}…`;
     case 'pending': return `Completa la aprobación en la pestaña de ${name}.`;
-    case 'approved': return `Configuración de ${name} guardada.`;
+    case 'approved': return `Configuración de ${name} activa.`;
     case 'expired': return 'La solicitud caducó. Vuelve a emparejar el navegador.';
     default: return '';
   }
@@ -50,23 +55,34 @@ const sourceLabel = computed(() => {
     </div>
 
     <div v-if="!server.connected" class="conn-problem" role="status">
-      Sin conexión con el servidor MCP. Revisa la URL y el token, o empareja de nuevo.
+      Sin conexión con el servidor MCP. Selecciona un servidor o revisa la URL y el token.
     </div>
 
     <div class="field">
       <span id="setup-servers" class="field-label">Emparejar con servidor</span>
       <div class="actions" role="group" aria-labelledby="setup-servers">
-        <button v-for="(instance, id) in SETUP_INSTANCES" :key="id" class="btn btn-pair" type="button"
-          :disabled="server.setupLoading || server.saving || server.pairingLoading || server.setup.state === 'starting'"
-          @click="server.runSetup(id)">
-          {{ instance.name }}
-        </button>
+        <div v-for="(instance, id) in SETUP_INSTANCES" :key="id" class="setup-destination">
+          <button class="btn btn-pair" type="button" :disabled="setupBusy"
+            :aria-pressed="configuredInstance === id"
+            :aria-describedby="`setup-destination-${id}`"
+            @click="server.runSetup(id)">
+            {{ instance.name }}
+          </button>
+          <span :id="`setup-destination-${id}`" class="setup-destination-state">
+            {{ configuredInstance === id ? 'En uso' : server.pairedInstances.includes(id) ? 'Emparejado' : 'Por emparejar' }}
+          </span>
+        </div>
       </div>
       <span v-if="setupStateText" class="pairing-status" role="status">{{ setupStateText }}</span>
-      <span v-if="configuredInstance" class="field-hint">Servidor configurado: {{ configuredInstance.name }}</span>
+      <div v-if="configuredInstance && server.pairedInstances.includes(configuredInstance)" class="actions">
+        <button class="btn btn-pair" type="button" :disabled="setupBusy || server.setup.state === 'pending'"
+          @click="server.runSetup(configuredInstance, true)">
+          Volver a emparejar {{ SETUP_INSTANCES[configuredInstance].name }}
+        </button>
+      </div>
       <div v-if="server.setup.state === 'pending'" class="actions">
         <button class="btn btn-pair" type="button" :disabled="server.setupLoading"
-          @click="server.runSetup(server.setup.instance)">Abrir aprobación</button>
+          @click="server.reopenSetup()">Abrir aprobación</button>
         <button class="btn btn-pair" type="button" :disabled="server.setupLoading"
           @click="server.runSetup()">Cancelar</button>
       </div>
@@ -264,6 +280,22 @@ const sourceLabel = computed(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.setup-destination {
+  display: grid;
+  gap: 3px;
+}
+
+.setup-destination .btn[aria-pressed="true"] {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.setup-destination-state {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
 }
 
 .manual-settings summary {

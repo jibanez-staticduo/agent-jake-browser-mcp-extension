@@ -48,6 +48,8 @@ export const useServerStore = defineStore('server', () => {
   const connected = computed(() => info.value?.connected ?? false);
   const pairing = computed<PairingInfo>(() => info.value?.pairing ?? { state: 'idle' });
   const setup = computed<SetupPairingInfo>(() => info.value?.setupPairing ?? { state: 'idle' });
+  const pairedInstances = computed(() => info.value?.pairedInstances ?? []);
+
   function syncDrafts(): void {
     if (!info.value) return;
     const latest = {
@@ -158,14 +160,15 @@ export const useServerStore = defineStore('server', () => {
     }
   }
 
-  async function runSetup(instance?: SetupInstance): Promise<void> {
+  async function runSetup(instance?: SetupInstance, rePair = false, reopen = false): Promise<void> {
+    if (setupLoading.value) return;
     setupLoading.value = true;
     error.value = null;
     try {
       const windowId = instance ? (await chrome.windows?.getCurrent().catch(() => undefined))?.id : undefined;
       const result = await sendMessage<SaveResult>(
         instance ? 'startSetup' : 'cancelSetup',
-        instance ? { instance, windowId } : undefined,
+        instance ? { instance, windowId, ...(rePair ? { rePair } : {}), ...(reopen ? { reopen } : {}) } : undefined,
       );
       if (!result?.success) error.value = result?.error || 'No se pudo actualizar el emparejamiento.';
       await refresh();
@@ -173,6 +176,13 @@ export const useServerStore = defineStore('server', () => {
       error.value = (e as Error).message;
     } finally {
       setupLoading.value = false;
+    }
+  }
+
+  async function reopenSetup(): Promise<void> {
+    const { state, instance } = setup.value;
+    if (state === 'pending' && instance) {
+      await runSetup(instance, false, true);
     }
   }
 
@@ -206,12 +216,14 @@ export const useServerStore = defineStore('server', () => {
     connected,
     pairing,
     setup,
+    pairedInstances,
     // Actions
     refresh,
     markDraftTouched,
     save,
     startPairing,
     runSetup,
+    reopenSetup,
     startPolling,
     stopPolling,
   };

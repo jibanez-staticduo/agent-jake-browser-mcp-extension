@@ -2,7 +2,7 @@ import { normalizeLabel } from '@/config/runtime';
 import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 
 type SetupGrant = { approvalCode: string; pollSecret: string };
-type SetupConfig = {
+export type SetupConfig = {
   connectionId: string;
   wsUrl: string;
   token: string;
@@ -58,19 +58,23 @@ export async function requestSetup(instance: SetupInstance, signal: AbortSignal)
   return { approvalCode: grant.approvalCode, pollSecret: grant.pollSecret };
 }
 
+export function isSetupConfig(instance: SetupInstance, config: unknown, allowCleared = false): config is SetupConfig {
+  const expected = SETUP_INSTANCES[instance];
+  const value = config as Partial<SetupConfig> | null | undefined;
+  const validCredential = (credential: unknown) => isCredential(credential) || (allowCleared && credential === '');
+  return value?.wsUrl === expected.wsUrl && value.baseUrl === expected.baseUrl && value.mcpUrl === expected.mcpUrl
+    && validCredential(value.token) && validCredential(value.apiKey) && validCredential(value.mcpToken)
+    && typeof value.label === 'string' && (allowCleared || !!value.label) && value.label === normalizeLabel(value.label)
+    && typeof value.connectionId === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.connectionId);
+}
+
 export async function requestSetupStatus(instance: SetupInstance, pollSecret: string, signal: AbortSignal): Promise<SetupStatus | null> {
-  const body = await setupPost(instance, 'status', { pollSecret }, signal) as { state?: unknown; config?: Partial<SetupConfig> } | null;
+  const body = await setupPost(instance, 'status', { pollSecret }, signal) as { state?: unknown; config?: unknown } | null;
   if (!body) return null;
   if (body.state === 'pending' || body.state === 'expired') return { state: body.state };
-
-  const expected = SETUP_INSTANCES[instance];
-  const config = body.config;
-  if (body.state !== 'approved' || config?.wsUrl !== expected.wsUrl || config.baseUrl !== expected.baseUrl
-    || config.mcpUrl !== expected.mcpUrl || !isCredential(config.token) || !isCredential(config.apiKey)
-    || !isCredential(config.mcpToken) || typeof config.label !== 'string' || !config.label
-    || config.label !== normalizeLabel(config.label) || typeof config.connectionId !== 'string'
-    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(config.connectionId)) {
+  if (body.state !== 'approved' || !isSetupConfig(instance, body.config)) {
     throw new Error('La configuración recibida no coincide con el servidor seleccionado.');
   }
-  return { state: 'approved', config: config as SetupConfig };
+  return { state: 'approved', config: body.config };
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getEffectiveConfig, STORAGE_KEYS } from '@/config/runtime';
-import { SETUP_INSTANCES } from '@/config/setup-instances';
+import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 import { COPILOT_SETTINGS_KEY } from '@/types/copilot';
 
 const pendingKey = 'ajb.pendingSetup';
@@ -40,6 +40,103 @@ afterEach(() => {
 });
 
 describe('automatic setup', () => {
+  it('keeps all three pairs and restores each identity after a worker restart', async () => {
+    const configs = (['nas', 'ari', 'defend'] as const).map((instance, index) => {
+      const { wsUrl, baseUrl, mcpUrl } = SETUP_INSTANCES[instance];
+      return [instance, {
+        wsUrl, baseUrl, mcpUrl, connectionId: `12345678-1234-4234-8234-12345678901${index}`,
+        label: `Fixture - ${instance}`, token: `ws-${instance}`, apiKey: `llm-${instance}`, mcpToken: `mcp-${instance}`,
+      }] as const;
+    });
+    let setup = await import('@/background/setup-pairing');
+    for (const [instance, config] of configs) {
+      fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+      fetch.mockResolvedValueOnce(response({ state: 'approved', config }));
+      await setup.startSetup(instance, clearLegacy);
+      await vi.advanceTimersByTimeAsync(20);
+    }
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(6);
+
+    vi.resetModules();
+    setup = await import('@/background/setup-pairing');
+    const reload = vi.fn();
+    setup.setOnSetupApproved(reload);
+    expect(await setup.getPairedInstances()).toEqual(expect.arrayContaining(['nas', 'ari', 'defend']));
+    for (const [instance, config] of configs) {
+      const previousRevision = store[STORAGE_KEYS.serverRevision];
+      await setup.startSetup(instance, clearLegacy);
+      expect(await getEffectiveConfig()).toMatchObject({ connectionId: config.connectionId, token: config.token });
+      expect(store[STORAGE_KEYS.tokenUrl]).toBe(config.wsUrl);
+      expect(store[STORAGE_KEYS.serverRevision]).not.toBe(previousRevision);
+      expect(store[COPILOT_SETTINGS_KEY]).toMatchObject({
+        baseUrl: config.baseUrl, apiKey: config.apiKey, apiKeyUrl: config.baseUrl,
+        mcpUrl: config.mcpUrl, mcpToken: config.mcpToken, mcpTokenUrl: config.mcpUrl,
+      });
+    }
+    expect(reload).toHaveBeenCalledTimes(3);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(6);
+  });
+
+  it('restores an endpoint-bound setup from the previous release and lets users re-pair it', async () => {
+    const instance: SetupInstance = 'defend';
+    Object.assign(store, {
+      [STORAGE_KEYS.serverUrl]: wsUrl,
+      [STORAGE_KEYS.tokenUrl]: wsUrl,
+      [STORAGE_KEYS.token]: config.token,
+      [STORAGE_KEYS.connectionId]: connectionId,
+      [STORAGE_KEYS.label]: config.label,
+      [COPILOT_SETTINGS_KEY]: { baseUrl, mcpUrl, apiKey: config.apiKey, mcpToken: config.mcpToken, mcpTokenUrl: mcpUrl },
+    });
+    const setup = await import('@/background/setup-pairing');
+    expect(await setup.getPairedInstances()).toEqual([]);
+    Object.assign(store[COPILOT_SETTINGS_KEY] as object, { apiKeyUrl: baseUrl });
+    expect(await setup.getPairedInstances()).toEqual([instance]);
+    await setup.startSetup(instance, clearLegacy);
+    expect(fetch).not.toHaveBeenCalled();
+
+    fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+    fetch.mockResolvedValueOnce(response({ state: 'approved', config: { ...config, token: 'new-ws-key' } }));
+    await setup.startSetup(instance, clearLegacy, 42, true);
+    expect(create).toHaveBeenCalledWith({ url: `${origin}/setup?code=${approvalCode}`, windowId: 42 });
+    await vi.advanceTimersByTimeAsync(20);
+    expect((await getEffectiveConfig()).token).toBe('new-ws-key');
+    expect(await setup.getPairedInstances()).toEqual([instance]);
+    await setup.startSetup(instance, clearLegacy, 42, false, true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains endpoint-bound edits and explicit clears when switching back', async () => {
+    const setup = await import('@/background/setup-pairing');
+    const nas = SETUP_INSTANCES.nas;
+    for (const [instance, profile] of [
+      ['defend', config],
+      ['nas', { ...config, wsUrl: nas.wsUrl, baseUrl: nas.baseUrl, mcpUrl: nas.mcpUrl }],
+    ] as const) {
+      fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+      fetch.mockResolvedValueOnce(response({ state: 'approved', config: profile }));
+      await setup.startSetup(instance, clearLegacy);
+      await vi.advanceTimersByTimeAsync(20);
+    }
+
+    Object.assign(store, {
+      [STORAGE_KEYS.token]: '',
+      [STORAGE_KEYS.label]: 'Changed manually',
+    });
+    Object.assign(store[COPILOT_SETTINGS_KEY] as object, {
+      apiKey: 'rotated-key', mcpToken: '', mcpTokenUrl: '', vision: false, maxSteps: 35, stepsView: 'compact',
+    });
+    await setup.startSetup('defend', clearLegacy);
+    expect((await getEffectiveConfig()).token).toBe(config.token);
+    await setup.startSetup('nas', clearLegacy);
+    expect(await getEffectiveConfig()).toMatchObject({ token: '', label: 'Changed manually' });
+    expect(store[COPILOT_SETTINGS_KEY]).toMatchObject({
+      apiKey: 'rotated-key', mcpToken: '', vision: false, maxSteps: 35, stepsView: 'compact',
+    });
+  });
+
   it('opens approval without the poll secret and applies one atomic write and reconnect', async () => {
     const setup = await import('@/background/setup-pairing');
     store[STORAGE_KEYS.connectionId] = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
