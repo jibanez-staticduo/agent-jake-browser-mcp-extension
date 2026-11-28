@@ -202,7 +202,8 @@ const buildEndpoint = withScheme({
 const canonicalBuildEndpoint = parseWsUrl(buildDisplayUrl(buildEndpoint));
 const buildServer = canonicalBuildEndpoint ? withScheme(canonicalBuildEndpoint) : buildEndpoint;
 
-async function resolveServer(rawUrl: string) {
+/** Resolve the endpoint from the caller's stored URL without reading or writing storage. */
+export async function resolveServer(rawUrl: string) {
   const manual = parseWsUrl(rawUrl);
   if (manual) return { ...withScheme(manual), source: 'manual' as const };
   const bundle = await loadBundleConfig();

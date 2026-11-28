@@ -8,6 +8,12 @@ export const COPILOT_CREDENTIAL_FIELDS = [
   ['baseUrl', 'apiKey', 'apiKeyUrl'],
   ['mcpUrl', 'mcpToken', 'mcpTokenUrl'],
 ] as const;
+type CopilotCredentialField = typeof COPILOT_CREDENTIAL_FIELDS[number][number];
+type CopilotCredentialBaseline = Partial<Record<CopilotCredentialField, string>>;
+export type CopilotSettingsPatch = Partial<CopilotSettings> & {
+  expectedServerRevision?: string | null;
+  expectedCredentials?: CopilotCredentialBaseline;
+};
 
 export interface CopilotSettingsSnapshot {
   settings: CopilotSettings;
@@ -83,7 +89,7 @@ export function rebaseCopilotDraft(draft: CopilotSettings, baseline: CopilotSett
 
 export class CopilotSettingsConflict extends Error {}
 
-async function save(changes: Partial<CopilotSettings> & { expectedServerRevision?: string | null }): Promise<CopilotSettings> {
+async function save(changes: CopilotSettingsPatch): Promise<CopilotSettings> {
   const result = await chrome.runtime.sendMessage({ action: 'saveCopilotSettings', payload: changes }) as
     { success: true; settings: CopilotSettings } | { success: false; conflict?: boolean; error: string } | undefined;
   if (result?.success === false && result.conflict) throw new CopilotSettingsConflict(result.error);
@@ -94,15 +100,17 @@ async function save(changes: Partial<CopilotSettings> & { expectedServerRevision
 export function saveCopilotSettings(input: CopilotSettings, baseline: CopilotSettingsSnapshot): Promise<CopilotSettings> {
   const fields = Object.keys({ ...baseline.settings, ...input }) as (keyof CopilotSettings)[];
   const changed = new Set(fields.filter((key) => input[key] !== baseline.settings[key]));
-  let credentialEdit = false;
+  const expectedCredentials: CopilotCredentialBaseline = {};
   for (const group of COPILOT_CREDENTIAL_FIELDS) {
     if (!group.some((key) => changed.has(key))) continue;
-    group.forEach((key) => changed.add(key));
-    credentialEdit = true;
+    for (const key of group) {
+      changed.add(key);
+      expectedCredentials[key] = baseline.settings[key] ?? '';
+    }
   }
   return save({
     ...Object.fromEntries([...changed].map((key) => [key, input[key] ?? ''])),
-    ...(credentialEdit ? { expectedServerRevision: baseline.serverRevision } : {}),
+    ...(Object.keys(expectedCredentials).length ? { expectedServerRevision: baseline.serverRevision, expectedCredentials } : {}),
   });
 }
 

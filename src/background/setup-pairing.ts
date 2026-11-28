@@ -1,4 +1,4 @@
-import { buildDisplayUrl, normalizeLabel, parseWsUrl, STORAGE_KEYS } from '@/config/runtime';
+import { buildDisplayUrl, normalizeLabel, resolveServer, STORAGE_KEYS } from '@/config/runtime';
 import { isSetupInstance, SETUP_INSTANCES, type SetupInstance, type SetupPairingInfo } from '@/config/setup-instances';
 import { COPILOT_PROVISIONED_KEY, COPILOT_SETTINGS_KEY, type CopilotSettings } from '@/types/copilot';
 import { normalizeCopilotSettings } from '@/utils/copilot-settings';
@@ -44,8 +44,7 @@ async function readSetups() {
   const settings = stored[COPILOT_SETTINGS_KEY] as Partial<CopilotSettings> | undefined;
   const setups: SavedSetups = {};
   const rawUrl = stored[STORAGE_KEYS.serverUrl];
-  const parsed = typeof rawUrl === 'string' ? parseWsUrl(rawUrl) : null;
-  const wsUrl = parsed ? buildDisplayUrl({ ...parsed, scheme: parsed.secure ? 'wss' : 'ws' }) : '';
+  const wsUrl = buildDisplayUrl(await resolveServer(typeof rawUrl === 'string' ? rawUrl : ''));
   const rawConnectionId = stored[STORAGE_KEYS.connectionId];
   const connectionId = typeof rawConnectionId === 'string' ? rawConnectionId : '';
   const label = normalizeLabel(stored[STORAGE_KEYS.label]);

@@ -522,6 +522,38 @@ test.describe('StaticDuo LAN setup with a built server', () => {
             await select(destination);
           });
         }
+        await test.step('Keep the newest Copilot credentials when two panels edit the same destination', async () => {
+          await select(nas);
+          const panelToken = panel.getByLabel('Token MCP (opcional)', { exact: false });
+          const otherToken = switchPanel.getByLabel('Token MCP (opcional)', { exact: false });
+          const otherUrl = switchPanel.getByLabel('MCP del servidor (plugins)', { exact: false });
+          const otherSave = switchPanel.getByRole('button', { name: 'Guardar copiloto', exact: true });
+          const panelSave = panel.getByRole('button', { name: 'Guardar copiloto', exact: true });
+          const updatedUrl = 'https://mcp.example.test/new';
+          const updatedToken = 'fixture-updated-mcp-token';
+          await expect(panelToken).toHaveValue(nas.settings.mcpToken);
+          await expect(otherToken).toHaveValue(nas.settings.mcpToken);
+          await panelToken.fill('fixture-older-mcp-draft');
+          await otherUrl.fill(updatedUrl);
+          await otherToken.fill(updatedToken);
+          await otherSave.click();
+          await expect.poll(() => worker.evaluate(async () =>
+            (await chrome.storage.local.get('copilotSettings')).copilotSettings.mcpUrl,
+          )).toBe(updatedUrl);
+          await panelSave.click();
+          await expect(panel.getByText('La configuración del servidor cambió. Vuelve a introducir tus cambios.', { exact: true })).toBeVisible();
+          await expect(panelToken).toHaveValue(updatedToken);
+          expect(await worker.evaluate(async () =>
+            (await chrome.storage.local.get('copilotSettings')).copilotSettings,
+          )).toMatchObject({ mcpUrl: updatedUrl, mcpTokenUrl: updatedUrl, mcpToken: updatedToken });
+
+          await otherUrl.fill(nas.settings.mcpUrl);
+          await otherToken.fill(nas.settings.mcpToken);
+          await otherSave.click();
+          await expect.poll(() => worker.evaluate(async () =>
+            (await chrome.storage.local.get('copilotSettings')).copilotSettings.mcpUrl,
+          )).toBe(nas.settings.mcpUrl);
+        });
         await select(ari);
         expect(approvalRequests()).toEqual(initialRequests);
       } finally {

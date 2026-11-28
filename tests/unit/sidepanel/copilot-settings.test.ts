@@ -46,7 +46,10 @@ describe('endpoint-bound MCP credentials', () => {
     await saveCopilotSettings({ ...saved, mcpToken: 'replacement' }, { settings: saved, serverRevision: null });
     expect(sendMessage).toHaveBeenCalledWith({
       action: 'saveCopilotSettings',
-      payload: { mcpUrl: a, mcpToken: 'replacement', mcpTokenUrl: a, expectedServerRevision: null },
+      payload: {
+        mcpUrl: a, mcpToken: 'replacement', mcpTokenUrl: a, expectedServerRevision: null,
+        expectedCredentials: { mcpUrl: a, mcpToken: saved.mcpToken, mcpTokenUrl: a },
+      },
     });
     await saveCopilotPreference({ model: 'new-model' });
     expect(sendMessage).toHaveBeenLastCalledWith({ action: 'saveCopilotSettings', payload: { model: 'new-model' } });
@@ -85,7 +88,10 @@ describe('Copilot settings snapshots', () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith({
       action: 'saveCopilotSettings',
-      payload: { mcpUrl: a, mcpToken: 'replacement', mcpTokenUrl: a, expectedServerRevision: 'destination-a' },
+      payload: {
+        mcpUrl: a, mcpToken: 'replacement', mcpTokenUrl: a, expectedServerRevision: 'destination-a',
+        expectedCredentials: { mcpUrl: a, mcpToken: saved.mcpToken, mcpTokenUrl: a },
+      },
     });
   });
 

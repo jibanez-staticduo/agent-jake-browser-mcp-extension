@@ -4,6 +4,8 @@ import { SETUP_INSTANCES, type SetupInstance } from '@/config/setup-instances';
 import { COPILOT_SETTINGS_KEY } from '@/types/copilot';
 
 const pendingKey = 'ajb.pendingSetup';
+const savedKey = 'ajb.savedSetups';
+const bundleUrl = 'chrome-extension://test-id/config.json';
 const approvalCode = 'a'.repeat(43);
 const pollSecret = 'b'.repeat(43);
 const connectionId = '12345678-1234-4234-8234-123456789012';
@@ -12,6 +14,7 @@ const config = { wsUrl, baseUrl, mcpUrl, connectionId, label: 'Laptop - Work', t
 const store: Record<string, unknown> = {};
 
 const fetch = vi.fn();
+const fetchBundle = vi.fn();
 const create = vi.fn(async () => ({}));
 const set = vi.fn(async (items: object) => { Object.assign(store, items); });
 const get = vi.fn(async (keys: string | string[]) => Object.fromEntries(
@@ -28,10 +31,18 @@ beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   fetch.mockReset();
+  fetchBundle.mockReset();
+  fetchBundle.mockResolvedValue(response({}, 404));
   vi.clearAllMocks();
   Object.keys(store).forEach((key) => delete store[key]);
-  vi.stubGlobal('fetch', fetch);
-  vi.stubGlobal('chrome', { tabs: { create }, storage: { local: { get, set, remove } } });
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => (
+    url === bundleUrl ? fetchBundle() : fetch(url, init)
+  ));
+  vi.stubGlobal('chrome', {
+    runtime: { getURL: (path: string) => `chrome-extension://test-id/${path}` },
+    tabs: { create },
+    storage: { local: { get, set, remove } },
+  });
 });
 
 afterEach(() => {
@@ -144,6 +155,62 @@ describe('automatic setup', () => {
     await setup.startSetup('defend', clearLegacy);
     await setup.startSetup('nas', clearLegacy);
     expect((await getEffectiveConfig()).token).toBe('rotated-ws-key');
+  });
+
+  it.each(['', 'rotated-ws-key'])('restores the edited config.json profile after switching with token %j', async (token) => {
+    const setup = await import('@/background/setup-pairing');
+    const runtime = await import('@/config/runtime');
+    const nas = SETUP_INSTANCES.nas;
+    const manualBase = 'https://model.example.test/v1';
+    const manualSettings = {
+      baseUrl: manualBase, apiKey: 'rotated-key', apiKeyUrl: manualBase,
+      mcpUrl: '', mcpToken: '', mcpTokenUrl: '',
+    };
+    fetchBundle.mockResolvedValue(response({ version: 1, wsUrl: `${wsUrl}/` }));
+    Object.assign(store, {
+      [savedKey]: { defend: config, nas: { ...config, wsUrl: nas.wsUrl, baseUrl: nas.baseUrl, mcpUrl: nas.mcpUrl } },
+      [STORAGE_KEYS.connectionId]: connectionId,
+      [COPILOT_SETTINGS_KEY]: manualSettings,
+    });
+    const server = await runtime.getServerSettings();
+    expect(server).toMatchObject({ config: { source: 'config.json' }, effectiveUrl: wsUrl });
+    await runtime.writeServerSettings(server, { token, label: 'Changed manually' });
+
+    await setup.startSetup('nas', clearLegacy);
+    expect((await runtime.getServerSettings()).effectiveUrl).toBe(nas.wsUrl);
+    await setup.startSetup('defend', clearLegacy);
+
+    expect(await runtime.getEffectiveConfig()).toMatchObject({ connectionId, token, label: 'Changed manually' });
+    expect(store[COPILOT_SETTINGS_KEY]).toMatchObject(manualSettings);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('keeps an approval pending in another window when reselecting the active config.json profile', async () => {
+    const setup = await import('@/background/setup-pairing');
+    fetchBundle.mockResolvedValue(response({ version: 1, wsUrl }));
+    Object.assign(store, {
+      [savedKey]: { defend: config },
+      [STORAGE_KEYS.connectionId]: connectionId,
+      [STORAGE_KEYS.token]: '',
+      [STORAGE_KEYS.tokenUrl]: wsUrl,
+      [STORAGE_KEYS.serverRevision]: 'existing-revision',
+    });
+    const reload = vi.fn();
+    setup.setOnSetupApproved(reload);
+    fetch.mockResolvedValueOnce(response({ approvalCode, pollSecret }, 201));
+    await setup.startSetup('nas', clearLegacy, 11);
+    const pending = store[pendingKey];
+    const snapshot = { ...store };
+
+    await setup.startSetup('defend', clearLegacy, 27);
+
+    expect(pending).toMatchObject({ instance: 'nas', approvalCode, pollSecret });
+    expect(store).toEqual(snapshot);
+    expect(setup.getSetupPairingInfo()).toEqual({ state: 'pending', instance: 'nas' });
+    expect(clearLegacy).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('migrates a previous pairing whose display label was cleared', async () => {
